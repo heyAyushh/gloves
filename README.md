@@ -1,4 +1,6 @@
 # gloves
+[![CI](https://github.com/heyAyushh/gloves/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/ci-cd.yml)
+[![Coverage](https://codecov.io/gh/heyAyushh/gloves/graph/badge.svg?branch=main)](https://codecov.io/gh/heyAyushh/gloves)
 
 `gloves` is a dual-backend secrets manager for OpenClaw-style multi-agent environments.
 
@@ -66,5 +68,8 @@ cargo publish --dry-run
 - CI runs on:
   - pull requests targeting `main`
   - pushes to `main`
+- Coverage upload runs only for pull requests targeting `main`.
+- Coverage badge source: Codecov (`main` branch).
 - Publish runs only on pushes to `main` after CI succeeds.
 - Set repository secret `CARGO_REGISTRY_TOKEN` for crates.io publish access.
+- Set repository secret `CODECOV_TOKEN` if your Codecov setup requires a token.
