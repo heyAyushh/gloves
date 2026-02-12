@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Gloves provides a dual-backend secrets manager.
 
 /// Agent backend modules.

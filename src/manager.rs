@@ -34,6 +34,20 @@ pub struct SecretsManager {
     pub audit_log: AuditLog,
 }
 
+/// Input options for storing a new secret.
+pub struct SetSecretOptions {
+    /// Secret owner domain.
+    pub owner: Owner,
+    /// Secret lifetime.
+    pub ttl: Duration,
+    /// Creator identity.
+    pub created_by: AgentId,
+    /// Authorized recipients by logical id.
+    pub recipients: HashSet<AgentId>,
+    /// Recipient public keys in age format.
+    pub recipient_keys: Vec<String>,
+}
+
 impl SecretsManager {
     /// Creates a new manager.
     pub fn new(
@@ -56,18 +70,15 @@ impl SecretsManager {
     pub fn set(
         &self,
         secret_id: SecretId,
-        owner: Owner,
         secret_value: SecretValue,
-        ttl: Duration,
-        created_by: AgentId,
-        recipients: HashSet<AgentId>,
-        recipient_keys: &[String],
+        options: SetSecretOptions,
     ) -> Result<SecretId> {
-        if owner != Owner::Agent {
+        if options.owner != Owner::Agent {
             return Err(GlovesError::Forbidden);
         }
 
-        let parsed_recipients = recipient_keys
+        let parsed_recipients = options
+            .recipient_keys
             .iter()
             .map(|value| parse_recipient(value))
             .collect::<Result<Vec<_>>>()?;
@@ -78,11 +89,11 @@ impl SecretsManager {
         let now = Utc::now();
         let meta = SecretMeta {
             id: secret_id.clone(),
-            owner,
+            owner: options.owner,
             created_at: now,
-            expires_at: now + ttl,
-            recipients,
-            created_by: created_by.clone(),
+            expires_at: now + options.ttl,
+            recipients: options.recipients,
+            created_by: options.created_by.clone(),
             last_accessed: None,
             access_count: 0,
             checksum: String::new(),
@@ -90,7 +101,7 @@ impl SecretsManager {
         self.metadata_store.save(&meta)?;
         self.audit_log.log(AuditEvent::SecretCreated {
             secret_id: secret_id.clone(),
-            by: created_by,
+            by: options.created_by,
         })?;
         Ok(secret_id)
     }

@@ -9,7 +9,7 @@ use gloves::{
         backend::{HumanBackend, PassExecutor, PassOutput},
         pending::PendingRequestStore,
     },
-    manager::SecretsManager,
+    manager::{SecretsManager, SetSecretOptions},
     types::{AgentId, Owner, RequestStatus, SecretId, SecretMeta, SecretValue},
 };
 
@@ -48,12 +48,14 @@ fn set_agent_secret() {
     let created = manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"shh".to_vec()),
-            Duration::hours(1),
-            creator,
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator,
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -70,12 +72,14 @@ fn set_human_forbidden() {
 
     let result = manager.set(
         id,
-        Owner::Human,
         SecretValue::new(b"shh".to_vec()),
-        Duration::hours(1),
-        creator,
-        recipients,
-        &[],
+        SetSecretOptions {
+            owner: Owner::Human,
+            ttl: Duration::hours(1),
+            created_by: creator,
+            recipients,
+            recipient_keys: vec![],
+        },
     );
 
     assert!(matches!(result, Err(GlovesError::Forbidden)));
@@ -94,12 +98,14 @@ fn get_routes_agent() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator.clone(),
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -153,12 +159,14 @@ fn get_expired() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::seconds(-1),
-            creator.clone(),
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::seconds(-1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -181,12 +189,14 @@ fn get_unauthorized() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator,
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator,
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -210,12 +220,14 @@ fn get_increments_access() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator.clone(),
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -256,12 +268,14 @@ fn grant_agent_ok() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator.clone(),
-            recipients,
-            &[creator_identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![creator_identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -327,12 +341,14 @@ fn revoke_by_creator() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator.clone(),
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -354,12 +370,14 @@ fn revoke_by_noncreator() {
     manager
         .set(
             id.clone(),
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator,
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator,
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
 
@@ -380,12 +398,14 @@ fn list_all() {
     manager
         .set(
             id,
-            Owner::Agent,
             SecretValue::new(b"agent-secret".to_vec()),
-            Duration::hours(1),
-            creator.clone(),
-            recipients,
-            &[identity.to_public().to_string()],
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::hours(1),
+                created_by: creator.clone(),
+                recipients,
+                recipient_keys: vec![identity.to_public().to_string()],
+            },
         )
         .unwrap();
     manager

@@ -9,13 +9,31 @@ use crate::{error::Result, types::{AgentId, SecretId}};
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AuditEvent {
     /// Secret was accessed.
-    SecretAccessed { secret_id: SecretId, by: AgentId },
+    SecretAccessed {
+        /// Secret that was accessed.
+        secret_id: SecretId,
+        /// Agent that accessed the secret.
+        by: AgentId,
+    },
     /// Secret expired and was reaped.
-    SecretExpired { secret_id: SecretId },
+    SecretExpired {
+        /// Secret that expired.
+        secret_id: SecretId,
+    },
     /// Secret was created.
-    SecretCreated { secret_id: SecretId, by: AgentId },
+    SecretCreated {
+        /// Secret that was created.
+        secret_id: SecretId,
+        /// Agent that created the secret.
+        by: AgentId,
+    },
     /// Secret was revoked.
-    SecretRevoked { secret_id: SecretId, by: AgentId },
+    SecretRevoked {
+        /// Secret that was revoked.
+        secret_id: SecretId,
+        /// Agent that revoked the secret.
+        by: AgentId,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

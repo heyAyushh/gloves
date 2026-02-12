@@ -3,8 +3,7 @@ use assert_cmd::Command;
 #[test]
 fn cli_init() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "init"])
         .assert()
         .success();
@@ -16,8 +15,7 @@ fn cli_init() {
 #[test]
 fn cli_set_generate() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -36,8 +34,7 @@ fn cli_set_generate() {
 #[test]
 fn cli_get_redacted() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "env", "x", "VAR"])
         .assert()
         .success()
@@ -47,8 +44,7 @@ fn cli_get_redacted() {
 #[test]
 fn cli_get_raw_tty_warning() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("GLOVES_FORCE_TTY_WARNING", "1")
         .args(["--root", temp_dir.path().to_str().unwrap(), "get", "x"])
         .assert()
@@ -58,8 +54,7 @@ fn cli_get_raw_tty_warning() {
 #[test]
 fn cli_request() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -78,8 +73,7 @@ fn cli_request() {
 #[test]
 fn cli_list() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "list"])
         .assert()
         .success()
@@ -89,8 +83,7 @@ fn cli_list() {
 #[test]
 fn cli_revoke() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -103,8 +96,7 @@ fn cli_revoke() {
         .assert()
         .success();
 
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "revoke", "x"])
         .assert()
         .success();
@@ -115,8 +107,7 @@ fn cli_revoke() {
 #[test]
 fn cli_status() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -128,8 +119,7 @@ fn cli_status() {
         .assert()
         .success();
 
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "status", "x"])
         .assert()
         .success()
@@ -139,8 +129,7 @@ fn cli_status() {
 #[test]
 fn cli_verify() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::cargo_bin("gloves")
-        .unwrap()
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "verify"])
         .assert()
         .success();

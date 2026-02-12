@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Dual-backend secrets manager for OpenClaw agents"
 license = "MIT"
-repository = "https://example.com/gloves"
+repository = "https://github.com/openclaw/gloves"
 keywords = ["secrets", "security", "agent", "age"]
 categories = ["command-line-utilities", "cryptography"]
 

@@ -8,7 +8,7 @@ use crate::{
     audit::AuditLog,
     error::Result,
     human::{backend::HumanBackend, pending::PendingRequestStore},
-    manager::SecretsManager,
+    manager::{SecretsManager, SetSecretOptions},
     reaper::TtlReaper,
     types::{AgentId, Owner, SecretId, SecretValue},
 };
@@ -104,15 +104,13 @@ pub fn run(cli: Cli) -> Result<i32> {
             } else {
                 SecretValue::new(b"placeholder-secret".to_vec())
             };
-            manager.set(
-                secret_id,
-                Owner::Agent,
-                value,
-                Duration::days(ttl),
-                creator,
+            manager.set(secret_id, value, SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: Duration::days(ttl),
+                created_by: creator,
                 recipients,
-                &[recipient],
-            )?;
+                recipient_keys: vec![recipient],
+            })?;
             println!("ok");
         }
         Command::Get { name } => {
