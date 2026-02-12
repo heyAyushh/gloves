@@ -1,0 +1,37 @@
+[package]
+name = "gloves"
+version = "0.1.0"
+edition = "2021"
+description = "Dual-backend secrets manager for OpenClaw agents"
+license = "MIT"
+repository = "https://example.com/gloves"
+keywords = ["secrets", "security", "agent", "age"]
+categories = ["command-line-utilities", "cryptography"]
+
+[dependencies]
+age = "0.10"
+atty = "0.2"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+hkdf = "0.12"
+rand = "0.8"
+secrecy = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+toml = "0.8"
+tracing = "0.1"
+uuid = { version = "1", features = ["serde", "v4"] }
+zeroize = { version = "1.8", features = ["derive"] }
+
+[dev-dependencies]
+assert_cmd = "2"
+hex = "0.4"
+tempfile = "3"
+trybuild = "1"
+predicates = "3"
+
+[[bin]]
+name = "gloves"
+path = "src/main.rs"
