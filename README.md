@@ -1,6 +1,7 @@
 # gloves
-[![CI](https://github.com/heyAyushh/gloves/actions/workflows/ci-cd.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/ci-cd.yml)
-[![Coverage](https://codecov.io/gh/heyAyushh/gloves/graph/badge.svg?branch=main)](https://codecov.io/gh/heyAyushh/gloves)
+[![CI](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml)
+[![Tests](https://github.com/heyAyushh/gloves/actions/workflows/test.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/test.yml)
+[![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
 
 `gloves` is a dual-backend secrets manager for OpenClaw-style multi-agent environments.
 
@@ -64,12 +65,13 @@ cargo publish --dry-run
 
 ## CI/CD
 
-- Workflow: `.github/workflows/ci-cd.yml`
-- CI runs on:
-  - pull requests targeting `main`
-  - pushes to `main`
-- Coverage upload runs only for pull requests targeting `main`.
-- Coverage badge source: Codecov (`main` branch).
-- Publish runs only on pushes to `main` after CI succeeds.
+- Workflows:
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/test.yml`
+  - `.github/workflows/coverage.yml`
+  - `.github/workflows/publish.yml`
+- CI (lint/docs) runs only on pull requests targeting `main`.
+- Test and coverage gates run only on pull requests targeting `main`.
+- Coverage is computed locally in GitHub Actions via `cargo-llvm-cov` with threshold gates.
+- Publish runs only on pushes to `main`.
 - Set repository secret `CARGO_REGISTRY_TOKEN` for crates.io publish access.
-- Set repository secret `CODECOV_TOKEN` if your Codecov setup requires a token.

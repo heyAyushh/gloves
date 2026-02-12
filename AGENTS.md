@@ -34,9 +34,13 @@ cargo doc --no-deps
 
 ## CI/CD
 
-- GitHub Actions workflow lives at `.github/workflows/ci-cd.yml`.
-- CI runs on pull requests and pushes to `main`.
-- Publish runs only on pushes to `main` after CI passes.
+- GitHub Actions workflows live at:
+  - `.github/workflows/ci.yml`
+  - `.github/workflows/test.yml`
+  - `.github/workflows/coverage.yml`
+  - `.github/workflows/publish.yml`
+- CI and test/coverage workflows run on pull requests targeting `main`.
+- Publish runs only on pushes to `main`.
 - Publishing requires `CARGO_REGISTRY_TOKEN` repository secret.
 
 ## Commit and PR Conventions
