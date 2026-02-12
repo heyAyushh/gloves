@@ -1,10 +1,15 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{Duration, Utc};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use uuid::Uuid;
 
 use crate::{
-    error::Result,
+    error::{GlovesError, Result},
+    fs_secure::{create_private_file_if_missing, write_private_file_atomic},
     types::{AgentId, PendingRequest, RequestStatus, SecretId},
 };
 
@@ -17,9 +22,7 @@ impl PendingRequestStore {
     /// Creates a pending request store at a JSON file path.
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let file_path = path.as_ref().to_path_buf();
-        if !file_path.exists() {
-            fs::write(&file_path, "[]")?;
-        }
+        create_private_file_if_missing(&file_path, b"[]")?;
         Ok(Self { path: file_path })
     }
 
@@ -30,9 +33,10 @@ impl PendingRequestStore {
         requested_by: AgentId,
         reason: String,
         ttl: Duration,
+        signing_key: &SigningKey,
     ) -> Result<PendingRequest> {
         let now = Utc::now();
-        let request = PendingRequest {
+        let mut request = PendingRequest {
             id: Uuid::new_v4(),
             secret_name,
             requested_by,
@@ -40,8 +44,10 @@ impl PendingRequestStore {
             requested_at: now,
             expires_at: now + ttl,
             signature: Vec::new(),
+            verifying_key: signing_key.verifying_key().to_bytes().to_vec(),
             status: RequestStatus::Pending,
         };
+        request.signature = sign_request_payload(&request, signing_key)?;
 
         let mut requests = self.load_all()?;
         requests.push(request.clone());
@@ -57,6 +63,7 @@ impl PendingRequestStore {
         let now = Utc::now();
         let mut changed = false;
         for request in &mut requests {
+            verify_request_signature(request)?;
             if request.status == RequestStatus::Pending && request.expires_at < now {
                 request.status = RequestStatus::Expired;
                 changed = true;
@@ -71,16 +78,89 @@ impl PendingRequestStore {
     /// Marks request denied.
     pub fn deny(&self, request_id: Uuid) -> Result<()> {
         let mut requests = self.load_all()?;
+        let mut found = false;
         for request in &mut requests {
             if request.id == request_id {
                 request.status = RequestStatus::Denied;
+                found = true;
             }
+        }
+        if !found {
+            return Err(GlovesError::NotFound);
         }
         self.save_all(&requests)
     }
 
+    /// Marks request approved.
+    pub fn approve(&self, request_id: Uuid) -> Result<()> {
+        let mut requests = self.load_all()?;
+        let mut found = false;
+        for request in &mut requests {
+            if request.id == request_id {
+                request.status = RequestStatus::Fulfilled;
+                found = true;
+            }
+        }
+        if !found {
+            return Err(GlovesError::NotFound);
+        }
+        self.save_all(&requests)
+    }
+
+    /// Returns true when a matching request is approved and valid.
+    pub fn is_fulfilled(&self, secret_name: &SecretId, requested_by: &AgentId) -> Result<bool> {
+        let requests = self.load_all()?;
+        Ok(requests.into_iter().any(|request| {
+            request.secret_name == *secret_name
+                && request.requested_by == *requested_by
+                && request.status == RequestStatus::Fulfilled
+        }))
+    }
+
     fn save_all(&self, requests: &[PendingRequest]) -> Result<()> {
-        fs::write(&self.path, serde_json::to_vec_pretty(requests)?)?;
+        write_private_file_atomic(&self.path, &serde_json::to_vec_pretty(requests)?)?;
         Ok(())
     }
+}
+
+#[derive(serde::Serialize)]
+struct SignedRequestPayload<'a> {
+    id: Uuid,
+    secret_name: &'a SecretId,
+    requested_by: &'a AgentId,
+    reason: &'a str,
+    requested_at: chrono::DateTime<Utc>,
+    expires_at: chrono::DateTime<Utc>,
+}
+
+fn signing_payload(request: &PendingRequest) -> Result<Vec<u8>> {
+    serde_json::to_vec(&SignedRequestPayload {
+        id: request.id,
+        secret_name: &request.secret_name,
+        requested_by: &request.requested_by,
+        reason: &request.reason,
+        requested_at: request.requested_at,
+        expires_at: request.expires_at,
+    })
+    .map_err(Into::into)
+}
+
+fn sign_request_payload(request: &PendingRequest, signing_key: &SigningKey) -> Result<Vec<u8>> {
+    let payload = signing_payload(request)?;
+    Ok(signing_key.sign(&payload).to_bytes().to_vec())
+}
+
+fn verify_request_signature(request: &PendingRequest) -> Result<()> {
+    let key_bytes: [u8; 32] = request
+        .verifying_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| GlovesError::IntegrityViolation)?;
+    let signature =
+        Signature::from_slice(&request.signature).map_err(|_| GlovesError::IntegrityViolation)?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&key_bytes).map_err(|_| GlovesError::IntegrityViolation)?;
+    verifying_key
+        .verify(&signing_payload(request)?, &signature)
+        .map_err(|_| GlovesError::IntegrityViolation)
 }

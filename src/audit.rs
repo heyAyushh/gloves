@@ -1,8 +1,16 @@
-use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 
-use crate::{error::Result, types::{AgentId, SecretId}};
+use crate::{
+    error::Result,
+    fs_secure::{create_private_file_if_missing, set_permissions, PRIVATE_FILE_MODE},
+    types::{AgentId, SecretId},
+};
 
 /// Audit events emitted by the system.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -52,17 +60,8 @@ impl AuditLog {
     /// Creates a new audit log at `path`.
     pub fn new(path: impl AsRef<Path>) -> Result<Self> {
         let file_path = path.as_ref().to_path_buf();
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        if !file_path.exists() {
-            OpenOptions::new().create(true).append(true).open(&file_path)?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600))?;
-            }
-        }
+        create_private_file_if_missing(&file_path, b"")?;
+        set_permissions(&file_path, PRIVATE_FILE_MODE)?;
         Ok(Self { path: file_path })
     }
 

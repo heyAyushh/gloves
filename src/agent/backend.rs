@@ -1,9 +1,15 @@
-use std::{fs, io::Write, path::{Path, PathBuf}};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use age::{Decryptor, Encryptor};
+use sha2::{Digest, Sha256};
 
 use crate::{
     error::{GlovesError, Result},
+    fs_secure::write_private_file_atomic,
     types::{SecretId, SecretValue},
 };
 
@@ -17,7 +23,9 @@ impl AgentBackend {
     pub fn new(store_dir: impl AsRef<Path>) -> Result<Self> {
         let directory = store_dir.as_ref().to_path_buf();
         fs::create_dir_all(&directory)?;
-        Ok(Self { store_dir: directory })
+        Ok(Self {
+            store_dir: directory,
+        })
     }
 
     /// Encrypts and stores a secret for the provided recipients.
@@ -31,32 +39,8 @@ impl AgentBackend {
         if ciphertext_path.exists() {
             return Err(GlovesError::AlreadyExists);
         }
-        if let Some(parent) = ciphertext_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
-        let recipients = recipients
-            .into_iter()
-            .map(|recipient| Box::new(recipient) as Box<dyn age::Recipient + Send>)
-            .collect();
-        let encryptor = Encryptor::with_recipients(recipients)
-            .ok_or_else(|| GlovesError::Crypto("no recipients provided".to_owned()))?;
-
-        let mut ciphertext = Vec::new();
-        let mut writer = encryptor
-            .wrap_output(&mut ciphertext)
-            .map_err(|error: age::EncryptError| GlovesError::Crypto(error.to_string()))?;
-        secret_value.expose(|value| writer.write_all(value))?;
-        writer
-            .finish()
-            .map_err(|error: std::io::Error| GlovesError::Crypto(error.to_string()))?;
-
-        fs::write(&ciphertext_path, &ciphertext)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&ciphertext_path, fs::Permissions::from_mode(0o600))?;
-        }
+        ensure_parent_dir(&ciphertext_path)?;
+        self.encrypt_to_path(secret_value, recipients, &ciphertext_path)?;
 
         Ok(ciphertext_path)
     }
@@ -73,8 +57,10 @@ impl AgentBackend {
 
         match decryptor {
             Decryptor::Recipients(recipient_decryptor) => {
-                let identity_refs: Vec<&dyn age::Identity> =
-                    identities.iter().map(|identity| identity as &dyn age::Identity).collect();
+                let identity_refs: Vec<&dyn age::Identity> = identities
+                    .iter()
+                    .map(|identity| identity as &dyn age::Identity)
+                    .collect();
                 let mut reader = recipient_decryptor
                     .decrypt(identity_refs.into_iter())
                     .map_err(|error| GlovesError::Crypto(error.to_string()))?;
@@ -95,8 +81,7 @@ impl AgentBackend {
     ) -> Result<()> {
         let plaintext = self.decrypt(secret_id, vec![decrypting_identity])?;
         let path = self.ciphertext_path(secret_id);
-        fs::remove_file(&path)?;
-        self.encrypt(secret_id, &plaintext, recipients)?;
+        self.encrypt_to_path(&plaintext, recipients, &path)?;
         Ok(())
     }
 
@@ -113,6 +98,51 @@ impl AgentBackend {
     pub fn ciphertext_path(&self, secret_id: &SecretId) -> PathBuf {
         self.store_dir.join(format!("{}.age", secret_id.as_str()))
     }
+
+    /// Computes the SHA-256 checksum (hex) of stored ciphertext.
+    pub fn ciphertext_checksum(&self, secret_id: &SecretId) -> Result<String> {
+        let bytes = fs::read(self.ciphertext_path(secret_id))?;
+        Ok(checksum_hex(&bytes))
+    }
+
+    fn encrypt_to_path(
+        &self,
+        secret_value: &SecretValue,
+        recipients: Vec<age::x25519::Recipient>,
+        output_path: &Path,
+    ) -> Result<()> {
+        ensure_parent_dir(output_path)?;
+        let recipients = recipients
+            .into_iter()
+            .map(|recipient| Box::new(recipient) as Box<dyn age::Recipient + Send>)
+            .collect();
+        let encryptor = Encryptor::with_recipients(recipients)
+            .ok_or_else(|| GlovesError::Crypto("no recipients provided".to_owned()))?;
+
+        let mut ciphertext = Vec::new();
+        let mut writer = encryptor
+            .wrap_output(&mut ciphertext)
+            .map_err(|error: age::EncryptError| GlovesError::Crypto(error.to_string()))?;
+        secret_value.expose(|value| writer.write_all(value))?;
+        writer
+            .finish()
+            .map_err(|error: std::io::Error| GlovesError::Crypto(error.to_string()))?;
+
+        write_private_file_atomic(output_path, &ciphertext)?;
+        Ok(())
+    }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    Ok(())
+}
+
+fn checksum_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Parses an age recipient string.

@@ -13,7 +13,11 @@ pub struct TtlReaper;
 
 impl TtlReaper {
     /// Deletes expired agent secrets and logs expiry events.
-    pub fn reap(agent_backend: &AgentBackend, metadata_store: &MetadataStore, audit_log: &AuditLog) -> Result<()> {
+    pub fn reap(
+        agent_backend: &AgentBackend,
+        metadata_store: &MetadataStore,
+        audit_log: &AuditLog,
+    ) -> Result<()> {
         for meta in metadata_store.list()? {
             if meta.expires_at <= Utc::now() {
                 let ciphertext_path = agent_backend.ciphertext_path(&meta.id);

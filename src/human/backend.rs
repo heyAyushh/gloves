@@ -23,11 +23,35 @@ pub trait PassExecutor: Send + Sync {
 }
 
 /// Real executor that calls the system `pass` binary.
-pub struct SystemPassExecutor;
+pub struct SystemPassExecutor {
+    binary: String,
+}
+
+impl SystemPassExecutor {
+    /// Creates a system executor using the `pass` binary.
+    pub fn new() -> Self {
+        Self {
+            binary: "pass".to_owned(),
+        }
+    }
+
+    /// Creates a system executor with a custom binary path.
+    pub fn with_binary(binary: impl Into<String>) -> Self {
+        Self {
+            binary: binary.into(),
+        }
+    }
+}
+
+impl Default for SystemPassExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PassExecutor for SystemPassExecutor {
     fn exec(&self, args: &[&str]) -> Result<PassOutput> {
-        let output = Command::new("pass").args(args).output()?;
+        let output = Command::new(&self.binary).args(args).output()?;
         Ok(PassOutput {
             status_code: output.status.code().unwrap_or(1),
             stdout: String::from_utf8(output.stdout)?,
@@ -45,7 +69,7 @@ impl HumanBackend {
     /// Creates backend with default system executor.
     pub fn new() -> Self {
         Self {
-            executor: Box::new(SystemPassExecutor),
+            executor: Box::new(SystemPassExecutor::new()),
         }
     }
 

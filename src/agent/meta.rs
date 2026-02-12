@@ -1,7 +1,11 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use crate::{
     error::Result,
+    fs_secure::write_private_file_atomic,
     types::{SecretId, SecretMeta},
 };
 
@@ -19,13 +23,10 @@ impl MetadataStore {
     }
 
     /// Saves metadata for one secret.
-pub fn save(&self, meta: &SecretMeta) -> Result<()> {
+    pub fn save(&self, meta: &SecretMeta) -> Result<()> {
         let bytes = serde_json::to_vec_pretty(meta)?;
         let path = self.path_for(&meta.id);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, bytes)?;
+        write_private_file_atomic(&path, &bytes)?;
         Ok(())
     }
 

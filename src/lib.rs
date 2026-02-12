@@ -9,10 +9,14 @@ pub mod audit;
 pub mod cli;
 /// Error types.
 pub mod error;
+/// Secure filesystem helpers.
+pub mod fs_secure;
 /// Human backend modules.
 pub mod human;
 /// Unified secrets manager.
 pub mod manager;
+/// Shared runtime path layout.
+pub mod paths;
 /// TTL reaper.
 pub mod reaper;
 /// Agent registry.

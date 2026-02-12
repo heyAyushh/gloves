@@ -1,4 +1,8 @@
-use gloves::{agent::keys::{derive_agent_key, load_or_create_salt}, types::AgentId};
+use gloves::{
+    agent::keys::{derive_agent_key, load_or_create_salt},
+    types::AgentId,
+};
+use std::os::unix::fs::PermissionsExt;
 
 #[test]
 fn derive_deterministic() {
@@ -93,4 +97,21 @@ fn salt_init_idempotent() {
     let first = load_or_create_salt(&salt_path).unwrap();
     let second = load_or_create_salt(&salt_path).unwrap();
     assert_eq!(first, second);
+}
+
+#[test]
+fn salt_invalid_length_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let salt_path = temp_dir.path().join("derived.salt");
+    std::fs::write(&salt_path, [1_u8; 16]).unwrap();
+    assert!(load_or_create_salt(&salt_path).is_err());
+}
+
+#[test]
+fn salt_permissions_0600() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let salt_path = temp_dir.path().join("derived.salt");
+    load_or_create_salt(&salt_path).unwrap();
+    let mode = std::fs::metadata(&salt_path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
 }

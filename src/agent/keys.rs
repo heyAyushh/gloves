@@ -4,7 +4,7 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
 
-use crate::{error::Result, types::AgentId};
+use crate::{error::Result, fs_secure::write_private_file_atomic, types::AgentId};
 
 const DERIVED_KEY_SIZE: usize = 32;
 
@@ -12,14 +12,19 @@ const DERIVED_KEY_SIZE: usize = 32;
 pub fn load_or_create_salt(path: &Path) -> Result<[u8; DERIVED_KEY_SIZE]> {
     if path.exists() {
         let bytes = fs::read(path)?;
+        if bytes.len() != DERIVED_KEY_SIZE {
+            return Err(crate::error::GlovesError::Crypto(
+                "invalid salt length".to_owned(),
+            ));
+        }
         let mut salt = [0_u8; DERIVED_KEY_SIZE];
-        salt.copy_from_slice(&bytes[..DERIVED_KEY_SIZE]);
+        salt.copy_from_slice(&bytes);
         return Ok(salt);
     }
 
     let mut salt = [0_u8; DERIVED_KEY_SIZE];
     rand::thread_rng().fill_bytes(&mut salt);
-    fs::write(path, salt)?;
+    write_private_file_atomic(path, &salt)?;
     Ok(salt)
 }
 

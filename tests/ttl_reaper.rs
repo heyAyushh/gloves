@@ -143,3 +143,10 @@ fn secure_delete_zeroes() {
     secure_delete_file(&path).unwrap();
     assert!(!path.exists());
 }
+
+#[test]
+fn secure_delete_missing_file_is_ok() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("missing.bin");
+    secure_delete_file(&path).unwrap();
+}

@@ -1,9 +1,15 @@
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
 use crate::{
     error::{GlovesError, Result},
+    fs_secure::{set_permissions, write_private_file_atomic, PRIVATE_FILE_MODE},
     types::AgentId,
 };
 
@@ -35,11 +41,13 @@ impl AgentRegistry {
     /// Loads or initializes a registry file.
     pub fn load_or_create(path: impl AsRef<Path>, hmac_secret: &[u8]) -> Result<Self> {
         let file_path = path.as_ref().to_path_buf();
-        let data = if file_path.exists() {
-            serde_json::from_slice(&fs::read(&file_path)?)?
-        } else {
-            RegistryData::new()
-        };
+        if !file_path.exists() {
+            ensure_parent_dir(&file_path)?;
+            let initial = RegistryData::new();
+            write_private_file_atomic(&file_path, &serde_json::to_vec_pretty(&initial)?)?;
+        }
+        let data = serde_json::from_slice(&fs::read(&file_path)?)?;
+        set_permissions(&file_path, PRIVATE_FILE_MODE)?;
         Ok(Self {
             path: file_path,
             hmac_secret: hmac_secret.to_vec(),
@@ -66,7 +74,9 @@ impl AgentRegistry {
             self.data.vouchers.insert(agent_id.clone(), voucher_id);
         } else {
             // bootstrap: self-vouch for first agent
-            self.data.vouchers.insert(agent_id.clone(), agent_id.clone());
+            self.data
+                .vouchers
+                .insert(agent_id.clone(), agent_id.clone());
         }
 
         self.data.entries.insert(agent_id, recipient_public_key);
@@ -85,19 +95,31 @@ impl AgentRegistry {
 
     fn persist(&mut self) -> Result<()> {
         self.data.integrity_tag = self.integrity_tag();
-        fs::write(&self.path, serde_json::to_vec_pretty(&self.data)?)?;
+        write_private_file_atomic(&self.path, &serde_json::to_vec_pretty(&self.data)?)?;
         Ok(())
     }
 
     fn integrity_tag(&self) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(&self.hmac_secret);
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(&self.hmac_secret)
+            .expect("HMAC-SHA256 accepts keys of any size");
         let mut entries: Vec<_> = self.data.entries.iter().collect();
         entries.sort_by_key(|(agent_id, _)| agent_id.as_str().to_owned());
         for (agent_id, recipient) in entries {
-            hasher.update(agent_id.as_str().as_bytes());
-            hasher.update(recipient.as_bytes());
+            mac.update(agent_id.as_str().as_bytes());
+            mac.update(recipient.as_bytes());
         }
-        format!("{:x}", hasher.finalize())
+        let bytes = mac.finalize().into_bytes();
+        bytes
+            .iter()
+            .map(|value| format!("{value:02x}"))
+            .collect::<String>()
     }
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    Ok(())
 }

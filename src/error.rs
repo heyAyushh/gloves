@@ -34,6 +34,12 @@ pub enum GlovesError {
     /// Secret has expired.
     #[error("expired")]
     Expired,
+    /// Secret ciphertext integrity check failed.
+    #[error("integrity check failed")]
+    IntegrityViolation,
+    /// Input was syntactically valid but semantically unsupported.
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     /// GPG access denied by pass.
     #[error("gpg denied")]
     GpgDenied,

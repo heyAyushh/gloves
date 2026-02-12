@@ -1,9 +1,14 @@
 use std::collections::HashSet;
 
 use chrono::{Duration, Utc};
+use ed25519_dalek::SigningKey;
+use uuid::Uuid;
 
 use crate::{
-    agent::{backend::{parse_recipient, AgentBackend}, meta::MetadataStore},
+    agent::{
+        backend::{parse_recipient, AgentBackend},
+        meta::MetadataStore,
+    },
     audit::{AuditEvent, AuditLog},
     error::{GlovesError, Result},
     human::{backend::HumanBackend, pending::PendingRequestStore},
@@ -85,6 +90,7 @@ impl SecretsManager {
 
         self.agent_backend
             .encrypt(&secret_id, &secret_value, parsed_recipients)?;
+        let checksum = self.agent_backend.ciphertext_checksum(&secret_id)?;
 
         let now = Utc::now();
         let meta = SecretMeta {
@@ -96,13 +102,20 @@ impl SecretsManager {
             created_by: options.created_by.clone(),
             last_accessed: None,
             access_count: 0,
-            checksum: String::new(),
+            checksum,
         };
-        self.metadata_store.save(&meta)?;
-        self.audit_log.log(AuditEvent::SecretCreated {
+        if let Err(error) = self.metadata_store.save(&meta) {
+            let _ = self.agent_backend.delete(&secret_id);
+            return Err(error);
+        }
+        if let Err(error) = self.audit_log.log(AuditEvent::SecretCreated {
             secret_id: secret_id.clone(),
             by: options.created_by,
-        })?;
+        }) {
+            let _ = self.metadata_store.delete(&secret_id);
+            let _ = self.agent_backend.delete(&secret_id);
+            return Err(error);
+        }
         Ok(secret_id)
     }
 
@@ -124,11 +137,22 @@ impl SecretsManager {
                 if !meta.recipients.contains(caller) {
                     return Err(GlovesError::Unauthorized);
                 }
+                if !meta.checksum.is_empty() {
+                    let actual_checksum = self.agent_backend.ciphertext_checksum(secret_id)?;
+                    if actual_checksum != meta.checksum {
+                        return Err(GlovesError::IntegrityViolation);
+                    }
+                }
 
                 let identity = caller_identity.ok_or(GlovesError::Unauthorized)?;
                 self.agent_backend.decrypt(secret_id, vec![identity])?
             }
-            Owner::Human => self.human_backend.get(secret_id.as_str())?,
+            Owner::Human => {
+                if !self.pending_store.is_fulfilled(secret_id, caller)? {
+                    return Err(GlovesError::Forbidden);
+                }
+                self.human_backend.get(secret_id.as_str())?
+            }
         };
 
         meta.last_accessed = Some(Utc::now());
@@ -148,8 +172,10 @@ impl SecretsManager {
         requested_by: AgentId,
         reason: String,
         ttl: Duration,
+        signing_key: &SigningKey,
     ) -> Result<PendingRequest> {
-        self.pending_store.create(secret_id, requested_by, reason, ttl)
+        self.pending_store
+            .create(secret_id, requested_by, reason, ttl, signing_key)
     }
 
     /// Grants access to an agent secret by adding a recipient.
@@ -176,6 +202,7 @@ impl SecretsManager {
             .collect::<Result<Vec<_>>>()?;
         self.agent_backend
             .grant(secret_id, granter_identity, parsed_recipients)?;
+        meta.checksum = self.agent_backend.ciphertext_checksum(secret_id)?;
         self.metadata_store.save(&meta)
     }
 
@@ -209,5 +236,15 @@ impl SecretsManager {
                 .map(ListItem::Pending),
         );
         Ok(entries)
+    }
+
+    /// Approves a pending human request.
+    pub fn approve_request(&self, request_id: Uuid) -> Result<()> {
+        self.pending_store.approve(request_id)
+    }
+
+    /// Denies a pending human request.
+    pub fn deny_request(&self, request_id: Uuid) -> Result<()> {
+        self.pending_store.deny(request_id)
     }
 }

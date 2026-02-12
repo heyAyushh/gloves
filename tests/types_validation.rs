@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 
 use chrono::{Duration, Utc};
-use gloves::types::{AgentId, Owner, PendingRequest, RequestStatus, SecretId, SecretMeta, SecretValue};
 use gloves::error::ValidationError;
+use gloves::types::{
+    AgentId, Owner, PendingRequest, RequestStatus, SecretId, SecretMeta, SecretValue,
+};
 
 #[test]
 fn secret_id_valid() {
@@ -44,6 +46,22 @@ fn secret_id_special_chars() {
 }
 
 #[test]
+fn secret_id_display() {
+    let id = SecretId::new("abc/def").unwrap();
+    assert_eq!(id.to_string(), "abc/def");
+}
+
+#[test]
+fn agent_id_validation_and_display() {
+    assert!(AgentId::new("agent_01").is_ok());
+    assert!(matches!(
+        AgentId::new("bad id"),
+        Err(ValidationError::InvalidCharacter)
+    ));
+    assert_eq!(AgentId::new("agent_a").unwrap().to_string(), "agent_a");
+}
+
+#[test]
 fn owner_serde() {
     let human = serde_json::to_string(&Owner::Human).unwrap();
     let agent = serde_json::to_string(&Owner::Agent).unwrap();
@@ -51,6 +69,21 @@ fn owner_serde() {
     assert_eq!(agent, "\"agent\"");
     assert_eq!(serde_json::from_str::<Owner>(&human).unwrap(), Owner::Human);
     assert_eq!(serde_json::from_str::<Owner>(&agent).unwrap(), Owner::Agent);
+}
+
+#[test]
+fn request_status_serde_all_variants() {
+    let values = [
+        RequestStatus::Pending,
+        RequestStatus::Fulfilled,
+        RequestStatus::Denied,
+        RequestStatus::Expired,
+    ];
+    for value in values {
+        let json = serde_json::to_string(&value).unwrap();
+        let roundtrip: RequestStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip, value);
+    }
 }
 
 #[test]
@@ -102,6 +135,7 @@ fn pending_request_roundtrip() {
         requested_at: Utc::now(),
         expires_at: Utc::now() + Duration::hours(1),
         signature: vec![1, 2, 3],
+        verifying_key: vec![4; 32],
         status: RequestStatus::Pending,
     };
 

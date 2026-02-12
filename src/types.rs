@@ -152,6 +152,8 @@ pub struct PendingRequest {
     pub expires_at: DateTime<Utc>,
     /// Request signature payload.
     pub signature: Vec<u8>,
+    /// Ed25519 verifying key bytes for signature validation.
+    pub verifying_key: Vec<u8>,
     /// Request lifecycle status.
     pub status: RequestStatus,
 }
