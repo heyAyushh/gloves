@@ -59,3 +59,12 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --no-deps
 cargo publish --dry-run
 ```
+
+## CI/CD
+
+- Workflow: `.github/workflows/ci-cd.yml`
+- CI runs on:
+  - pull requests targeting `main`
+  - pushes to `main`
+- Publish runs only on pushes to `main` after CI succeeds.
+- Set repository secret `CARGO_REGISTRY_TOKEN` for crates.io publish access.
