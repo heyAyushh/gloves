@@ -9,9 +9,10 @@ use std::path::PathBuf;
 use chrono::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::{error::Result, types::Owner};
+use crate::{config::VaultMode, error::Result, types::Owner};
 
 const DEFAULT_AGENT_ID: &str = "default-agent";
+const DEFAULT_ROOT_DIR: &str = ".openclaw/secrets";
 const DEFAULT_TTL_DAYS: i64 = 1;
 const DEFAULT_TTL_SECONDS: i64 = 86_400;
 const DEFAULT_DAEMON_REQUEST_LIMIT_BYTES: usize = 16 * 1024;
@@ -25,9 +26,18 @@ const DEFAULT_VAULT_SECRET_LENGTH_BYTES: usize = 64;
 #[derive(Debug, Parser)]
 #[command(name = "gloves")]
 pub struct Cli {
-    /// Root storage directory.
-    #[arg(long, default_value = ".openclaw/secrets")]
-    pub root: PathBuf,
+    /// Root storage directory override.
+    #[arg(long)]
+    pub root: Option<PathBuf>,
+    /// Config file override path.
+    #[arg(long)]
+    pub config: Option<PathBuf>,
+    /// Disable config loading and discovery.
+    #[arg(long)]
+    pub no_config: bool,
+    /// Vault runtime mode override.
+    #[arg(long, value_enum)]
+    pub vault_mode: Option<VaultModeArg>,
     /// Subcommand.
     #[command(subcommand)]
     pub command: Command,
@@ -52,8 +62,8 @@ pub enum Command {
         #[arg(long)]
         stdin: bool,
         /// TTL in days.
-        #[arg(long, default_value_t = DEFAULT_TTL_DAYS)]
-        ttl: i64,
+        #[arg(long)]
+        ttl: Option<i64>,
     },
     /// Gets a secret value.
     Get {
@@ -102,8 +112,8 @@ pub enum Command {
     /// Runs local sidecar daemon.
     Daemon {
         /// TCP bind address for daemon mode.
-        #[arg(long, default_value = DEFAULT_DAEMON_BIND)]
-        bind: String,
+        #[arg(long)]
+        bind: Option<String>,
         /// Perform strict startup checks and exit.
         #[arg(long)]
         check: bool,
@@ -116,6 +126,18 @@ pub enum Command {
         /// Vault operation.
         #[command(subcommand)]
         command: VaultCommand,
+    },
+    /// Validates loaded config state.
+    Config {
+        /// Config operation.
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Shows access visibility for configured private paths.
+    Access {
+        /// Access operation.
+        #[command(subcommand)]
+        command: AccessCommand,
     },
 }
 
@@ -137,6 +159,27 @@ impl From<VaultOwnerArg> for Owner {
     }
 }
 
+/// Vault runtime mode argument.
+#[derive(Debug, Clone, ValueEnum)]
+pub enum VaultModeArg {
+    /// Opportunistic vault mode.
+    Auto,
+    /// Vault dependencies are mandatory.
+    Required,
+    /// Vault commands are blocked.
+    Disabled,
+}
+
+impl From<VaultModeArg> for VaultMode {
+    fn from(value: VaultModeArg) -> Self {
+        match value {
+            VaultModeArg::Auto => VaultMode::Auto,
+            VaultModeArg::Required => VaultMode::Required,
+            VaultModeArg::Disabled => VaultMode::Disabled,
+        }
+    }
+}
+
 /// Supported vault subcommands.
 #[derive(Debug, Subcommand)]
 pub enum VaultCommand {
@@ -153,22 +196,22 @@ pub enum VaultCommand {
         /// Vault name.
         name: String,
         /// Mount session TTL.
-        #[arg(long, default_value = DEFAULT_VAULT_MOUNT_TTL)]
-        ttl: String,
+        #[arg(long)]
+        ttl: Option<String>,
         /// Optional mountpoint override.
         #[arg(long)]
         mountpoint: Option<PathBuf>,
         /// Agent identity for this mount session.
-        #[arg(long, default_value = DEFAULT_AGENT_ID)]
-        agent: String,
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Unmounts a vault.
     Unmount {
         /// Vault name.
         name: String,
         /// Agent identity associated with unmount audit event.
-        #[arg(long, default_value = DEFAULT_AGENT_ID)]
-        agent: String,
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Shows vault mount status.
     Status,
@@ -182,14 +225,35 @@ pub enum VaultCommand {
         #[arg(long)]
         file: String,
         /// Agent that is requesting the file.
-        #[arg(long, default_value = DEFAULT_AGENT_ID)]
-        requester: String,
+        #[arg(long)]
+        requester: Option<String>,
         /// Trusted agent expected to have mount access.
         #[arg(long)]
         trusted_agent: String,
         /// Optional reason shown in the prompt.
         #[arg(long)]
         reason: Option<String>,
+    },
+}
+
+/// Supported config subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Validates the effective config and runtime policy checks.
+    Validate,
+}
+
+/// Supported access subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AccessCommand {
+    /// Shows one agent's configured private path visibility.
+    Paths {
+        /// Agent identifier.
+        #[arg(long)]
+        agent: String,
+        /// Print JSON output.
+        #[arg(long)]
+        json: bool,
     },
 }
 

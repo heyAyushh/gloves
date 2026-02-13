@@ -40,6 +40,19 @@ fn reserve_loopback_port() -> u16 {
     port
 }
 
+fn write_config(path: &Path, body: &str) {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    fs::write(path, body).unwrap();
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
 #[cfg(unix)]
 fn write_executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
@@ -113,6 +126,288 @@ fn cli_init() {
 
     assert!(temp_dir.path().join("store").exists());
     assert!(temp_dir.path().join("meta").exists());
+}
+
+#[test]
+fn cli_bootstrap_uses_discovered_gloves_toml() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    let nested = workspace.join("nested/project");
+    fs::create_dir_all(&nested).unwrap();
+
+    let config_path = workspace.join(".gloves.toml");
+    write_config(
+        &config_path,
+        r#"
+version = 1
+
+[paths]
+root = "./runtime-from-config"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .current_dir(&nested)
+        .args(["init"])
+        .assert()
+        .success();
+
+    assert!(workspace.join("runtime-from-config/store").exists());
+}
+
+#[test]
+fn cli_bootstrap_uses_explicit_config_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    let config_dir = temp_dir.path().join("configs");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let config_path = config_dir.join("custom.gloves.toml");
+    write_config(
+        &config_path,
+        r#"
+version = 1
+
+[paths]
+root = "./explicit-root"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .current_dir(&workspace)
+        .args(["--config", config_path.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+
+    assert!(config_dir.join("explicit-root/store").exists());
+}
+
+#[test]
+fn cli_bootstrap_no_config_keeps_existing_defaults() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    write_config(
+        &workspace.join(".gloves.toml"),
+        r#"
+version = 1
+
+[paths]
+root = "./should-not-be-used"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .current_dir(&workspace)
+        .args(["--no-config", "init"])
+        .assert()
+        .success();
+
+    assert!(workspace.join(".openclaw/secrets/store").exists());
+    assert!(!workspace.join("should-not-be-used").exists());
+}
+
+#[test]
+fn cli_config_validate_success() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(&config_path, "version = 1\n");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "validate",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok"));
+}
+
+#[test]
+fn cli_config_validate_required_fails_without_binaries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+    write_config(&config_path, "version = 1\n");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--vault-mode",
+            "required",
+            "config",
+            "validate",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required binaries"));
+}
+
+#[test]
+fn cli_config_validate_failure_invalid_alias() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        r#"
+version = 1
+
+[private_paths]
+"bad alias" = "./private"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "validate",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn cli_access_paths_without_config_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .current_dir(temp_dir.path())
+        .args(["access", "paths", "--agent", "default-agent"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no config loaded"));
+}
+
+#[test]
+fn cli_access_paths_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        r#"
+version = 1
+
+[private_paths]
+runtime_root = "./runtime"
+
+[agents.default-agent]
+paths = ["runtime_root"]
+operations = ["read", "list"]
+"#,
+    );
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "access",
+            "paths",
+            "--agent",
+            "default-agent",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
+
+    assert_eq!(payload["agent"], "default-agent");
+    assert_eq!(payload["paths"][0]["alias"], "runtime_root");
+}
+
+#[test]
+fn cli_access_paths_unknown_agent_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        r#"
+version = 1
+
+[private_paths]
+runtime_root = "./runtime"
+
+[agents.default-agent]
+paths = ["runtime_root"]
+operations = ["read"]
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "access",
+            "paths",
+            "--agent",
+            "agent-b",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn cli_vault_mode_disabled_blocks_vault_commands() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--vault-mode",
+            "disabled",
+            "vault",
+            "list",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("disabled"));
+}
+
+#[test]
+fn cli_vault_mode_required_fails_without_binaries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--vault-mode",
+            "required",
+            "vault",
+            "list",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("missing required binaries"));
+}
+
+#[test]
+fn cli_vault_mode_auto_keeps_non_vault_commands_available() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--vault-mode",
+            "auto",
+            "list",
+        ])
+        .assert()
+        .success();
 }
 
 #[test]

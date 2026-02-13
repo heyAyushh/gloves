@@ -1,6 +1,6 @@
 # Gloves CLI Bootstrap Config Spec (`.gloves.toml`)
 
-Status: In Progress (parser implemented, CLI wiring pending)
+Status: Implemented (`v0.2.x`)
 Target release: `v0.2.x`
 Owner: `gloves` CLI/runtime
 
@@ -14,12 +14,15 @@ Implemented now:
 - Unix permission checks for config files, including symlink rejection
 - Agent path visibility resolver API (`GlovesConfig::agent_paths`)
 - Integration test suite: `tests/config_parser.rs`
+- CLI flags: `--config`, `--no-config`, `--vault-mode`
+- CLI commands: `gloves config validate`, `gloves access paths`
+- Runtime wiring for effective root/defaults (`set`, `request`, `daemon`, `vault`)
+- Vault mode enforcement (`auto` / `required` / `disabled`) with dependency checks
+- CLI integration coverage for bootstrap/config/access/vault mode paths
 
 Pending from this spec:
 
-- CLI flags: `--config`, `--no-config`
-- CLI commands: `gloves config validate`, `gloves access paths`
-- Runtime wiring so effective config drives CLI defaults/paths
+- none
 
 ## 1. Problem
 
@@ -36,6 +39,7 @@ We need a repository-local config model like `openclaw.json`:
 
 - Add `.gloves.toml` as the default bootstrap config file.
 - Allow explicit config file path via CLI.
+- Add explicit vault runtime mode (`auto` / `required` / `disabled`) for better operator control.
 - Keep secure permissions as a hard invariant.
 - Provide an operator-visible command to show agent access to private paths.
 - Keep current behavior backward compatible when no config file exists.
@@ -55,6 +59,7 @@ Add global options to `gloves`:
 
 - `--config <PATH>`: absolute or relative path to config TOML
 - `--no-config`: disable config discovery and use current defaults only
+- `--vault-mode <auto|required|disabled>`: one-shot override for vault runtime behavior
 
 ### 4.2 Environment variable
 
@@ -106,6 +111,13 @@ bind = "127.0.0.1:7788"
 io_timeout_seconds = 5
 request_limit_bytes = 16384
 
+[vault]
+# Recommended default: "auto"
+# - auto: vault commands work when binaries exist; otherwise return actionable errors.
+# - required: config validation/runtime fails when vault binaries are missing.
+# - disabled: vault commands are blocked intentionally.
+mode = "auto"
+
 [defaults]
 agent_id = "default-agent"
 secret_ttl_days = 1
@@ -154,10 +166,25 @@ On non-Unix:
 - Operations are constrained to enum: `read`, `write`, `list`, `mount`.
 - Access output is visibility metadata only; it does not bypass existing secret/vault authorization.
 
+### 7.4 Vault mode and dependency checks
+
+- `vault.mode` must be one of `auto`, `required`, `disabled`.
+- Runtime dependencies for vault mode checks: `gocryptfs`, `fusermount`, `mountpoint`.
+- `auto`:
+  - non-vault commands run normally regardless of vault dependencies.
+  - vault commands attempt execution and fail with actionable missing-binary errors when deps are absent.
+- `required`:
+  - `gloves config validate` fails if required vault binaries are missing.
+  - runtime bootstrap for vault-enabled flows must fail fast when binaries are missing.
+- `disabled`:
+  - vault commands are blocked with explicit error.
+  - non-vault commands remain available.
+
 ## 8. Effective Config and Overrides
 
 - CLI flags continue to override config values for that invocation.
 - `--root` overrides `[paths].root`.
+- `--vault-mode` overrides `[vault].mode`.
 - Command-specific options (for example daemon bind, vault ttl, agent id) override config defaults.
 - Effective value resolution should be deterministic and auditable.
 
@@ -193,6 +220,7 @@ Human-readable table:
 - No `.gloves.toml`: current behavior remains unchanged.
 - Existing scripts that pass `--root` continue working.
 - Current default constants remain fallback values.
+- `vault.mode = "auto"` preserves existing operational behavior.
 
 ## 11. Security Considerations
 
@@ -205,10 +233,11 @@ Human-readable table:
 
 1. Done: add config types and parser module (`src/config.rs`).
 2. Done: add bootstrap resolver for discovery + precedence.
-3. Pending: integrate effective config into CLI runtime initialization.
-4. Pending: add `config validate` and `access paths` commands.
-5. Done: add permission/path validation and error mapping.
-6. In Progress: update README and command reference.
+3. Done: integrate effective config into CLI runtime initialization.
+4. Done: add `config validate` and `access paths` commands.
+5. Done: enforce `vault.mode` semantics and dependency checks in CLI runtime.
+6. Done: add permission/path validation and error mapping.
+7. Done: update README and command reference.
 
 ## 13. TDD Plan
 
@@ -225,6 +254,8 @@ Add tests before implementation.
 - `config_validate_rejects_invalid_operation`
 - `config_resolve_relative_paths_against_file_dir`
 - `config_resolve_home_expansion`
+- `config_vault_mode_defaults_to_auto`
+- `config_validate_rejects_invalid_vault_mode`
 
 ### Unix permission tests
 
@@ -240,6 +271,9 @@ Add tests before implementation.
 - `cli_config_validate_failure_invalid_alias`
 - `cli_access_paths_json`
 - `cli_access_paths_unknown_agent_fails`
+- `cli_vault_mode_disabled_blocks_vault_commands`
+- `cli_vault_mode_required_fails_without_binaries`
+- `cli_vault_mode_auto_keeps_non_vault_commands_available`
 
 ## 14. Open Questions
 

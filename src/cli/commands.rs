@@ -1,23 +1,48 @@
 use std::collections::HashSet;
+use std::env::VarError;
+use std::path::Path;
 
 use chrono::Duration;
 
 use crate::{
-    error::Result,
+    config::{resolve_config_path, GlovesConfig, PathOperation, VaultMode},
+    error::{GlovesError, Result},
+    paths::SecretsPaths,
     reaper::TtlReaper,
     types::{AgentId, Owner, SecretId, SecretValue},
     vault::gocryptfs::GocryptfsDriver,
 };
 
 use super::{
-    daemon, runtime, secret_input, vault_cmd, Cli, Command, DEFAULT_AGENT_ID, DEFAULT_TTL_DAYS,
+    daemon, runtime, secret_input,
+    vault_cmd::{self, VaultCommandDefaults},
+    AccessCommand, Cli, Command, ConfigCommand, DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND,
+    DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR,
+    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL,
 };
 
+const REQUIRED_VAULT_BINARIES: [&str; 3] = ["gocryptfs", "fusermount", "mountpoint"];
+
+#[derive(Debug, Clone)]
+struct EffectiveCliState {
+    paths: SecretsPaths,
+    loaded_config: Option<GlovesConfig>,
+    default_agent_id: AgentId,
+    default_secret_ttl_days: i64,
+    default_vault_mount_ttl: String,
+    daemon_bind: String,
+    daemon_io_timeout_seconds: u64,
+    daemon_request_limit_bytes: usize,
+    vault_mode: VaultMode,
+}
+
 pub(crate) fn run(cli: Cli) -> Result<i32> {
-    let paths = crate::paths::SecretsPaths::new(&cli.root);
+    let state = load_effective_state(&cli)?;
+    enforce_vault_mode(&state.vault_mode, &cli.command)?;
+
     match cli.command {
         Command::Init => {
-            runtime::init_layout(&paths)?;
+            runtime::init_layout(&state.paths)?;
             println!("initialized");
         }
         Command::Set {
@@ -27,14 +52,15 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             stdin,
             ttl,
         } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
-            let creator = AgentId::new(DEFAULT_AGENT_ID)?;
-            let identity = runtime::load_or_create_default_identity(&paths)?;
+            let creator = state.default_agent_id.clone();
+            let identity = runtime::load_or_create_default_identity(&state.paths)?;
             let recipient = identity.to_public().to_string();
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
-            let ttl_days = runtime::validate_ttl_days(ttl, "--ttl")?;
+            let ttl_days =
+                runtime::validate_ttl_days(ttl.unwrap_or(state.default_secret_ttl_days), "--ttl")?;
             let value =
                 SecretValue::new(secret_input::resolve_secret_input(generate, value, stdin)?);
             manager.set(
@@ -57,10 +83,10 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             if atty::is(atty::Stream::Stdout) || force_tty_warning {
                 eprintln!("warning: raw secret output on tty");
             }
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
-            let caller = AgentId::new(DEFAULT_AGENT_ID)?;
-            let identity = runtime::load_or_create_default_identity(&paths)?;
+            let caller = state.default_agent_id.clone();
+            let identity = runtime::load_or_create_default_identity(&state.paths)?;
             let value = manager.get(&secret_id, &caller, Some(identity));
             match value {
                 Ok(secret) => secret.expose(|bytes| println!("{}", String::from_utf8_lossy(bytes))),
@@ -75,44 +101,44 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             println!("export {var}=<REDACTED>");
         }
         Command::Request { name, reason } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
-            let requester = AgentId::new(DEFAULT_AGENT_ID)?;
-            let signing_key = runtime::load_or_create_default_signing_key(&paths)?;
+            let requester = state.default_agent_id.clone();
+            let signing_key = runtime::load_or_create_default_signing_key(&state.paths)?;
             manager.request(
                 secret_id,
                 requester,
                 reason,
-                Duration::days(DEFAULT_TTL_DAYS),
+                Duration::days(state.default_secret_ttl_days),
                 &signing_key,
             )?;
             println!("pending");
         }
         Command::Approve { request_id } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
             manager.approve_request(request_id)?;
             println!("approved");
         }
         Command::Deny { request_id } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
             manager.deny_request(request_id)?;
             println!("denied");
         }
         Command::List => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             println!("{}", serde_json::to_string_pretty(&manager.list_all()?)?);
         }
         Command::Revoke { name } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
-            let caller = AgentId::new(DEFAULT_AGENT_ID)?;
+            let caller = state.default_agent_id.clone();
             manager.revoke(&secret_id, &caller)?;
             println!("revoked");
         }
         Command::Status { name } => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             let pending = manager.pending_store.load_all()?;
             let status = pending
                 .into_iter()
@@ -122,13 +148,17 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             println!("{}", serde_json::to_string(&status)?);
         }
         Command::Verify => {
-            let manager = runtime::manager_for_paths(&paths)?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
             TtlReaper::reap(
                 &manager.agent_backend,
                 &manager.metadata_store,
                 &manager.audit_log,
             )?;
-            TtlReaper::reap_vault_sessions(&GocryptfsDriver::new(), &paths, &manager.audit_log)?;
+            TtlReaper::reap_vault_sessions(
+                &GocryptfsDriver::new(),
+                &state.paths,
+                &manager.audit_log,
+            )?;
             println!("ok");
         }
         Command::Daemon {
@@ -136,11 +166,225 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             check,
             max_requests,
         } => {
-            daemon::run_daemon(&paths, &bind, check, max_requests)?;
+            let bind = bind.unwrap_or_else(|| state.daemon_bind.clone());
+            daemon::run_daemon(
+                &state.paths,
+                &bind,
+                daemon::DaemonRuntimeOptions {
+                    io_timeout_seconds: state.daemon_io_timeout_seconds,
+                    request_limit_bytes: state.daemon_request_limit_bytes,
+                },
+                check,
+                max_requests,
+            )?;
         }
         Command::Vault { command } => {
-            vault_cmd::run_vault_command(&paths, command)?;
+            vault_cmd::run_vault_command(
+                &state.paths,
+                command,
+                &VaultCommandDefaults {
+                    mount_ttl: state.default_vault_mount_ttl.clone(),
+                    agent_id: state.default_agent_id.clone(),
+                },
+            )?;
         }
+        Command::Config { command } => match command {
+            ConfigCommand::Validate => {
+                if matches!(state.vault_mode, VaultMode::Required) {
+                    ensure_vault_dependencies()?;
+                }
+                println!("ok");
+            }
+        },
+        Command::Access { command } => match command {
+            AccessCommand::Paths { agent, json } => {
+                let config = state.loaded_config.as_ref().ok_or_else(|| {
+                    GlovesError::InvalidInput(
+                        "no config loaded; use --config, GLOVES_CONFIG, or .gloves.toml discovery"
+                            .to_owned(),
+                    )
+                })?;
+                let agent_id = AgentId::new(&agent)?;
+                let entries = config.agent_paths(&agent_id)?;
+                if json {
+                    let payload = serde_json::json!({
+                        "agent": agent_id.as_str(),
+                        "paths": entries,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    for entry in entries {
+                        let operations = entry
+                            .operations
+                            .iter()
+                            .map(path_operation_label)
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        println!("{}\t{}\t{}", entry.alias, entry.path.display(), operations);
+                    }
+                }
+            }
+        },
     }
     Ok(0)
+}
+
+fn load_effective_state(cli: &Cli) -> Result<EffectiveCliState> {
+    let current_dir = std::env::current_dir()?;
+    let env_path = read_config_env_var()?;
+    let selection = resolve_config_path(
+        cli.config.as_deref(),
+        env_path.as_deref(),
+        cli.no_config,
+        &current_dir,
+    )?;
+    let loaded_config = match selection.path {
+        Some(path) => Some(GlovesConfig::load_from_path(path)?),
+        None => None,
+    };
+
+    let root = cli
+        .root
+        .clone()
+        .or_else(|| loaded_config.as_ref().map(|config| config.root.clone()))
+        .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_ROOT_DIR));
+    let default_agent_id = loaded_config
+        .as_ref()
+        .map(|config| config.defaults.agent_id.clone())
+        .unwrap_or(AgentId::new(DEFAULT_AGENT_ID)?);
+    let default_secret_ttl_days = loaded_config
+        .as_ref()
+        .map(|config| config.defaults.secret_ttl_days)
+        .unwrap_or(DEFAULT_TTL_DAYS);
+    let default_vault_mount_ttl = loaded_config
+        .as_ref()
+        .map(|config| config.defaults.vault_mount_ttl.clone())
+        .unwrap_or_else(|| DEFAULT_VAULT_MOUNT_TTL.to_owned());
+    let daemon_bind = loaded_config
+        .as_ref()
+        .map(|config| config.daemon.bind.clone())
+        .unwrap_or_else(|| DEFAULT_DAEMON_BIND.to_owned());
+    let daemon_io_timeout_seconds = loaded_config
+        .as_ref()
+        .map(|config| config.daemon.io_timeout_seconds)
+        .unwrap_or(DEFAULT_DAEMON_IO_TIMEOUT_SECONDS);
+    let daemon_request_limit_bytes = loaded_config
+        .as_ref()
+        .map(|config| config.daemon.request_limit_bytes)
+        .unwrap_or(DEFAULT_DAEMON_REQUEST_LIMIT_BYTES);
+    let vault_mode = cli
+        .vault_mode
+        .clone()
+        .map(Into::into)
+        .or_else(|| loaded_config.as_ref().map(|config| config.vault.mode))
+        .unwrap_or(VaultMode::Auto);
+
+    Ok(EffectiveCliState {
+        paths: SecretsPaths::new(root),
+        loaded_config,
+        default_agent_id,
+        default_secret_ttl_days,
+        default_vault_mount_ttl,
+        daemon_bind,
+        daemon_io_timeout_seconds,
+        daemon_request_limit_bytes,
+        vault_mode,
+    })
+}
+
+fn read_config_env_var() -> Result<Option<String>> {
+    match std::env::var("GLOVES_CONFIG") {
+        Ok(value) => Ok(Some(value)),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(
+            "GLOVES_CONFIG must be valid UTF-8".to_owned(),
+        )),
+    }
+}
+
+fn enforce_vault_mode(vault_mode: &VaultMode, command: &Command) -> Result<()> {
+    if matches!(vault_mode, VaultMode::Disabled) && matches!(command, Command::Vault { .. }) {
+        return Err(GlovesError::InvalidInput(
+            "vault commands are disabled (vault mode is 'disabled')".to_owned(),
+        ));
+    }
+    if matches!(vault_mode, VaultMode::Required) && command_requires_vault_dependencies(command) {
+        ensure_vault_dependencies()?;
+    }
+    Ok(())
+}
+
+fn command_requires_vault_dependencies(command: &Command) -> bool {
+    matches!(command, Command::Vault { .. } | Command::Verify)
+}
+
+fn ensure_vault_dependencies() -> Result<()> {
+    let missing = REQUIRED_VAULT_BINARIES
+        .iter()
+        .copied()
+        .filter(|binary| !is_binary_available(binary))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    Err(GlovesError::InvalidInput(format!(
+        "vault mode 'required' is set but missing required binaries: {}",
+        missing.join(", ")
+    )))
+}
+
+fn is_binary_available(binary: &str) -> bool {
+    let candidate = Path::new(binary);
+    if candidate.parent().is_some() {
+        return is_executable_file(candidate);
+    }
+
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for directory in std::env::split_paths(&path_var) {
+        let path_candidate = directory.join(binary);
+        if is_executable_file(&path_candidate) {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            for suffix in [".exe", ".cmd", ".bat"] {
+                if is_executable_file(&directory.join(format!("{binary}{suffix}"))) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn path_operation_label(operation: &PathOperation) -> &'static str {
+    match operation {
+        PathOperation::Read => "read",
+        PathOperation::Write => "write",
+        PathOperation::List => "list",
+        PathOperation::Mount => "mount",
+    }
 }

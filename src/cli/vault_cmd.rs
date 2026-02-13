@@ -9,6 +9,12 @@ use crate::{
 use super::{runtime, secret_input, VaultCommand};
 
 #[derive(Debug, Clone)]
+pub(crate) struct VaultCommandDefaults {
+    pub mount_ttl: String,
+    pub agent_id: AgentId,
+}
+
+#[derive(Debug, Clone)]
 struct CliVaultSecretProvider {
     paths: SecretsPaths,
 }
@@ -34,7 +40,18 @@ fn vault_manager_for_paths(
     ))
 }
 
-pub(crate) fn run_vault_command(paths: &SecretsPaths, command: VaultCommand) -> Result<()> {
+fn resolve_agent_id(raw: Option<String>, default_agent: &AgentId) -> Result<AgentId> {
+    match raw {
+        Some(value) => Ok(AgentId::new(&value)?),
+        None => Ok(default_agent.clone()),
+    }
+}
+
+pub(crate) fn run_vault_command(
+    paths: &SecretsPaths,
+    command: VaultCommand,
+    defaults: &VaultCommandDefaults,
+) -> Result<()> {
     let manager = vault_manager_for_paths(paths)?;
     match command {
         VaultCommand::Init { name, owner } => {
@@ -47,12 +64,15 @@ pub(crate) fn run_vault_command(paths: &SecretsPaths, command: VaultCommand) -> 
             mountpoint,
             agent,
         } => {
-            let ttl_duration = secret_input::parse_duration_value(&ttl, "--ttl")?;
-            manager.mount(&name, ttl_duration, mountpoint, AgentId::new(&agent)?)?;
+            let ttl_literal = ttl.unwrap_or_else(|| defaults.mount_ttl.clone());
+            let ttl_duration = secret_input::parse_duration_value(&ttl_literal, "--ttl")?;
+            let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
+            manager.mount(&name, ttl_duration, mountpoint, mounted_by)?;
             println!("mounted");
         }
         VaultCommand::Unmount { name, agent } => {
-            manager.unmount(&name, "explicit", AgentId::new(&agent)?)?;
+            let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
+            manager.unmount(&name, "explicit", mounted_by)?;
             println!("unmounted");
         }
         VaultCommand::Status => {
@@ -70,10 +90,11 @@ pub(crate) fn run_vault_command(paths: &SecretsPaths, command: VaultCommand) -> 
             trusted_agent,
             reason,
         } => {
+            let requester = resolve_agent_id(requester, &defaults.agent_id)?;
             let prompt = manager.ask_file_prompt(
                 &name,
                 &file,
-                AgentId::new(&requester)?,
+                requester,
                 AgentId::new(&trusted_agent)?,
                 reason,
             )?;

@@ -64,6 +64,18 @@ pub enum PathOperation {
     Mount,
 }
 
+/// Runtime mode for vault command availability and dependency enforcement.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultMode {
+    /// Vault commands run when dependencies are available.
+    Auto,
+    /// Vault dependencies are mandatory and validated up front.
+    Required,
+    /// Vault commands are blocked intentionally.
+    Disabled,
+}
+
 /// Raw TOML shape for one `.gloves.toml` file.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +91,9 @@ pub struct GlovesConfigFile {
     /// Daemon defaults.
     #[serde(default)]
     pub daemon: DaemonConfigFile,
+    /// Vault runtime mode defaults.
+    #[serde(default)]
+    pub vault: VaultConfigFile,
     /// Global defaults.
     #[serde(default)]
     pub defaults: DefaultsConfigFile,
@@ -105,6 +120,14 @@ pub struct DaemonConfigFile {
     pub io_timeout_seconds: Option<u64>,
     /// Maximum request size in bytes.
     pub request_limit_bytes: Option<usize>,
+}
+
+/// Raw `[vault]` section from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VaultConfigFile {
+    /// Vault runtime mode.
+    pub mode: Option<VaultMode>,
 }
 
 /// Raw `[defaults]` section from TOML.
@@ -144,6 +167,13 @@ pub struct DaemonBootstrapConfig {
     pub request_limit_bytes: usize,
 }
 
+/// Effective vault mode after defaults and validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VaultBootstrapConfig {
+    /// Effective vault runtime mode.
+    pub mode: VaultMode,
+}
+
 /// Effective default values after defaults and validation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DefaultBootstrapConfig {
@@ -179,6 +209,8 @@ pub struct GlovesConfig {
     pub private_paths: BTreeMap<String, PathBuf>,
     /// Effective daemon defaults.
     pub daemon: DaemonBootstrapConfig,
+    /// Effective vault mode.
+    pub vault: VaultBootstrapConfig,
     /// Effective global defaults.
     pub defaults: DefaultBootstrapConfig,
     /// Agent access policies.
@@ -341,6 +373,7 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
     }
 
     let daemon = resolve_daemon_config(&raw.daemon)?;
+    let vault = resolve_vault_config(&raw.vault);
     let defaults = resolve_default_config(&raw.defaults)?;
 
     let mut agents = BTreeMap::new();
@@ -361,6 +394,7 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         root,
         private_paths,
         daemon,
+        vault,
         defaults,
         agents,
     })
@@ -384,9 +418,16 @@ fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
     }
 
     let _ = resolve_daemon_config(&config.daemon)?;
+    let _ = resolve_vault_config(&config.vault);
     let _ = resolve_default_config(&config.defaults)?;
 
     Ok(())
+}
+
+fn resolve_vault_config(raw: &VaultConfigFile) -> VaultBootstrapConfig {
+    VaultBootstrapConfig {
+        mode: raw.mode.unwrap_or(VaultMode::Auto),
+    }
 }
 
 fn resolve_daemon_config(raw: &DaemonConfigFile) -> Result<DaemonBootstrapConfig> {

@@ -3,7 +3,8 @@ use std::{fs, path::Path};
 use gloves::{
     config::{
         discover_config, resolve_config_path, AgentAccessFile, ConfigPathsFile, ConfigSource,
-        DaemonConfigFile, DefaultsConfigFile, GlovesConfig, GlovesConfigFile,
+        DaemonConfigFile, DefaultsConfigFile, GlovesConfig, GlovesConfigFile, VaultConfigFile,
+        VaultMode,
     },
     error::GlovesError,
     types::AgentId,
@@ -44,6 +45,9 @@ fn config_roundtrip_v1() {
             io_timeout_seconds: Some(5),
             request_limit_bytes: Some(16 * 1024),
         },
+        vault: VaultConfigFile {
+            mode: Some(VaultMode::Auto),
+        },
         defaults: DefaultsConfigFile {
             agent_id: Some("default-agent".to_owned()),
             secret_ttl_days: Some(1),
@@ -57,6 +61,29 @@ fn config_roundtrip_v1() {
     let encoded = toml::to_string(&source).unwrap();
     let decoded: GlovesConfigFile = toml::from_str(&encoded).unwrap();
     assert_eq!(source, decoded);
+}
+
+#[test]
+fn config_vault_mode_defaults_to_auto() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let config = GlovesConfig::parse_from_str("version = 1\n", &source).unwrap();
+    assert_eq!(config.vault.mode, VaultMode::Auto);
+}
+
+#[test]
+fn config_validate_rejects_invalid_vault_mode() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[vault]
+mode = "strict"
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
 }
 
 #[test]

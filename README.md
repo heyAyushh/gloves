@@ -189,6 +189,15 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 | `vault status` | Show mounted/locked status and remaining TTL | JSON output |
 | `vault list` | List configured vaults | JSON output |
 | `vault ask-file <name>` | Generate trusted-agent handoff prompt for one file | `--file`, `--requester`, `--trusted-agent`, `--reason` |
+| `config validate` | Validate effective bootstrap config | honors `--config`, `--no-config`, `GLOVES_CONFIG`; checks vault deps when mode is `required` |
+| `access paths --agent <id>` | Show one agent's configured private path visibility | add `--json` for machine-readable output |
+
+Global flags:
+
+- `--root <PATH>`: override runtime root.
+- `--config <PATH>`: use one config file.
+- `--no-config`: disable config loading/discovery.
+- `--vault-mode <auto|required|disabled>`: override vault runtime mode for one invocation.
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
 Bootstrap config spec: [`GLOVES_CONFIG_SPEC.md`](GLOVES_CONFIG_SPEC.md)
@@ -207,7 +216,9 @@ Bootstrap config parser module: [`src/config.rs`](src/config.rs)
 Current status:
 
 - Implemented as library API in [`src/config.rs`](src/config.rs)
-- CLI bootstrap flags/subcommands from the spec are not wired yet
+- CLI runtime wiring implemented in [`src/cli/commands.rs`](src/cli/commands.rs)
+- `gloves config validate` and `gloves access paths` are available
+- Vault mode enforcement (`auto` / `required` / `disabled`) is active
 
 Example usage from Rust:
 

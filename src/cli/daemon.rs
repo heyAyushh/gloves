@@ -20,10 +20,7 @@ use crate::{
     vault::gocryptfs::GocryptfsDriver,
 };
 
-use super::{
-    runtime, secret_input, DEFAULT_AGENT_ID, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS,
-    DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_TTL_DAYS,
-};
+use super::{runtime, secret_input, DEFAULT_AGENT_ID, DEFAULT_TTL_DAYS};
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -72,15 +69,22 @@ enum DaemonResponse {
     },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DaemonRuntimeOptions {
+    pub io_timeout_seconds: u64,
+    pub request_limit_bytes: usize,
+}
+
 pub(crate) fn run_daemon(
     paths: &SecretsPaths,
     bind: &str,
+    options: DaemonRuntimeOptions,
     check: bool,
     max_requests: usize,
 ) -> Result<()> {
     runtime::init_layout(paths)?;
     enforce_daemon_root_strictness(paths)?;
-    run_daemon_tcp(paths, bind, check, max_requests)
+    run_daemon_tcp(paths, bind, options, check, max_requests)
 }
 
 #[cfg(unix)]
@@ -127,6 +131,7 @@ fn parse_daemon_bind(bind: &str) -> Result<SocketAddr> {
 fn run_daemon_tcp(
     paths: &SecretsPaths,
     bind: &str,
+    options: DaemonRuntimeOptions,
     check: bool,
     max_requests: usize,
 ) -> Result<()> {
@@ -151,7 +156,7 @@ fn run_daemon_tcp(
                 continue;
             }
         };
-        let io_timeout = Some(StdDuration::from_secs(DEFAULT_DAEMON_IO_TIMEOUT_SECONDS));
+        let io_timeout = Some(StdDuration::from_secs(options.io_timeout_seconds));
         if let Err(error) = stream.set_read_timeout(io_timeout) {
             eprintln!("error: daemon read-timeout setup failed: {error}");
             continue;
@@ -161,7 +166,9 @@ fn run_daemon_tcp(
             continue;
         }
 
-        if let Err(error) = handle_daemon_connection(paths, &mut stream) {
+        if let Err(error) =
+            handle_daemon_connection(paths, &mut stream, options.request_limit_bytes)
+        {
             let _ = write_daemon_response(
                 &mut stream,
                 &DaemonResponse::Error {
@@ -178,30 +185,34 @@ fn run_daemon_tcp(
     Ok(())
 }
 
-fn handle_daemon_connection<S>(paths: &SecretsPaths, stream: &mut S) -> Result<()>
+fn handle_daemon_connection<S>(
+    paths: &SecretsPaths,
+    stream: &mut S,
+    request_limit_bytes: usize,
+) -> Result<()>
 where
     S: Read + Write,
 {
-    let request = read_daemon_request(stream)?;
+    let request = read_daemon_request(stream, request_limit_bytes)?;
     let response = execute_daemon_request(paths, request);
     write_daemon_response(stream, &response)
 }
 
-fn read_daemon_request<R>(stream: &mut R) -> Result<DaemonRequest>
+fn read_daemon_request<R>(stream: &mut R, request_limit_bytes: usize) -> Result<DaemonRequest>
 where
     R: Read,
 {
-    let mut reader = BufReader::new(stream.take((DEFAULT_DAEMON_REQUEST_LIMIT_BYTES + 1) as u64));
+    let mut reader = BufReader::new(stream.take((request_limit_bytes + 1) as u64));
     let mut bytes = Vec::new();
     reader.read_until(b'\n', &mut bytes)?;
 
     if bytes.is_empty() {
         return Err(GlovesError::InvalidInput("empty daemon request".to_owned()));
     }
-    if bytes.len() > DEFAULT_DAEMON_REQUEST_LIMIT_BYTES {
+    if bytes.len() > request_limit_bytes {
         return Err(GlovesError::InvalidInput(format!(
             "daemon request too large (max {} bytes)",
-            DEFAULT_DAEMON_REQUEST_LIMIT_BYTES
+            request_limit_bytes
         )));
     }
 
