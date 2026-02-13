@@ -7,6 +7,8 @@ pub mod agent;
 pub mod audit;
 /// Command-line interface.
 pub mod cli;
+/// Bootstrap config parsing and validation.
+pub mod config;
 /// Error types.
 pub mod error;
 /// Secure filesystem helpers.

@@ -1,8 +1,25 @@
 # Gloves CLI Bootstrap Config Spec (`.gloves.toml`)
 
-Status: Draft
+Status: In Progress (parser implemented, CLI wiring pending)
 Target release: `v0.2.x`
 Owner: `gloves` CLI/runtime
+
+## Implementation Status
+
+Implemented now:
+
+- `src/config.rs` parser and validator for `.gloves.toml`
+- Config precedence and discovery resolver (`flag` / `env` / `discovered` / `none`)
+- Strict validation for schema, agent policies, daemon/default values, and path literals
+- Unix permission checks for config files, including symlink rejection
+- Agent path visibility resolver API (`GlovesConfig::agent_paths`)
+- Integration test suite: `tests/config_parser.rs`
+
+Pending from this spec:
+
+- CLI flags: `--config`, `--no-config`
+- CLI commands: `gloves config validate`, `gloves access paths`
+- Runtime wiring so effective config drives CLI defaults/paths
 
 ## 1. Problem
 
@@ -186,12 +203,12 @@ Human-readable table:
 
 ## 12. Implementation Outline
 
-1. Add config types and parser module (`src/config.rs` or `src/cli/config.rs`).
-2. Add bootstrap resolver for discovery + precedence.
-3. Integrate effective config into CLI runtime initialization.
-4. Add `config validate` and `access paths` commands.
-5. Add permission/path validation and error mapping.
-6. Update README and command reference.
+1. Done: add config types and parser module (`src/config.rs`).
+2. Done: add bootstrap resolver for discovery + precedence.
+3. Pending: integrate effective config into CLI runtime initialization.
+4. Pending: add `config validate` and `access paths` commands.
+5. Done: add permission/path validation and error mapping.
+6. In Progress: update README and command reference.
 
 ## 13. TDD Plan
 

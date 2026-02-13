@@ -1,5 +1,16 @@
 # gloves
 
+## Unreleased
+
+### Minor Changes
+
+- Added `.gloves.toml` bootstrap config parser and validator module in `src/config.rs`.
+- Added config discovery/precedence resolution for explicit path, env path, and parent-directory discovery.
+- Added strict config security checks, including Unix permission validation and symlink rejection.
+- Added agent private-path visibility resolution API for config-defined access policies.
+- Added comprehensive parser coverage in `tests/config_parser.rs` for schema, path, daemon, defaults, and security edge cases.
+- Updated README, plan, and spec documents to reflect implemented parser scope and pending CLI wiring.
+
 ## 0.1.1
 
 ### Minor Changes

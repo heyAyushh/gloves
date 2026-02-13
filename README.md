@@ -192,6 +192,36 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
 Bootstrap config spec: [`GLOVES_CONFIG_SPEC.md`](GLOVES_CONFIG_SPEC.md)
+Bootstrap config parser module: [`src/config.rs`](src/config.rs)
+
+## Bootstrap Config Parser (Library)
+
+`gloves` now includes a production parser/validator for `.gloves.toml`:
+
+- Config schema parsing with unknown-field rejection
+- Discovery and precedence resolution (`flag`, `env`, `discovered`, `none`)
+- Path normalization and `~` expansion handling
+- Daemon/defaults/agent policy validation
+- Unix file permission checks and symlink rejection for config files
+
+Current status:
+
+- Implemented as library API in [`src/config.rs`](src/config.rs)
+- CLI bootstrap flags/subcommands from the spec are not wired yet
+
+Example usage from Rust:
+
+```rust
+use gloves::config::{resolve_config_path, GlovesConfig};
+
+let cwd = std::env::current_dir()?;
+let selection = resolve_config_path(None, std::env::var("GLOVES_CONFIG").ok().as_deref(), false, &cwd)?;
+if let Some(path) = selection.path {
+    let config = GlovesConfig::load_from_path(path)?;
+    println!("effective root: {}", config.root.display());
+}
+# Ok::<(), gloves::error::GlovesError>(())
+```
 
 ## Runtime Layout
 
@@ -218,6 +248,7 @@ Path model: [`SecretsPaths`](src/paths.rs#L5)
 - Agent secret encryption and decryption: [`src/agent/backend.rs`](src/agent/backend.rs)
 - Human backend via `pass`: [`src/human/backend.rs`](src/human/backend.rs)
 - Vault orchestration via `gocryptfs`: [`src/vault/`](src/vault/)
+- Bootstrap config parsing and validation: [`src/config.rs`](src/config.rs)
 - Pending request signature verification: [`src/human/pending.rs`](src/human/pending.rs)
 - Restricted file permissions and atomic writes: [`src/fs_secure.rs`](src/fs_secure.rs)
 - TTL reaping with audit events: [`TtlReaper::reap`](src/reaper.rs#L16), [`AuditLog::log`](src/audit.rs#L69)
