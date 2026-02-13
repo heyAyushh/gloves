@@ -4,12 +4,17 @@
 
 ### Minor Changes
 
-- Added `.gloves.toml` bootstrap config parser and validator module in `src/config.rs`.
-- Added config discovery/precedence resolution for explicit path, env path, and parent-directory discovery.
-- Added strict config security checks, including Unix permission validation and symlink rejection.
-- Added agent private-path visibility resolution API for config-defined access policies.
-- Added comprehensive parser coverage in `tests/config_parser.rs` for schema, path, daemon, defaults, and security edge cases.
-- Updated README, plan, and spec documents to reflect implemented parser scope and pending CLI wiring.
+- No unreleased changes yet.
+
+## 0.2.0
+
+### Minor Changes
+
+- Added encrypted vault lifecycle support with init, mount/unmount, status/list, session TTLs, and trusted file handoff prompts.
+- Added `.gloves.toml` bootstrap config parsing and validation with discovery precedence (`--config`, `GLOVES_CONFIG`, parent discovery, `--no-config`).
+- Added CLI runtime wiring for config-driven defaults, plus new `config validate` and `access paths` commands.
+- Added vault runtime mode enforcement (`auto`, `required`, `disabled`) with dependency checks for `gocryptfs`, `fusermount`, and `mountpoint`.
+- Updated direct dependencies to latest stable releases and applied compatibility updates for `age`, `rand`, and `secrecy`.
 
 ## 0.1.1
 
