@@ -204,12 +204,31 @@ cargo test --all-features
 cargo doc --no-deps
 ```
 
+## Release Channels
+
+- `stable` channel:
+  - Branches: `main` and `release/*`
+  - Tag format: `vX.Y.Z` (example: `v1.4.0`)
+- `beta` channel:
+  - Branch: `next`
+  - Tag format: `vX.Y.Z-beta.N` (example: `v1.5.0-beta.1`)
+- `alpha` channel:
+  - Branch: `canary`
+  - Tag format: `vX.Y.Z-alpha.N` (example: `v1.5.0-alpha.1`)
+
+Publishing is tag-driven. The publish workflow validates:
+- tag format matches one of the channel patterns
+- tag version matches `Cargo.toml` package version
+- tagged commit belongs to an allowed branch for that channel
+
+Release commands and examples: [`RELEASE.md`](RELEASE.md)
+
 ## CI/CD
 
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml): lint + docs
 - [`.github/workflows/test.yml`](.github/workflows/test.yml): full test suite
 - [`.github/workflows/coverage.yml`](.github/workflows/coverage.yml): coverage thresholds
-- [`.github/workflows/publish.yml`](.github/workflows/publish.yml): publish on `main` pushes (requires `CARGO_REGISTRY_TOKEN`)
+- [`.github/workflows/publish.yml`](.github/workflows/publish.yml): publish on matching version tags (requires `CARGO_REGISTRY_TOKEN`)
 
 ## License and Changelog
 

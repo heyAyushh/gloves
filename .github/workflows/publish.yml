@@ -2,8 +2,8 @@ name: Publish
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 permissions:
   contents: read
@@ -21,6 +21,90 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release channel policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          STABLE_TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          BETA_TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$'
+          ALPHA_TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$'
+          RELEASE_BRANCH_REGEX='^origin/release/'
+
+          tag_name="${GITHUB_REF_NAME}"
+          tag_version="${tag_name#v}"
+
+          channel=""
+          if [[ "${tag_name}" =~ ${STABLE_TAG_REGEX} ]]; then
+            channel="stable"
+          elif [[ "${tag_name}" =~ ${BETA_TAG_REGEX} ]]; then
+            channel="beta"
+          elif [[ "${tag_name}" =~ ${ALPHA_TAG_REGEX} ]]; then
+            channel="alpha"
+          else
+            echo "Unsupported tag format: ${tag_name}"
+            echo "Allowed formats:"
+            echo "  stable: vX.Y.Z"
+            echo "  beta:   vX.Y.Z-beta.N"
+            echo "  alpha:  vX.Y.Z-alpha.N"
+            exit 1
+          fi
+
+          manifest_version="$(awk -F' = ' '/^version = / {gsub(/"/, "", $2); print $2; exit}' Cargo.toml)"
+          if [[ -z "${manifest_version}" ]]; then
+            echo "Could not parse package version from Cargo.toml"
+            exit 1
+          fi
+
+          if [[ "${manifest_version}" != "${tag_version}" ]]; then
+            echo "Tag version (${tag_version}) does not match Cargo.toml version (${manifest_version})"
+            exit 1
+          fi
+
+          git fetch --prune --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          containing_branches="$(git branch -r --contains "${GITHUB_SHA}" | sed 's/^[* ]*//' | grep -v -- '->' || true)"
+
+          if [[ -z "${containing_branches}" ]]; then
+            echo "No remote branches contain commit ${GITHUB_SHA}"
+            exit 1
+          fi
+
+          require_branch() {
+            local branch_pattern="$1"
+            if grep -Eq "${branch_pattern}" <<<"${containing_branches}"; then
+              return 0
+            fi
+            echo "Tag ${tag_name} must point to a commit on branch pattern: ${branch_pattern}"
+            echo "Containing branches:"
+            echo "${containing_branches}"
+            exit 1
+          }
+
+          case "${channel}" in
+            stable)
+              if grep -Eq '^origin/main$' <<<"${containing_branches}"; then
+                echo "Validated stable release from origin/main"
+              elif grep -Eq "${RELEASE_BRANCH_REGEX}" <<<"${containing_branches}"; then
+                echo "Validated stable release from origin/release/*"
+              else
+                echo "Stable tags must point to commits on main or release/*"
+                echo "Containing branches:"
+                echo "${containing_branches}"
+                exit 1
+              fi
+              ;;
+            beta)
+              require_branch '^origin/next$'
+              echo "Validated beta release from origin/next"
+              ;;
+            alpha)
+              require_branch '^origin/canary$'
+              echo "Validated alpha release from origin/canary"
+              ;;
+          esac
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable

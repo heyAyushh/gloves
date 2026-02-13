@@ -43,8 +43,15 @@ cargo doc --no-deps
   - `.github/workflows/test.yml`
   - `.github/workflows/coverage.yml`
   - `.github/workflows/publish.yml`
-- CI and test/coverage workflows run on pull requests targeting `main` and direct pushes to `main`.
-- Publish runs only on pushes to `main`.
+- CI and test/coverage workflows run on pull requests and pushes for:
+  - `main`
+  - `next`
+  - `canary`
+  - `release/**`
+- Publish is tag-driven with channel/branch policy checks:
+  - `vX.Y.Z` from `main` or `release/*` (stable)
+  - `vX.Y.Z-beta.N` from `next` (beta)
+  - `vX.Y.Z-alpha.N` from `canary` (alpha)
 - Publishing requires `CARGO_REGISTRY_TOKEN` repository secret.
 
 ## Commit and PR Conventions

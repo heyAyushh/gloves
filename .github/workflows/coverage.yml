@@ -4,9 +4,15 @@ on:
   pull_request:
     branches:
       - main
+      - next
+      - canary
+      - release/**
   push:
     branches:
       - main
+      - next
+      - canary
+      - release/**
 
 permissions:
   contents: read
