@@ -4,6 +4,8 @@
 [![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
 [![crates.io](https://img.shields.io/crates/v/gloves.svg)](https://crates.io/crates/gloves)
 
+> Experimental: this project is currently in experimental mode. Interfaces and behavior may change between releases.
+
 `gloves` is a secure secrets control plane for OpenClaw and other multi-agent/human operator runtimes.
 
 - Agent-owned secrets encrypted with `age`
