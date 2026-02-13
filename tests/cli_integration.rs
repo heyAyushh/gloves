@@ -2,7 +2,7 @@ use assert_cmd::Command;
 
 use std::{
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
     process::Stdio,
@@ -18,9 +18,10 @@ const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
 static DAEMON_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn daemon_test_guard() -> MutexGuard<'static, ()> {
-    DAEMON_TEST_LOCK
-        .lock()
-        .expect("daemon test lock should not be poisoned")
+    match DAEMON_TEST_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 fn connect_with_retry(address: &str) -> TcpStream {
@@ -38,6 +39,51 @@ fn reserve_loopback_port() -> u16 {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     port
+}
+
+fn spawn_daemon_with_retry(root: &Path, max_requests: usize) -> (std::process::Child, String) {
+    let binary = assert_cmd::cargo::cargo_bin!("gloves");
+    let root = root.to_str().unwrap();
+    let mut last_bind_error = String::new();
+
+    for _ in 0..DAEMON_WAIT_ATTEMPTS {
+        let bind = format!("127.0.0.1:{}", reserve_loopback_port());
+        let mut child = std::process::Command::new(binary)
+            .args([
+                "--root",
+                root,
+                "daemon",
+                "--bind",
+                &bind,
+                "--max-requests",
+                &max_requests.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        std::thread::sleep(Duration::from_millis(DAEMON_WAIT_STEP_MILLIS));
+        match child.try_wait().unwrap() {
+            Some(_status) => {
+                let mut stderr = String::new();
+                if let Some(mut pipe) = child.stderr.take() {
+                    let _ = pipe.read_to_string(&mut stderr);
+                }
+                if stderr.contains("Address already in use") {
+                    last_bind_error = stderr;
+                    continue;
+                }
+                panic!("daemon failed to start: {stderr}");
+            }
+            None => return (child, bind),
+        }
+    }
+
+    panic!(
+        "failed to spawn daemon after retries; last error: {}",
+        last_bind_error
+    );
 }
 
 fn write_config(path: &Path, body: &str) {
@@ -1137,19 +1183,34 @@ fn cli_vault_ask_file_requires_access() {
 fn cli_daemon_check_passes() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let bind = format!("127.0.0.1:{}", reserve_loopback_port());
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args([
-            "--root",
-            temp_dir.path().to_str().unwrap(),
-            "daemon",
-            "--check",
-            "--bind",
-            &bind,
-        ])
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("ok"));
+    let binary = assert_cmd::cargo::cargo_bin!("gloves");
+    let root = temp_dir.path().to_str().unwrap();
+    let mut last_bind_error = String::new();
+
+    for _ in 0..DAEMON_WAIT_ATTEMPTS {
+        let bind = format!("127.0.0.1:{}", reserve_loopback_port());
+        let output = std::process::Command::new(binary)
+            .args(["--root", root, "daemon", "--check", "--bind", &bind])
+            .output()
+            .unwrap();
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains("ok"));
+            return;
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if stderr.contains("Address already in use") {
+            last_bind_error = stderr;
+            continue;
+        }
+        panic!("daemon --check failed unexpectedly: {stderr}");
+    }
+
+    panic!(
+        "daemon --check did not get a free port after retries; last error: {}",
+        last_bind_error
+    );
 }
 
 #[test]
@@ -1212,24 +1273,7 @@ fn cli_daemon_check_fails_when_bind_is_in_use() {
 fn cli_daemon_ping_roundtrip_over_tcp() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let port = reserve_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let binary = assert_cmd::cargo::cargo_bin!("gloves");
-
-    let mut child = std::process::Command::new(binary)
-        .args([
-            "--root",
-            temp_dir.path().to_str().unwrap(),
-            "daemon",
-            "--bind",
-            &bind,
-            "--max-requests",
-            "1",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 1);
 
     let mut stream = connect_with_retry(&bind);
     stream.write_all(br#"{"action":"ping"}"#).unwrap();
@@ -1250,24 +1294,7 @@ fn cli_daemon_ping_roundtrip_over_tcp() {
 fn cli_daemon_set_generate_with_value_returns_error() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let port = reserve_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let binary = assert_cmd::cargo::cargo_bin!("gloves");
-
-    let mut child = std::process::Command::new(binary)
-        .args([
-            "--root",
-            temp_dir.path().to_str().unwrap(),
-            "daemon",
-            "--bind",
-            &bind,
-            "--max-requests",
-            "1",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 1);
 
     let mut stream = connect_with_retry(&bind);
     stream
@@ -1290,24 +1317,7 @@ fn cli_daemon_set_generate_with_value_returns_error() {
 fn cli_daemon_set_rejects_non_positive_ttl() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let port = reserve_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let binary = assert_cmd::cargo::cargo_bin!("gloves");
-
-    let mut child = std::process::Command::new(binary)
-        .args([
-            "--root",
-            temp_dir.path().to_str().unwrap(),
-            "daemon",
-            "--bind",
-            &bind,
-            "--max-requests",
-            "2",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 2);
 
     let mut stream = connect_with_retry(&bind);
     stream
