@@ -1,7 +1,7 @@
 # gloves
-[![CI](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml)
-[![Tests](https://github.com/heyAyushh/gloves/actions/workflows/test.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/test.yml)
-[![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg?event=pull_request)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
+[![CI](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/ci.yml)
+[![Tests](https://github.com/heyAyushh/gloves/actions/workflows/test.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/test.yml)
+[![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
 
 `gloves` is a dual-backend secrets manager for OpenClaw-style multi-agent environments.
 
@@ -70,8 +70,8 @@ cargo publish --dry-run
   - `.github/workflows/test.yml`
   - `.github/workflows/coverage.yml`
   - `.github/workflows/publish.yml`
-- CI (lint/docs) runs only on pull requests targeting `main`.
-- Test and coverage gates run only on pull requests targeting `main`.
+- CI (lint/docs) runs on pull requests targeting `main` and direct pushes to `main`.
+- Test and coverage gates run on pull requests targeting `main` and direct pushes to `main`.
 - Coverage is computed locally in GitHub Actions via `cargo-llvm-cov` with threshold gates.
 - Publish runs only on pushes to `main`.
 - Set repository secret `CARGO_REGISTRY_TOKEN` for crates.io publish access.
