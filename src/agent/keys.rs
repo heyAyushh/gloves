@@ -1,7 +1,7 @@
 use std::{fs, path::Path};
 
 use hkdf::Hkdf;
-use rand::RngCore;
+use rand::RngExt;
 use sha2::Sha256;
 
 use crate::{error::Result, fs_secure::write_private_file_atomic, types::AgentId};
@@ -23,7 +23,7 @@ pub fn load_or_create_salt(path: &Path) -> Result<[u8; DERIVED_KEY_SIZE]> {
     }
 
     let mut salt = [0_u8; DERIVED_KEY_SIZE];
-    rand::thread_rng().fill_bytes(&mut salt);
+    rand::rng().fill(&mut salt);
     write_private_file_atomic(path, &salt)?;
     Ok(salt)
 }

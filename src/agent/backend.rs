@@ -55,21 +55,16 @@ impl AgentBackend {
         let decryptor = Decryptor::new(&ciphertext[..])
             .map_err(|error: age::DecryptError| GlovesError::Crypto(error.to_string()))?;
 
-        match decryptor {
-            Decryptor::Recipients(recipient_decryptor) => {
-                let identity_refs: Vec<&dyn age::Identity> = identities
-                    .iter()
-                    .map(|identity| identity as &dyn age::Identity)
-                    .collect();
-                let mut reader = recipient_decryptor
-                    .decrypt(identity_refs.into_iter())
-                    .map_err(|error| GlovesError::Crypto(error.to_string()))?;
-                let mut plaintext = Vec::new();
-                std::io::Read::read_to_end(&mut reader, &mut plaintext)?;
-                Ok(SecretValue::new(plaintext))
-            }
-            _ => Err(GlovesError::Crypto("unsupported age header".to_owned())),
-        }
+        let identity_refs: Vec<&dyn age::Identity> = identities
+            .iter()
+            .map(|identity| identity as &dyn age::Identity)
+            .collect();
+        let mut reader = decryptor
+            .decrypt(identity_refs.into_iter())
+            .map_err(|error: age::DecryptError| GlovesError::Crypto(error.to_string()))?;
+        let mut plaintext = Vec::new();
+        std::io::Read::read_to_end(&mut reader, &mut plaintext)?;
+        Ok(SecretValue::new(plaintext))
     }
 
     /// Re-encrypts a secret with an updated recipient set.
@@ -111,18 +106,19 @@ impl AgentBackend {
         recipients: Vec<age::x25519::Recipient>,
         output_path: &Path,
     ) -> Result<()> {
+        if recipients.is_empty() {
+            return Err(GlovesError::Crypto("no recipients provided".to_owned()));
+        }
         ensure_parent_dir(output_path)?;
-        let recipients = recipients
-            .into_iter()
-            .map(|recipient| Box::new(recipient) as Box<dyn age::Recipient + Send>)
-            .collect();
-        let encryptor = Encryptor::with_recipients(recipients)
-            .ok_or_else(|| GlovesError::Crypto("no recipients provided".to_owned()))?;
+        let encryptor = Encryptor::with_recipients(
+            recipients
+                .iter()
+                .map(|recipient| recipient as &dyn age::Recipient),
+        )
+        .map_err(|error: age::EncryptError| GlovesError::Crypto(error.to_string()))?;
 
         let mut ciphertext = Vec::new();
-        let mut writer = encryptor
-            .wrap_output(&mut ciphertext)
-            .map_err(|error: age::EncryptError| GlovesError::Crypto(error.to_string()))?;
+        let mut writer = encryptor.wrap_output(&mut ciphertext)?;
         secret_value.expose(|value| writer.write_all(value))?;
         writer
             .finish()

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::{DateTime, Utc};
-use secrecy::{ExposeSecret, Secret};
+use secrecy::{ExposeSecret, SecretSlice};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -101,14 +101,14 @@ pub struct SecretMeta {
 
 /// Secret value wrapper that avoids accidental logging.
 pub struct SecretValue {
-    inner: Secret<Vec<u8>>,
+    inner: SecretSlice<u8>,
 }
 
 impl SecretValue {
     /// Constructs a secret value from bytes.
     pub fn new(bytes: Vec<u8>) -> Self {
         Self {
-            inner: Secret::new(bytes),
+            inner: bytes.into(),
         }
     }
 

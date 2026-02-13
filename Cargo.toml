@@ -2,37 +2,37 @@
 name = "gloves"
 version = "0.1.1"
 edition = "2021"
-description = "Dual-backend secrets manager for OpenClaw agents"
+description = "seamless secret manager and handoff"
 license = "MIT"
-repository = "https://github.com/openclaw/gloves"
+repository = "https://github.com/heyAyushh/gloves"
 keywords = ["secrets", "security", "agent", "age"]
 categories = ["command-line-utilities", "cryptography"]
 
 [dependencies]
-age = "0.10"
+age = "0.11.2"
 atty = "0.2"
-chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+clap = { version = "4.5.58", features = ["derive"] }
 ed25519-dalek = "2"
-hkdf = "0.12"
-hmac = "0.12"
-rand = "0.8"
-secrecy = "0.8"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
-thiserror = "2.0"
-toml = "0.8"
+hkdf = "0.12.4"
+hmac = "0.12.1"
+rand = "0.10.0"
+secrecy = "0.10.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+sha2 = "0.10.9"
+thiserror = "2.0.18"
+toml = "1.0.1"
 tracing = "0.1"
-uuid = { version = "1", features = ["serde", "v4"] }
-zeroize = { version = "1.8", features = ["derive"] }
+uuid = { version = "1.20.0", features = ["serde", "v4"] }
+zeroize = { version = "1.8.2", features = ["derive"] }
 
 [dev-dependencies]
-assert_cmd = "2"
-hex = "0.4"
-tempfile = "3"
-trybuild = "1"
-predicates = "3"
+assert_cmd = "2.1.2"
+hex = "0.4.3"
+tempfile = "3.25.0"
+trybuild = "1.0.116"
+predicates = "3.1.4"
 
 [[bin]]
 name = "gloves"

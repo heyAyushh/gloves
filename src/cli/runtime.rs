@@ -2,7 +2,7 @@ use std::{collections::HashSet, fs};
 
 use chrono::Duration;
 use ed25519_dalek::SigningKey;
-use rand::RngCore;
+use rand::RngExt;
 use secrecy::ExposeSecret;
 
 use crate::{
@@ -77,7 +77,7 @@ pub(crate) fn load_or_create_default_signing_key(paths: &SecretsPaths) -> Result
     }
 
     let mut key_bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
+    rand::rng().fill(&mut key_bytes);
     let key = SigningKey::from_bytes(&key_bytes);
     write_private_file_atomic(&path, &key.to_bytes())?;
     Ok(key)
@@ -112,7 +112,7 @@ pub(crate) fn ensure_agent_vault_secret(paths: &SecretsPaths, secret_name: &str)
     recipients.insert(creator.clone());
 
     let mut secret_bytes = vec![0_u8; DEFAULT_VAULT_SECRET_LENGTH_BYTES];
-    rand::thread_rng().fill_bytes(&mut secret_bytes);
+    rand::rng().fill(secret_bytes.as_mut_slice());
     match manager.set(
         secret_id,
         SecretValue::new(secret_bytes),

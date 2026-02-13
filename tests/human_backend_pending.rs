@@ -10,7 +10,7 @@ use gloves::{
     },
     types::{AgentId, RequestStatus, SecretId},
 };
-use rand::RngCore;
+use rand::RngExt;
 
 struct MockPass {
     responses: Arc<Mutex<Vec<PassOutput>>>,
@@ -32,7 +32,7 @@ impl PassExecutor for MockPass {
 
 fn signing_key() -> SigningKey {
     let mut key_bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
+    rand::rng().fill(&mut key_bytes);
     SigningKey::from_bytes(&key_bytes)
 }
 

@@ -13,7 +13,7 @@ use gloves::{
     manager::{SecretsManager, SetSecretOptions},
     types::{AgentId, Owner, RequestStatus, SecretId, SecretMeta, SecretValue},
 };
-use rand::RngCore;
+use rand::RngExt;
 
 struct MockPass {
     output: PassOutput,
@@ -39,7 +39,7 @@ fn build_manager(human_backend: HumanBackend) -> (SecretsManager, tempfile::Temp
 
 fn signing_key() -> SigningKey {
     let mut key_bytes = [0_u8; 32];
-    rand::thread_rng().fill_bytes(&mut key_bytes);
+    rand::rng().fill(&mut key_bytes);
     SigningKey::from_bytes(&key_bytes)
 }
 
