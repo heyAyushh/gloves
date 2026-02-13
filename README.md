@@ -51,6 +51,12 @@ cd gloves
 cargo install --path .
 ```
 
+### Install Codex skill
+
+```bash
+npx skills add heyAyushh/gloves --skill gloves-cli
+```
+
 ## Quick Start
 
 ```bash
