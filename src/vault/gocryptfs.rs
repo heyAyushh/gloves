@@ -1,11 +1,15 @@
 use std::{
-    fs,
+    fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
     time::Duration,
 };
 
 use crate::error::{GlovesError, Result};
+
+const EXEC_BUSY_RETRY_ATTEMPTS: usize = 20;
+const EXEC_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 /// Request payload for initializing a gocryptfs directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,11 +87,13 @@ impl FsEncryptionDriver for GocryptfsDriver {
     fn init(&self, request: &InitRequest) -> Result<()> {
         fs::create_dir_all(&request.cipher_dir)?;
 
-        let output = Command::new(&self.gocryptfs_binary)
-            .args(["-init", "-extpass"])
-            .arg(&request.extpass_command)
-            .arg(&request.cipher_dir)
-            .output()?;
+        let output = retry_exec_busy(|| {
+            Command::new(&self.gocryptfs_binary)
+                .args(["-init", "-extpass"])
+                .arg(&request.extpass_command)
+                .arg(&request.cipher_dir)
+                .output()
+        })?;
         if output.status.success() {
             return Ok(());
         }
@@ -115,15 +121,17 @@ impl FsEncryptionDriver for GocryptfsDriver {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let child = command.spawn()?;
+        let child = retry_exec_busy(|| command.spawn())?;
         Ok(child.id())
     }
 
     fn unmount(&self, mount_point: &Path) -> Result<()> {
-        let status = Command::new(&self.fusermount_binary)
-            .args(["-u"])
-            .arg(mount_point)
-            .status()?;
+        let status = retry_exec_busy(|| {
+            Command::new(&self.fusermount_binary)
+                .args(["-u"])
+                .arg(mount_point)
+                .status()
+        })?;
         if status.success() {
             return Ok(());
         }
@@ -131,11 +139,36 @@ impl FsEncryptionDriver for GocryptfsDriver {
     }
 
     fn is_mounted(&self, mount_point: &Path) -> Result<bool> {
-        Ok(Command::new(&self.mountpoint_binary)
-            .arg("-q")
-            .arg(mount_point)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false))
+        Ok(retry_exec_busy(|| {
+            Command::new(&self.mountpoint_binary)
+                .arg("-q")
+                .arg(mount_point)
+                .status()
+        })
+        .map(|status| status.success())
+        .unwrap_or(false))
     }
+}
+
+fn retry_exec_busy<T, F>(mut operation: F) -> io::Result<T>
+where
+    F: FnMut() -> io::Result<T>,
+{
+    let mut last_error = None;
+    for attempt in 0..EXEC_BUSY_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_exec_busy_error(&error) && attempt + 1 < EXEC_BUSY_RETRY_ATTEMPTS => {
+                last_error = Some(error);
+                thread::sleep(EXEC_BUSY_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| io::Error::other("command execution failed")))
+}
+
+fn is_exec_busy_error(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::ExecutableFileBusy || error.raw_os_error() == Some(26)
 }
