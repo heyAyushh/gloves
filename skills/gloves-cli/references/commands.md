@@ -24,6 +24,7 @@ gloves --root <root> <command> [args...]
 | `revoke <name>` | Remove caller-owned secret and metadata | none |
 | `status <name>` | Print request status for secret | none |
 | `verify` | Reap expired items and verify state | none |
+| `daemon` | Run local sidecar daemon | `--check`, `--bind` |
 
 ## Command Patterns
 
@@ -53,6 +54,16 @@ gloves --root .openclaw/secrets status prod/db
 
 ```bash
 gloves --root .openclaw/secrets verify
+```
+
+### Start Daemon Sidecar (OpenClaw/systemd)
+
+```bash
+# strict startup checks only
+gloves --root .openclaw/secrets daemon --check --bind 127.0.0.1:7788
+
+# start daemon on loopback TCP
+gloves --root .openclaw/secrets daemon --bind 127.0.0.1:7788
 ```
 
 ## Runtime Paths

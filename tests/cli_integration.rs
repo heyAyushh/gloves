@@ -1,5 +1,32 @@
 use assert_cmd::Command;
 
+use std::{
+    io::{BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
+    process::Stdio,
+    time::Duration,
+};
+
+const DAEMON_WAIT_ATTEMPTS: usize = 100;
+const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
+
+fn connect_with_retry(address: &str) -> TcpStream {
+    for _ in 0..DAEMON_WAIT_ATTEMPTS {
+        if let Ok(stream) = TcpStream::connect(address) {
+            return stream;
+        }
+        std::thread::sleep(Duration::from_millis(DAEMON_WAIT_STEP_MILLIS));
+    }
+    panic!("daemon endpoint was not reachable in time: {address}");
+}
+
+fn reserve_loopback_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    port
+}
+
 #[test]
 fn cli_init() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -416,4 +443,135 @@ fn cli_verify_fails_on_invalid_metadata_file() {
         .args(["--root", root, "verify"])
         .assert()
         .failure();
+}
+
+#[test]
+fn cli_daemon_check_passes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "daemon",
+            "--check",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("ok"));
+}
+
+#[test]
+fn cli_daemon_check_rejects_non_loopback_bind() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "daemon",
+            "--check",
+            "--bind",
+            "0.0.0.0:7788",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn cli_daemon_check_rejects_zero_port_bind() {
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "daemon",
+            "--check",
+            "--bind",
+            "127.0.0.1:0",
+        ])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn cli_daemon_ping_roundtrip_over_tcp() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let port = reserve_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let binary = assert_cmd::cargo::cargo_bin!("gloves");
+
+    let mut child = std::process::Command::new(binary)
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "daemon",
+            "--bind",
+            &bind,
+            "--max-requests",
+            "1",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut stream = connect_with_retry(&bind);
+    stream.write_all(br#"{"action":"ping"}"#).unwrap();
+    stream.write_all(b"\n").unwrap();
+
+    let mut response_line = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response_line).unwrap();
+
+    assert!(response_line.contains("\"status\":\"ok\""));
+    assert!(response_line.contains("\"message\":\"pong\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn cli_daemon_invalid_request_returns_error() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let port = reserve_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let binary = assert_cmd::cargo::cargo_bin!("gloves");
+
+    let mut child = std::process::Command::new(binary)
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "daemon",
+            "--bind",
+            &bind,
+            "--max-requests",
+            "2",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let mut stream = connect_with_retry(&bind);
+    stream.write_all(b"not-json\n").unwrap();
+
+    let mut response_line = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response_line).unwrap();
+
+    assert!(response_line.contains("\"status\":\"error\""));
+    assert!(response_line.contains("invalid daemon request"));
+
+    let mut second_stream = connect_with_retry(&bind);
+    second_stream.write_all(br#"{"action":"ping"}"#).unwrap();
+    second_stream.write_all(b"\n").unwrap();
+
+    let mut second_response_line = String::new();
+    let mut second_reader = BufReader::new(second_stream);
+    second_reader.read_line(&mut second_response_line).unwrap();
+    assert!(second_response_line.contains("\"status\":\"ok\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
 }

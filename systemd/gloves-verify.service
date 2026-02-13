@@ -1,0 +1,18 @@
+[Unit]
+Description=gloves periodic verify/reap task
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=%h/.cargo/bin/gloves --root %h/.openclaw/secrets verify
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.openclaw/secrets
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

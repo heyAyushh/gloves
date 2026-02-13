@@ -4,9 +4,8 @@
 [![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
 [![crates.io](https://img.shields.io/crates/v/gloves.svg)](https://crates.io/crates/gloves)
 
-`gloves` is a secure secrets control plane for OpenClaw and other multi-agent runtimes with human backend
+`gloves` is a secure secrets control plane for OpenClaw and other multi-agent/human operator runtimes.
 
-`gloves` gives one CLI for:
 - Agent-owned secrets encrypted with `age`
 - Human-owned secrets resolved through `pass`
 - Access requests, approvals, metadata, audit trails, and TTL reaping
@@ -51,7 +50,7 @@ cd gloves
 cargo install --path .
 ```
 
-### Install Codex skill
+### Install Agent skill
 
 ```bash
 npx skills add heyAyushh/gloves --skill gloves-cli
@@ -113,6 +112,38 @@ gloves --root .openclaw/secrets status prod/db
 gloves --root .openclaw/secrets verify
 ```
 
+### Sidecar daemon (systemd-friendly TCP)
+
+```bash
+# strict startup checks (permissions + loopback bind policy)
+gloves --root .openclaw/secrets daemon --check --bind 127.0.0.1:7788
+
+# start local daemon on loopback TCP
+gloves --root .openclaw/secrets daemon --bind 127.0.0.1:7788
+```
+
+Set OpenClaw sidecar endpoint to the exact same address and port as `--bind`.
+
+For OpenClaw process supervisors (for example `systemd` or `qmd`), run the same daemon command with restart policy enabled.
+
+### systemd (recommended for OpenClaw)
+
+Install unit files from [`systemd/`](systemd):
+
+```bash
+# user-level units
+mkdir -p ~/.config/systemd/user
+cp systemd/glovesd.service ~/.config/systemd/user/
+cp systemd/gloves-verify.service ~/.config/systemd/user/
+cp systemd/gloves-verify.timer ~/.config/systemd/user/
+
+systemctl --user daemon-reload
+systemctl --user enable --now glovesd.service
+systemctl --user enable --now gloves-verify.timer
+```
+
+If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `ExecStartPre` in the copied unit files.
+
 ## Commands
 
 | Command | Purpose | Options / Notes |
@@ -128,6 +159,7 @@ gloves --root .openclaw/secrets verify
 | `list` | List metadata and pending requests | JSON output |
 | `revoke <name>` | Revoke caller-owned secret | removes ciphertext + metadata |
 | `verify` | Reap expired items and verify runtime state | logs expiry events |
+| `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`) |
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
 

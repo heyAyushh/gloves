@@ -1,0 +1,27 @@
+[Unit]
+Description=gloves sidecar daemon
+
+[Service]
+Type=simple
+UMask=0077
+ExecStartPre=%h/.cargo/bin/gloves --root %h/.openclaw/secrets daemon --check --bind 127.0.0.1:7788
+ExecStart=%h/.cargo/bin/gloves --root %h/.openclaw/secrets daemon --bind 127.0.0.1:7788
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.openclaw/secrets
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressAllow=127.0.0.1
+IPAddressAllow=::1
+IPAddressDeny=any
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

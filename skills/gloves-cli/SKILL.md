@@ -84,6 +84,17 @@ Command details and examples:
    gloves --root <root> list
    ```
 
+### Sidecar Daemon (TCP)
+
+1. Verify strict startup checks:
+   ```bash
+   gloves --root <root> daemon --check --bind 127.0.0.1:7788
+   ```
+2. Start daemon:
+   ```bash
+   gloves --root <root> daemon --bind 127.0.0.1:7788
+   ```
+
 ## Guardrails
 
 - Prefer `--stdin` or `--generate` over `--value` when possible.
@@ -91,6 +102,7 @@ Command details and examples:
 - Keep commands scoped to the selected `--root`; avoid touching unrelated paths.
 - Use valid secret identifiers only (no traversal patterns like `..` or leading `/`).
 - Expect `set` to fail on duplicates (`already exists`); do not assume overwrite behavior.
+- For daemon mode, bind only to loopback addresses (`127.0.0.1` or `::1`).
 - Ensure agent memory/index excludes cover secret paths:
   - `~/.password-store/**` (or `$PASSWORD_STORE_DIR/**`)
   - `.openclaw/secrets/**` and any custom `--root` directory
