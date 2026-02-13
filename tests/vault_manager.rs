@@ -45,7 +45,9 @@ struct DriverState {
     init_calls: Mutex<Vec<InitRequest>>,
     mount_calls: Mutex<Vec<MountRequest>>,
     unmount_calls: Mutex<Vec<PathBuf>>,
+    is_mounted_calls: Mutex<Vec<PathBuf>>,
     mounted: Mutex<HashSet<PathBuf>>,
+    mount_readiness_lag_checks: Mutex<usize>,
     next_pid: AtomicU32,
 }
 
@@ -80,7 +82,23 @@ impl FsEncryptionDriver for MockDriver {
     }
 
     fn is_mounted(&self, mount_point: &Path) -> Result<bool> {
-        Ok(self.state.mounted.lock().unwrap().contains(mount_point))
+        self.state
+            .is_mounted_calls
+            .lock()
+            .unwrap()
+            .push(mount_point.to_path_buf());
+        let is_present = self.state.mounted.lock().unwrap().contains(mount_point);
+        if !is_present {
+            return Ok(false);
+        }
+
+        let mut lag_checks = self.state.mount_readiness_lag_checks.lock().unwrap();
+        if *lag_checks > 0 {
+            *lag_checks -= 1;
+            return Ok(false);
+        }
+
+        Ok(true)
     }
 }
 
@@ -242,6 +260,27 @@ fn vault_mount_idempotent() {
 
     assert!(second.expires_at > first.expires_at);
     assert_eq!(driver_state.mount_calls.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn vault_mount_waits_for_mountpoint_readiness() {
+    const MOUNT_READINESS_LAG_CHECKS: usize = 3;
+
+    let (manager, _temp_dir, driver_state, _secret_provider_state) = build_manager();
+    manager.init("agent_data", Owner::Agent).unwrap();
+    *driver_state.mount_readiness_lag_checks.lock().unwrap() = MOUNT_READINESS_LAG_CHECKS;
+
+    manager
+        .mount(
+            "agent_data",
+            Duration::minutes(30),
+            None,
+            AgentId::new("agent-a").unwrap(),
+        )
+        .unwrap();
+
+    let is_mounted_call_count = driver_state.is_mounted_calls.lock().unwrap().len();
+    assert!(is_mounted_call_count > MOUNT_READINESS_LAG_CHECKS);
 }
 
 #[test]

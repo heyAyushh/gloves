@@ -1,4 +1,10 @@
-use std::{collections::HashMap, fs, path::PathBuf};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration as StdDuration, Instant},
+};
 
 use chrono::{Duration, Utc};
 
@@ -17,6 +23,9 @@ use super::{
     types::{VaultListEntry, VaultSecretProvider, VaultStatusEntry},
     validation::{validate_requested_file_path, validate_ttl_minutes, validate_vault_name},
 };
+
+const MOUNT_READY_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const MOUNT_READY_POLL_INTERVAL: StdDuration = StdDuration::from_millis(25);
 
 /// Coordinator for vault lifecycle operations.
 pub struct VaultManager<D, P>
@@ -143,6 +152,7 @@ where
             ),
             idle_timeout: Some(idle_timeout),
         })?;
+        self.wait_for_mount_readiness(&mountpoint)?;
         let now = Utc::now();
         let session = VaultSession {
             vault_name: vault_name.to_owned(),
@@ -293,6 +303,22 @@ where
             .collect::<Vec<_>>();
         entries.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(entries)
+    }
+
+    fn wait_for_mount_readiness(&self, mountpoint: &Path) -> Result<()> {
+        let deadline = Instant::now() + MOUNT_READY_TIMEOUT;
+        loop {
+            if self.driver.is_mounted(mountpoint)? {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(GlovesError::Crypto(format!(
+                    "vault mount did not become ready: {}",
+                    mountpoint.display()
+                )));
+            }
+            thread::sleep(MOUNT_READY_POLL_INTERVAL);
+        }
     }
 
     fn ensure_layout(&self) -> Result<()> {

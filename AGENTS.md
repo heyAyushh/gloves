@@ -27,12 +27,26 @@ These rules apply to all changes in this repository.
 
 ## Testing and Quality Gates
 
+For every bug fix or behavior change:
+
+- Add a regression test that fails before the fix and passes after it.
+- Add edge-case coverage for boundary conditions and failure modes touched by the change.
+
+Before any push:
+
+- Run targeted tests for affected modules first (for example: `cargo test --test <suite>`).
+- Run the full verification gate locally and do not push with known failures.
+
+Before tagging/publishing:
+
+- Re-run the full verification gate locally on the exact commit being released.
+
 Before considering a task done, run:
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo test --all-features --locked
 cargo doc --no-deps
 ```
 
