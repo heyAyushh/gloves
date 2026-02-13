@@ -58,6 +58,29 @@ fn all_events_serialize() {
             secret_id: SecretId::new("d").unwrap(),
             by: AgentId::new("agent-c").unwrap(),
         },
+        AuditEvent::VaultCreated {
+            vault: "agent_data".to_owned(),
+            owner: gloves::types::Owner::Agent,
+        },
+        AuditEvent::VaultMounted {
+            vault: "agent_data".to_owned(),
+            agent: AgentId::new("agent-a").unwrap(),
+            ttl_minutes: 60,
+        },
+        AuditEvent::VaultUnmounted {
+            vault: "agent_data".to_owned(),
+            reason: "explicit".to_owned(),
+            agent: AgentId::new("agent-a").unwrap(),
+        },
+        AuditEvent::VaultSessionExpired {
+            vault: "agent_data".to_owned(),
+        },
+        AuditEvent::VaultHandoffPromptIssued {
+            vault: "agent_data".to_owned(),
+            requester: AgentId::new("agent-a").unwrap(),
+            trusted_agent: AgentId::new("agent-b").unwrap(),
+            requested_file: "docs/notes.txt".to_owned(),
+        },
     ];
 
     for event in events {

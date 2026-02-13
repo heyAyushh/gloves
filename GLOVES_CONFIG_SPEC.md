@@ -1,0 +1,231 @@
+# Gloves CLI Bootstrap Config Spec (`.gloves.toml`)
+
+Status: Draft
+Target release: `v0.2.x`
+Owner: `gloves` CLI/runtime
+
+## 1. Problem
+
+`gloves` currently requires repeated CLI flags (for example `--root`) and has no first-class bootstrap config file.
+
+We need a repository-local config model like `openclaw.json`:
+
+- predictable bootstrap from a checked-in config file
+- explicit secure/private path definitions
+- explicit agent access visibility for private paths
+- strict permissions for config and sensitive directories
+
+## 2. Goals
+
+- Add `.gloves.toml` as the default bootstrap config file.
+- Allow explicit config file path via CLI.
+- Keep secure permissions as a hard invariant.
+- Provide an operator-visible command to show agent access to private paths.
+- Keep current behavior backward compatible when no config file exists.
+
+## 3. Non-goals
+
+- No secret values in config.
+- No replacement of `age`, `pass`, or vault crypto internals.
+- No dynamic policy engine.
+- No implicit trust handoff beyond explicit config + existing audit trail.
+
+## 4. CLI Surface
+
+### 4.1 Global options
+
+Add global options to `gloves`:
+
+- `--config <PATH>`: absolute or relative path to config TOML
+- `--no-config`: disable config discovery and use current defaults only
+
+### 4.2 Environment variable
+
+- `GLOVES_CONFIG=<PATH>` provides config path when `--config` is not set.
+
+### 4.3 New subcommands
+
+Add:
+
+- `gloves config validate`
+  - Validates schema, permissions, and resolved paths.
+  - Exit `0` on success, non-zero on failure.
+- `gloves access paths --agent <AGENT_ID> [--json]`
+  - Shows path-level access visibility for one agent.
+  - Intended for operators to audit private path reachability.
+
+## 5. Config Discovery and Precedence
+
+Config selection order (first match wins):
+
+1. `--no-config` set: skip config load entirely.
+2. `--config <PATH>`.
+3. `GLOVES_CONFIG` env value.
+4. Auto-discovery: `.gloves.toml` in current directory, then parent directories up to filesystem root.
+5. No config found: use existing defaults.
+
+Notes:
+
+- If an explicit path is provided (`--config` or `GLOVES_CONFIG`) and file is missing, fail fast.
+- If auto-discovery finds no file, continue with defaults.
+
+## 6. `.gloves.toml` Schema (v1)
+
+```toml
+version = 1
+
+[paths]
+# Equivalent to current --root default if omitted.
+root = ".openclaw/secrets"
+
+# Named private path aliases. Values may be absolute or config-relative.
+[private_paths]
+password_store = "~/.password-store"
+workspace_private = "./.private"
+runtime_root = ".openclaw/secrets"
+
+[daemon]
+bind = "127.0.0.1:7788"
+io_timeout_seconds = 5
+request_limit_bytes = 16384
+
+[defaults]
+agent_id = "default-agent"
+secret_ttl_days = 1
+vault_mount_ttl = "1h"
+vault_secret_ttl_days = 365
+vault_secret_length_bytes = 64
+
+# Agent path visibility and allowed operations.
+# Agent IDs must satisfy existing AgentId validation rules.
+[agents.default-agent]
+paths = ["runtime_root", "workspace_private"]
+operations = ["read", "write", "list", "mount"]
+
+[agents.agent-b]
+paths = ["runtime_root"]
+operations = ["read", "list"]
+```
+
+## 7. Validation Rules
+
+### 7.1 File and ownership permissions
+
+On Unix:
+
+- config file MUST exist as a regular file.
+- config file mode MUST NOT allow group/world write (`mode & 0o022 == 0`).
+- if config defines any `private_paths`, file mode SHOULD be `0600` or `0640`.
+- referenced runtime directories/files created by gloves continue to enforce existing private modes (`0700` dirs, `0600` files).
+
+On non-Unix:
+
+- enforce existing secure write helpers and skip Unix mode checks.
+
+### 7.2 Path safety
+
+- Resolve `~` to home directory.
+- Resolve relative paths against the config file directory.
+- Canonicalize for display and access checks where possible.
+- Reject empty path values.
+- Reject duplicate `private_paths` aliases.
+- Reject unknown alias references under `[agents.<id>.paths]`.
+
+### 7.3 Agent access model
+
+- Unknown agent in `gloves access paths --agent` returns `NotFound`.
+- Operations are constrained to enum: `read`, `write`, `list`, `mount`.
+- Access output is visibility metadata only; it does not bypass existing secret/vault authorization.
+
+## 8. Effective Config and Overrides
+
+- CLI flags continue to override config values for that invocation.
+- `--root` overrides `[paths].root`.
+- Command-specific options (for example daemon bind, vault ttl, agent id) override config defaults.
+- Effective value resolution should be deterministic and auditable.
+
+## 9. Output Contract for `gloves access paths`
+
+### 9.1 JSON mode
+
+`gloves access paths --agent agent-b --json` returns:
+
+```json
+{
+  "agent": "agent-b",
+  "paths": [
+    {
+      "alias": "runtime_root",
+      "path": "/abs/path/.openclaw/secrets",
+      "operations": ["read", "list"]
+    }
+  ]
+}
+```
+
+### 9.2 Text mode
+
+Human-readable table:
+
+- `alias`
+- `resolved path`
+- `operations`
+
+## 10. Backward Compatibility
+
+- No `.gloves.toml`: current behavior remains unchanged.
+- Existing scripts that pass `--root` continue working.
+- Current default constants remain fallback values.
+
+## 11. Security Considerations
+
+- Config can contain private path metadata; enforce strict file permissions.
+- Never persist secret material in `.gloves.toml`.
+- Always treat config contents as untrusted input and validate fully.
+- Audit events SHOULD include config path source (`flag`, `env`, `discovered`, `none`) for sensitive operations.
+
+## 12. Implementation Outline
+
+1. Add config types and parser module (`src/config.rs` or `src/cli/config.rs`).
+2. Add bootstrap resolver for discovery + precedence.
+3. Integrate effective config into CLI runtime initialization.
+4. Add `config validate` and `access paths` commands.
+5. Add permission/path validation and error mapping.
+6. Update README and command reference.
+
+## 13. TDD Plan
+
+Add tests before implementation.
+
+### Unit tests
+
+- `config_roundtrip_v1`
+- `config_discovery_prefers_flag`
+- `config_discovery_prefers_env_over_discovery`
+- `config_discovery_walks_parent_dirs`
+- `config_validate_rejects_unknown_agent_path_alias`
+- `config_validate_rejects_duplicate_private_alias`
+- `config_validate_rejects_invalid_operation`
+- `config_resolve_relative_paths_against_file_dir`
+- `config_resolve_home_expansion`
+
+### Unix permission tests
+
+- `config_validate_rejects_group_world_writable_file`
+- `config_validate_accepts_private_modes`
+
+### CLI integration tests
+
+- `cli_bootstrap_uses_discovered_gloves_toml`
+- `cli_bootstrap_uses_explicit_config_path`
+- `cli_bootstrap_no_config_keeps_existing_defaults`
+- `cli_config_validate_success`
+- `cli_config_validate_failure_invalid_alias`
+- `cli_access_paths_json`
+- `cli_access_paths_unknown_agent_fails`
+
+## 14. Open Questions
+
+- Should `gloves access paths` include inherited/default policy blocks, or only explicit per-agent entries?
+- Should config source (`flag/env/discovered`) be emitted in `gloves verify` output?
+- Should we allow a strict mode that requires config presence (`--require-config`)?

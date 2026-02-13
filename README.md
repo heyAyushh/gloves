@@ -24,6 +24,7 @@
 
 - Rust stable toolchain (edition 2021)
 - `pass` + GPG (required for human-owned secret access)
+- `gocryptfs` + `fusermount` + `mountpoint` (required for `vault` commands)
 - Writable secrets root (default: `.openclaw/secrets`)
 
 Quick `pass` install:
@@ -112,10 +113,32 @@ gloves --root .openclaw/secrets status prod/db
 gloves --root .openclaw/secrets verify
 ```
 
+### Encrypted vault lifecycle
+
+```bash
+# initialize a vault
+gloves --root .openclaw/secrets vault init agent_data --owner agent
+gloves --root .openclaw/secrets vault init personal --owner human
+
+# mount with TTL
+gloves --root .openclaw/secrets vault mount agent_data --ttl 1h
+
+# trusted handoff prompt (request file from trusted mounted agent)
+gloves --root .openclaw/secrets vault ask-file agent_data \
+  --file docs/notes.txt \
+  --requester agent-a \
+  --trusted-agent agent-b
+
+# unmount / inspect
+gloves --root .openclaw/secrets vault unmount agent_data
+gloves --root .openclaw/secrets vault status
+gloves --root .openclaw/secrets vault list
+```
+
 ### Sidecar daemon (systemd-friendly TCP)
 
 ```bash
-# strict startup checks (permissions + loopback bind policy)
+# strict startup checks (permissions + loopback bind policy + bind availability)
 gloves --root .openclaw/secrets daemon --check --bind 127.0.0.1:7788
 
 # start local daemon on loopback TCP
@@ -149,7 +172,7 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 | Command | Purpose | Options / Notes |
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
-| `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` |
+| `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
 | `get <name>` | Retrieve secret value | warns when printing to TTY |
 | `env <name> <var>` | Print redacted env export | outputs `export VAR=<REDACTED>` |
 | `request <name> --reason <text>` | Create human access request | reason is required |
@@ -160,8 +183,15 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 | `revoke <name>` | Revoke caller-owned secret | removes ciphertext + metadata |
 | `verify` | Reap expired items and verify runtime state | logs expiry events |
 | `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`) |
+| `vault init <name> --owner <agent|human>` | Create encrypted vault metadata + ciphertext dir | `agent` owner auto-generates vault secret |
+| `vault mount <name>` | Mount encrypted vault with TTL session | `--ttl <duration>`, `--mountpoint`, `--agent` |
+| `vault unmount <name>` | Unmount vault and clear session | `--agent` |
+| `vault status` | Show mounted/locked status and remaining TTL | JSON output |
+| `vault list` | List configured vaults | JSON output |
+| `vault ask-file <name>` | Generate trusted-agent handoff prompt for one file | `--file`, `--requester`, `--trusted-agent`, `--reason` |
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
+Bootstrap config spec: [`GLOVES_CONFIG_SPEC.md`](GLOVES_CONFIG_SPEC.md)
 
 ## Runtime Layout
 
@@ -171,6 +201,9 @@ Default root: `.openclaw/secrets`
 .openclaw/secrets/
   store/                    # encrypted *.age files
   meta/                     # per-secret metadata JSON
+  vaults/                   # per-vault config + sessions JSON
+  encrypted/                # vault ciphertext directories
+  mnt/                      # default vault mountpoints
   pending.json              # request lifecycle state
   audit.jsonl               # append-only audit events
   default-agent.agekey      # generated age identity
@@ -184,6 +217,7 @@ Path model: [`SecretsPaths`](src/paths.rs#L5)
 - Secret values wrapped in non-`Debug` type: [`SecretValue`](src/types.rs#L103)
 - Agent secret encryption and decryption: [`src/agent/backend.rs`](src/agent/backend.rs)
 - Human backend via `pass`: [`src/human/backend.rs`](src/human/backend.rs)
+- Vault orchestration via `gocryptfs`: [`src/vault/`](src/vault/)
 - Pending request signature verification: [`src/human/pending.rs`](src/human/pending.rs)
 - Restricted file permissions and atomic writes: [`src/fs_secure.rs`](src/fs_secure.rs)
 - TTL reaping with audit events: [`TtlReaper::reap`](src/reaper.rs#L16), [`AuditLog::log`](src/audit.rs#L69)

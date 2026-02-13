@@ -23,3 +23,5 @@ pub mod reaper;
 pub mod registry;
 /// Shared types.
 pub mod types;
+/// Encrypted volume management.
+pub mod vault;

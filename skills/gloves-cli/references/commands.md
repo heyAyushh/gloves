@@ -14,7 +14,7 @@ gloves --root <root> <command> [args...]
 | Command | Purpose | Key Flags/Args |
 |---|---|---|
 | `init` | Create runtime directory/file layout | none |
-| `set <name>` | Create an agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` |
+| `set <name>` | Create an agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
 | `get <name>` | Fetch secret value | none |
 | `env <name> <var>` | Print redacted export text | none |
 | `request <name> --reason <text>` | Open human-access request | `--reason` required |
@@ -59,7 +59,7 @@ gloves --root .openclaw/secrets verify
 ### Start Daemon Sidecar (OpenClaw/systemd)
 
 ```bash
-# strict startup checks only
+# strict startup checks only (includes bind-availability check)
 gloves --root .openclaw/secrets daemon --check --bind 127.0.0.1:7788
 
 # start daemon on loopback TCP

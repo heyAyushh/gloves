@@ -176,6 +176,63 @@ This plan is organized by Rust module boundaries and production-quality practice
 - `ensure_private_dir_creates_directory`
 - `private_permissions_are_restricted`
 
+## Domain: Vaults and Encrypted Volumes (`src/vault/**`, `src/reaper.rs`, `src/cli/mod.rs`)
+
+### Required behavior tests
+
+- `vault_config_roundtrip`
+- `vault_session_roundtrip`
+- `vault_session_expired`
+- `vault_session_active`
+- `init_creates_cipher_dir`
+- `mount_passes_extpass_and_idle`
+- `unmount_calls_fusermount`
+- `is_mounted_false`
+- `vault_init_agent`
+- `vault_init_human`
+- `vault_mount_creates_session`
+- `vault_mount_idempotent`
+- `vault_unmount_removes_session`
+- `vault_status_shows_remaining`
+- `vault_list_shows_all`
+- `vault_ask_file_prompt_requires_trusted_agent_access`
+- `vault_ask_file_prompt_fails_without_access`
+- `vault_ask_file_prompt_rejects_traversal`
+- `reaper_unmounts_expired_session`
+- `reaper_ignores_active_session`
+- `reaper_logs_vault_expired`
+- `reaper_handles_already_unmounted`
+- `cli_vault_init`
+- `cli_vault_mount`
+- `cli_vault_unmount`
+- `cli_vault_status`
+- `cli_vault_list`
+- `cli_vault_ask_file`
+- `cli_vault_ask_file_requires_access`
+
+## Domain: Bootstrap Config (`.gloves.toml`, CLI config resolution)
+
+### Required behavior tests
+
+- `config_roundtrip_v1`
+- `config_discovery_prefers_flag`
+- `config_discovery_prefers_env_over_discovery`
+- `config_discovery_walks_parent_dirs`
+- `config_validate_rejects_unknown_agent_path_alias`
+- `config_validate_rejects_duplicate_private_alias`
+- `config_validate_rejects_invalid_operation`
+- `config_resolve_relative_paths_against_file_dir`
+- `config_resolve_home_expansion`
+- `config_validate_rejects_group_world_writable_file`
+- `config_validate_accepts_private_modes`
+- `cli_bootstrap_uses_discovered_gloves_toml`
+- `cli_bootstrap_uses_explicit_config_path`
+- `cli_bootstrap_no_config_keeps_existing_defaults`
+- `cli_config_validate_success`
+- `cli_config_validate_failure_invalid_alias`
+- `cli_access_paths_json`
+- `cli_access_paths_unknown_agent_fails`
+
 ## Release Gates
 
 Run all gates before merging or publishing:
@@ -194,4 +251,3 @@ cargo publish --dry-run --locked
 - Region coverage target: `>= 90%`
 - Function coverage target: `>= 95%`
 - Line coverage target: `>= 99%`
-

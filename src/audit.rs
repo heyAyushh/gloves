@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     error::Result,
     fs_secure::{create_private_file_if_missing, set_permissions, PRIVATE_FILE_MODE},
-    types::{AgentId, SecretId},
+    types::{AgentId, Owner, SecretId},
 };
 
 /// Audit events emitted by the system.
@@ -41,6 +41,47 @@ pub enum AuditEvent {
         secret_id: SecretId,
         /// Agent that revoked the secret.
         by: AgentId,
+    },
+    /// Vault was created.
+    VaultCreated {
+        /// Vault logical name.
+        vault: String,
+        /// Vault owner domain.
+        owner: Owner,
+    },
+    /// Vault was mounted.
+    VaultMounted {
+        /// Vault logical name.
+        vault: String,
+        /// Agent that mounted the vault.
+        agent: AgentId,
+        /// Requested session TTL in minutes.
+        ttl_minutes: u64,
+    },
+    /// Vault was unmounted.
+    VaultUnmounted {
+        /// Vault logical name.
+        vault: String,
+        /// Unmount reason.
+        reason: String,
+        /// Agent associated with the operation.
+        agent: AgentId,
+    },
+    /// Vault session expired.
+    VaultSessionExpired {
+        /// Vault logical name.
+        vault: String,
+    },
+    /// Vault file handoff prompt was generated.
+    VaultHandoffPromptIssued {
+        /// Vault logical name.
+        vault: String,
+        /// Requesting agent.
+        requester: AgentId,
+        /// Trusted agent expected to retrieve the file.
+        trusted_agent: AgentId,
+        /// Requested file path inside the vault.
+        requested_file: String,
     },
 }
 

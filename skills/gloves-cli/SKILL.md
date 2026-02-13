@@ -37,7 +37,7 @@ Command details and examples:
 2. Store:
    ```bash
    gloves --root <root> set <secret-name> --generate --ttl <days>
-   # or: --stdin / --value
+   # or: --stdin / --value (ttl days must be > 0)
    ```
 3. Read (only when user explicitly wants secret output):
    ```bash
@@ -89,6 +89,7 @@ Command details and examples:
 1. Verify strict startup checks:
    ```bash
    gloves --root <root> daemon --check --bind 127.0.0.1:7788
+   # validates root permissions, loopback policy, and bind availability
    ```
 2. Start daemon:
    ```bash
