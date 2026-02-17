@@ -24,7 +24,8 @@
 
 ### Prerequisites
 
-- Rust stable toolchain (edition 2021)
+- `curl` + `tar` (for release-binary installs)
+- Rust stable toolchain (edition 2021, only for source builds)
 - In-process crypto library from [`rage`](https://github.com/str4d/rage) (`age` crate, no external crypto binary required)
 - [`pass`](https://www.passwordstore.org/) + GPG (required for human-owned secret access)
 - `gocryptfs` + `fusermount` + `mountpoint` (required for `vault` commands)
@@ -38,6 +39,24 @@ brew install pass gnupg
 
 # Ubuntu/Debian
 sudo apt-get install pass gnupg
+```
+
+### Install from GitHub release binaries (recommended)
+
+This script installs:
+
+- prebuilt `gloves` CLI from GitHub Releases (no local build)
+- `skills/gloves-cli` into `~/.openclaw/skills/gloves-cli`
+- initialized secrets root at `~/.openclaw/secrets`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash
+```
+
+Pin a specific release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash -s -- --release-ref vX.Y.Z
 ```
 
 ### Install from crates.io
@@ -64,7 +83,7 @@ npx skills add heyAyushh/gloves --skill gloves-cli
 
 Run this repository script to:
 
-- install `gloves` from source with `cargo install --path . --locked`
+- install `gloves` from GitHub Releases (default `--install-mode release`)
 - install `skills/gloves-cli` to `~/.openclaw/skills/gloves-cli`
 - initialize `~/.openclaw/secrets` with `gloves --root ... init`
 
@@ -74,11 +93,24 @@ curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-
 
 Useful options:
 
+- `--install-mode <release|source>`: choose release binary (default) or local source build
+- `--release-ref <latest|vX.Y.Z>`: choose release version for binary install
+- `--repo <OWNER/REPO>`: override GitHub repo used for release/skill downloads
+- `--repo-root <PATH>`: use local repository for source install and/or local skill copy
+- `--skill-ref <REF>`: fetch skill files from a specific tag/branch when local skill files are unavailable
 - `--dry-run`: preview commands without applying changes
 - `--skip-cli-install`: only install skill files and init root
 - `--skip-init`: skip `gloves --root <PATH> init`
 - `--secrets-root <PATH>`: override default secrets root
 - `--skill-dest <PATH>`: override skill destination path
+
+Each tagged release now includes these installable assets:
+
+- `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `gloves-<version>-x86_64-apple-darwin.tar.gz`
+- `gloves-<version>-aarch64-apple-darwin.tar.gz`
+- `gloves-<version>-x86_64-pc-windows-msvc.zip`
+- `checksums.txt`
 
 ## Quick Start
 

@@ -18,6 +18,24 @@ The publish workflow also enforces:
 - tag version equals `Cargo.toml` version
 - tag commit belongs to an allowed branch for that channel
 
+## Release Outputs
+
+For each tag, GitHub Actions `Publish` workflow now produces:
+
+- crates.io publish (`gloves` crate)
+- GitHub Release assets:
+  - `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
+  - `gloves-<version>-x86_64-apple-darwin.tar.gz`
+  - `gloves-<version>-aarch64-apple-darwin.tar.gz`
+  - `gloves-<version>-x86_64-pc-windows-msvc.zip`
+  - `checksums.txt` (SHA-256)
+
+Users can install from prebuilt binaries via:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash
+```
+
 ## Preflight (all channels)
 
 ```bash
