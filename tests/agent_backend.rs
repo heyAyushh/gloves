@@ -1,12 +1,14 @@
+mod common;
+
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
+use common::generate_identity;
 use gloves::{
-    agent::backend::{identity_recipient, parse_identity, AgentBackend},
+    agent::backend::AgentBackend,
     error::GlovesError,
     types::{SecretId, SecretValue},
 };
-use secrecy::ExposeSecret;
 
 #[test]
 fn encrypt_decrypt_roundtrip() {
@@ -14,17 +16,18 @@ fn encrypt_decrypt_roundtrip() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("db/password").unwrap();
 
-    let identity = age::x25519::Identity::generate();
-    let recipient = identity_recipient(&identity);
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"hunter2".to_vec()),
-            vec![recipient],
+            vec![identity.recipient],
         )
         .unwrap();
 
-    let decrypted = backend.decrypt(&secret_id, vec![identity]).unwrap();
+    let decrypted = backend
+        .decrypt(&secret_id, identity.identity_file.as_path())
+        .unwrap();
     let value = decrypted.expose(|bytes| bytes.to_vec());
     assert_eq!(value, b"hunter2");
 }
@@ -35,17 +38,19 @@ fn decrypt_wrong_key_fails() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("db/password").unwrap();
 
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"hunter2".to_vec()),
-            vec![identity_recipient(&identity)],
+            vec![identity.recipient],
         )
         .unwrap();
 
-    let outsider = age::x25519::Identity::generate();
-    assert!(backend.decrypt(&secret_id, vec![outsider]).is_err());
+    let outsider = generate_identity(temp_dir.path(), "agent-b");
+    assert!(backend
+        .decrypt(&secret_id, outsider.identity_file.as_path())
+        .is_err());
 }
 
 #[test]
@@ -54,24 +59,25 @@ fn multi_recipient_both_decrypt() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("shared").unwrap();
 
-    let identity_a = age::x25519::Identity::generate();
-    let identity_b = age::x25519::Identity::generate();
+    let identity_a = generate_identity(temp_dir.path(), "agent-a");
+    let identity_b = generate_identity(temp_dir.path(), "agent-b");
 
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"top-secret".to_vec()),
-            vec![
-                identity_recipient(&identity_a),
-                identity_recipient(&identity_b),
-            ],
+            vec![identity_a.recipient.clone(), identity_b.recipient.clone()],
         )
         .unwrap();
 
-    let a = backend.decrypt(&secret_id, vec![identity_a]).unwrap();
-    let b = backend.decrypt(&secret_id, vec![identity_b]).unwrap();
-    assert_eq!(a.expose(|bytes| bytes.to_vec()), b"top-secret");
-    assert_eq!(b.expose(|bytes| bytes.to_vec()), b"top-secret");
+    let value_a = backend
+        .decrypt(&secret_id, identity_a.identity_file.as_path())
+        .unwrap();
+    let value_b = backend
+        .decrypt(&secret_id, identity_b.identity_file.as_path())
+        .unwrap();
+    assert_eq!(value_a.expose(|bytes| bytes.to_vec()), b"top-secret");
+    assert_eq!(value_b.expose(|bytes| bytes.to_vec()), b"top-secret");
 }
 
 #[test]
@@ -80,22 +86,21 @@ fn multi_recipient_outsider_fails() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("shared").unwrap();
 
-    let identity_a = age::x25519::Identity::generate();
-    let identity_b = age::x25519::Identity::generate();
+    let identity_a = generate_identity(temp_dir.path(), "agent-a");
+    let identity_b = generate_identity(temp_dir.path(), "agent-b");
 
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"top-secret".to_vec()),
-            vec![
-                identity_recipient(&identity_a),
-                identity_recipient(&identity_b),
-            ],
+            vec![identity_a.recipient, identity_b.recipient],
         )
         .unwrap();
 
-    let outsider = age::x25519::Identity::generate();
-    assert!(backend.decrypt(&secret_id, vec![outsider]).is_err());
+    let outsider = generate_identity(temp_dir.path(), "outsider");
+    assert!(backend
+        .decrypt(&secret_id, outsider.identity_file.as_path())
+        .is_err());
 }
 
 #[test]
@@ -104,12 +109,12 @@ fn encrypt_creates_age_file() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("db/password").unwrap();
 
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"hunter2".to_vec()),
-            vec![identity_recipient(&identity)],
+            vec![identity.recipient],
         )
         .unwrap();
 
@@ -122,12 +127,12 @@ fn encrypt_no_overwrite() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("db/password").unwrap();
 
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"hunter2".to_vec()),
-            vec![identity_recipient(&identity)],
+            vec![identity.recipient.clone()],
         )
         .unwrap();
 
@@ -135,7 +140,7 @@ fn encrypt_no_overwrite() {
         .encrypt(
             &secret_id,
             &SecretValue::new(b"other".to_vec()),
-            vec![identity_recipient(&identity)],
+            vec![identity.recipient],
         )
         .is_err());
 }
@@ -146,27 +151,31 @@ fn grant_adds_recipient() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("shared").unwrap();
 
-    let creator = age::x25519::Identity::generate();
-    let new_user = age::x25519::Identity::generate();
+    let creator = generate_identity(temp_dir.path(), "creator");
+    let new_user = generate_identity(temp_dir.path(), "new-user");
 
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"rotate-me".to_vec()),
-            vec![identity_recipient(&creator)],
+            vec![creator.recipient.clone()],
         )
         .unwrap();
-    assert!(backend.decrypt(&secret_id, vec![new_user.clone()]).is_err());
+    assert!(backend
+        .decrypt(&secret_id, new_user.identity_file.as_path())
+        .is_err());
 
     backend
         .grant(
             &secret_id,
-            creator.clone(),
-            vec![identity_recipient(&creator), identity_recipient(&new_user)],
+            creator.identity_file.as_path(),
+            vec![creator.recipient, new_user.recipient],
         )
         .unwrap();
 
-    let decrypted = backend.decrypt(&secret_id, vec![new_user]).unwrap();
+    let decrypted = backend
+        .decrypt(&secret_id, new_user.identity_file.as_path())
+        .unwrap();
     assert_eq!(decrypted.expose(|bytes| bytes.to_vec()), b"rotate-me");
 }
 
@@ -176,12 +185,12 @@ fn file_permissions_0600() {
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("db/password").unwrap();
 
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"hunter2".to_vec()),
-            vec![identity_recipient(&identity)],
+            vec![identity.recipient],
         )
         .unwrap();
 
@@ -209,47 +218,28 @@ fn ciphertext_checksum_changes_after_grant() {
     let temp_dir = tempfile::tempdir().unwrap();
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
     let secret_id = SecretId::new("shared").unwrap();
-    let creator = age::x25519::Identity::generate();
-    let first_recipient = identity_recipient(&creator);
+    let creator = generate_identity(temp_dir.path(), "creator");
 
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"rotate-me".to_vec()),
-            vec![first_recipient],
+            vec![creator.recipient.clone()],
         )
         .unwrap();
     let before = backend.ciphertext_checksum(&secret_id).unwrap();
 
-    let second = age::x25519::Identity::generate();
+    let second = generate_identity(temp_dir.path(), "second");
     backend
         .grant(
             &secret_id,
-            creator.clone(),
-            vec![identity_recipient(&creator), identity_recipient(&second)],
+            creator.identity_file.as_path(),
+            vec![creator.recipient, second.recipient],
         )
         .unwrap();
     let after = backend.ciphertext_checksum(&secret_id).unwrap();
 
     assert_ne!(before, after);
-}
-
-#[test]
-fn parse_identity_roundtrip() {
-    let identity = age::x25519::Identity::generate();
-    let parsed = parse_identity(identity.to_string().expose_secret()).unwrap();
-    assert_eq!(
-        parsed.to_string().expose_secret(),
-        identity.to_string().expose_secret()
-    );
-}
-
-#[test]
-fn parse_identity_invalid() {
-    assert!(matches!(
-        parse_identity("not-an-age-key"),
-        Err(GlovesError::Crypto(_))
-    ));
 }
 
 #[test]
@@ -261,24 +251,20 @@ fn delete_missing_is_ok() {
 }
 
 #[test]
-fn decrypt_unsupported_header_fails() {
+fn decrypt_invalid_ciphertext_fails() {
     let temp_dir = tempfile::tempdir().unwrap();
     let backend = AgentBackend::new(temp_dir.path()).unwrap();
-    let secret_id = SecretId::new("db/passphrase").unwrap();
-    let passphrase = age::secrecy::SecretString::from("passphrase".to_owned());
+    let secret_id = SecretId::new("db/invalid").unwrap();
 
-    let encryptor = age::Encryptor::with_user_passphrase(passphrase);
-    let mut ciphertext = Vec::new();
-    let mut writer = encryptor.wrap_output(&mut ciphertext).unwrap();
-    writer.write_all(b"secret").unwrap();
-    writer.finish().unwrap();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     let output_path = backend.ciphertext_path(&secret_id);
     std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+    let mut ciphertext = Vec::new();
+    ciphertext.write_all(b"invalid-ciphertext").unwrap();
     std::fs::write(output_path, ciphertext).unwrap();
 
-    let identity = age::x25519::Identity::generate();
     assert!(matches!(
-        backend.decrypt(&secret_id, vec![identity]),
+        backend.decrypt(&secret_id, identity.identity_file.as_path()),
         Err(GlovesError::Crypto(_))
     ));
 }

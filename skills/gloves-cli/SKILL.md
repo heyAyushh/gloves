@@ -99,6 +99,7 @@ Command details and examples:
 ## Guardrails
 
 - Prefer `--stdin` or `--generate` over `--value` when possible.
+- Agent crypto runs in-process; no external `rage` binary install is required.
 - Avoid printing raw secrets unless the user explicitly requests it.
 - Keep commands scoped to the selected `--root`; avoid touching unrelated paths.
 - Use valid secret identifiers only (no traversal patterns like `..` or leading `/`).

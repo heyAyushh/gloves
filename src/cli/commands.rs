@@ -55,8 +55,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
             let creator = state.default_agent_id.clone();
-            let identity = runtime::load_or_create_default_identity(&state.paths)?;
-            let recipient = identity.to_public().to_string();
+            let recipient = runtime::load_or_create_default_recipient(&state.paths)?;
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
             let ttl_days =
@@ -86,8 +85,8 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
             let caller = state.default_agent_id.clone();
-            let identity = runtime::load_or_create_default_identity(&state.paths)?;
-            let value = manager.get(&secret_id, &caller, Some(identity));
+            let identity_file = runtime::load_or_create_default_identity(&state.paths)?;
+            let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
             match value {
                 Ok(secret) => secret.expose(|bytes| println!("{}", String::from_utf8_lossy(bytes))),
                 Err(error) => {
@@ -336,7 +335,10 @@ fn ensure_vault_dependencies() -> Result<()> {
 
 fn is_binary_available(binary: &str) -> bool {
     let candidate = Path::new(binary);
-    if candidate.parent().is_some() {
+    if candidate
+        .parent()
+        .is_some_and(|parent| !parent.as_os_str().is_empty())
+    {
         return is_executable_file(candidate);
     }
 

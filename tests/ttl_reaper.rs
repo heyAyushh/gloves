@@ -1,6 +1,9 @@
+mod common;
+
 use std::{collections::HashSet, fs};
 
 use chrono::{Duration, Utc};
+use common::generate_identity;
 use gloves::{
     agent::{backend::AgentBackend, meta::MetadataStore},
     audit::AuditLog,
@@ -16,12 +19,12 @@ fn reaps_expired() {
     let audit = AuditLog::new(temp_dir.path().join("audit.jsonl")).unwrap();
 
     let secret_id = SecretId::new("expired").unwrap();
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"old".to_vec()),
-            vec![identity.to_public()],
+            vec![identity.recipient],
         )
         .unwrap();
 
@@ -55,12 +58,12 @@ fn keeps_valid() {
     let audit = AuditLog::new(temp_dir.path().join("audit.jsonl")).unwrap();
 
     let secret_id = SecretId::new("valid").unwrap();
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"new".to_vec()),
-            vec![identity.to_public()],
+            vec![identity.recipient],
         )
         .unwrap();
 
@@ -94,12 +97,12 @@ fn logs_expiry_event() {
     let audit = AuditLog::new(temp_dir.path().join("audit.jsonl")).unwrap();
 
     let secret_id = SecretId::new("expired").unwrap();
-    let identity = age::x25519::Identity::generate();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
     backend
         .encrypt(
             &secret_id,
             &SecretValue::new(b"old".to_vec()),
-            vec![identity.to_public()],
+            vec![identity.recipient],
         )
         .unwrap();
 

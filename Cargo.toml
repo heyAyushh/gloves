@@ -1,11 +1,11 @@
 [package]
 name = "gloves"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "seamless secret manager and handoff"
 license = "MIT"
 repository = "https://github.com/heyAyushh/gloves"
-keywords = ["secrets", "security", "agent", "age"]
+keywords = ["secrets", "security", "agent", "rage"]
 categories = ["command-line-utilities", "cryptography"]
 
 [dependencies]

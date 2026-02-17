@@ -8,8 +8,8 @@
 
 `gloves` is a secure secrets control plane for OpenClaw and other multi-agent/human operator runtimes.
 
-- Agent-owned secrets encrypted with `age`
-- Human-owned secrets resolved through `pass`
+- Agent-owned secrets encrypted in-process via the [`rage`](https://github.com/str4d/rage) project (`age` format)
+- Human-owned secrets resolved through [`pass`](https://www.passwordstore.org/)
 - Access requests, approvals, metadata, audit trails, and TTL reaping
 
 ## Why gloves
@@ -25,11 +25,12 @@
 ### Prerequisites
 
 - Rust stable toolchain (edition 2021)
-- `pass` + GPG (required for human-owned secret access)
+- In-process crypto library from [`rage`](https://github.com/str4d/rage) (`age` crate, no external crypto binary required)
+- [`pass`](https://www.passwordstore.org/) + GPG (required for human-owned secret access)
 - `gocryptfs` + `fusermount` + `mountpoint` (required for `vault` commands)
 - Writable secrets root (default: `.openclaw/secrets`)
 
-Quick `pass` install:
+Quick [`pass`](https://www.passwordstore.org/) install:
 
 ```bash
 # macOS
@@ -58,6 +59,26 @@ cargo install --path .
 ```bash
 npx skills add heyAyushh/gloves --skill gloves-cli
 ```
+
+### OpenClaw setup script (CLI + skill)
+
+Run this repository script to:
+
+- install `gloves` from source with `cargo install --path . --locked`
+- install `skills/gloves-cli` to `~/.openclaw/skills/gloves-cli`
+- initialize `~/.openclaw/secrets` with `gloves --root ... init`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash
+```
+
+Useful options:
+
+- `--dry-run`: preview commands without applying changes
+- `--skip-cli-install`: only install skill files and init root
+- `--skip-init`: skip `gloves --root <PATH> init`
+- `--secrets-root <PATH>`: override default secrets root
+- `--skill-dest <PATH>`: override skill destination path
 
 ## Quick Start
 
@@ -249,7 +270,7 @@ Default root: `.openclaw/secrets`
   mnt/                      # default vault mountpoints
   pending.json              # request lifecycle state
   audit.jsonl               # append-only audit events
-  default-agent.agekey      # generated age identity
+  default-agent.agekey      # generated age identity (rage project format)
   default-agent.signing.key # generated Ed25519 signing key
 ```
 
@@ -279,7 +300,7 @@ If another coding agent is installed for this repo, configure memory/indexing ex
 ```mermaid
 flowchart LR
     CLI["gloves CLI\nsrc/cli/mod.rs"] --> Router["SecretsManager\nsrc/manager.rs"]
-    Router --> Agent["Agent backend (age)\nsrc/agent/backend.rs"]
+    Router --> Agent["Agent backend (in-process age format)\nsrc/agent/backend.rs"]
     Router --> Human["Human backend (pass)\nsrc/human/backend.rs"]
     Router --> Meta["Metadata store\nsrc/agent/meta.rs"]
     Router --> Pending["Pending request store\nsrc/human/pending.rs"]

@@ -1,12 +1,11 @@
-use std::{collections::HashSet, fs};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use chrono::Duration;
 use ed25519_dalek::SigningKey;
 use rand::RngExt;
-use secrecy::ExposeSecret;
 
 use crate::{
-    agent::{backend::AgentBackend, meta::MetadataStore},
+    agent::{age_crypto, backend::AgentBackend, meta::MetadataStore},
     audit::AuditLog,
     error::{GlovesError, Result},
     fs_secure::{create_private_file_if_missing, ensure_private_dir, write_private_file_atomic},
@@ -47,22 +46,24 @@ pub(crate) fn manager_for_paths(paths: &SecretsPaths) -> Result<SecretsManager> 
     ))
 }
 
-pub(crate) fn load_or_create_default_identity(
-    paths: &SecretsPaths,
-) -> Result<age::x25519::Identity> {
+pub(crate) fn load_or_create_default_identity(paths: &SecretsPaths) -> Result<PathBuf> {
     let path = paths.default_identity_file();
     if path.exists() {
-        let identity = fs::read_to_string(&path)?
-            .trim()
-            .parse::<age::x25519::Identity>()
-            .map_err(|error| GlovesError::Crypto(error.to_string()))?;
-        return Ok(identity);
+        age_crypto::validate_identity_file(&path)?;
+        return Ok(path);
     }
 
-    let identity = age::x25519::Identity::generate();
-    let identity_secret = identity.to_string();
-    write_private_file_atomic(&path, identity_secret.expose_secret().as_bytes())?;
-    Ok(identity)
+    age_crypto::generate_identity_file(&path)?;
+    Ok(path)
+}
+
+pub(crate) fn recipient_from_identity_file(identity_file: &std::path::Path) -> Result<String> {
+    age_crypto::recipient_from_identity_file(identity_file)
+}
+
+pub(crate) fn load_or_create_default_recipient(paths: &SecretsPaths) -> Result<String> {
+    let identity_file = load_or_create_default_identity(paths)?;
+    recipient_from_identity_file(&identity_file)
 }
 
 pub(crate) fn load_or_create_default_signing_key(paths: &SecretsPaths) -> Result<SigningKey> {
@@ -106,8 +107,7 @@ pub(crate) fn ensure_agent_vault_secret(paths: &SecretsPaths, secret_name: &str)
     }
 
     let creator = AgentId::new(DEFAULT_AGENT_ID)?;
-    let identity = load_or_create_default_identity(paths)?;
-    let recipient = identity.to_public().to_string();
+    let recipient = load_or_create_default_recipient(paths)?;
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
 

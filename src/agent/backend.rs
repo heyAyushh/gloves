@@ -1,13 +1,12 @@
 use std::{
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
-use age::{Decryptor, Encryptor};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    agent::age_crypto,
     error::{GlovesError, Result},
     fs_secure::write_private_file_atomic,
     types::{SecretId, SecretValue},
@@ -33,37 +32,21 @@ impl AgentBackend {
         &self,
         secret_id: &SecretId,
         secret_value: &SecretValue,
-        recipients: Vec<age::x25519::Recipient>,
+        recipient_keys: Vec<String>,
     ) -> Result<PathBuf> {
         let ciphertext_path = self.ciphertext_path(secret_id);
         if ciphertext_path.exists() {
             return Err(GlovesError::AlreadyExists);
         }
         ensure_parent_dir(&ciphertext_path)?;
-        self.encrypt_to_path(secret_value, recipients, &ciphertext_path)?;
+        self.encrypt_to_path(secret_value, &recipient_keys, &ciphertext_path)?;
 
         Ok(ciphertext_path)
     }
 
-    /// Decrypts a stored secret using one of the supplied identities.
-    pub fn decrypt(
-        &self,
-        secret_id: &SecretId,
-        identities: Vec<age::x25519::Identity>,
-    ) -> Result<SecretValue> {
-        let ciphertext = fs::read(self.ciphertext_path(secret_id))?;
-        let decryptor = Decryptor::new(&ciphertext[..])
-            .map_err(|error: age::DecryptError| GlovesError::Crypto(error.to_string()))?;
-
-        let identity_refs: Vec<&dyn age::Identity> = identities
-            .iter()
-            .map(|identity| identity as &dyn age::Identity)
-            .collect();
-        let mut reader = decryptor
-            .decrypt(identity_refs.into_iter())
-            .map_err(|error: age::DecryptError| GlovesError::Crypto(error.to_string()))?;
-        let mut plaintext = Vec::new();
-        std::io::Read::read_to_end(&mut reader, &mut plaintext)?;
+    /// Decrypts a stored secret with the supplied identity file.
+    pub fn decrypt(&self, secret_id: &SecretId, identity_file: &Path) -> Result<SecretValue> {
+        let plaintext = age_crypto::decrypt_file(&self.ciphertext_path(secret_id), identity_file)?;
         Ok(SecretValue::new(plaintext))
     }
 
@@ -71,12 +54,12 @@ impl AgentBackend {
     pub fn grant(
         &self,
         secret_id: &SecretId,
-        decrypting_identity: age::x25519::Identity,
-        recipients: Vec<age::x25519::Recipient>,
+        decrypting_identity_file: &Path,
+        recipient_keys: Vec<String>,
     ) -> Result<()> {
-        let plaintext = self.decrypt(secret_id, vec![decrypting_identity])?;
+        let plaintext = self.decrypt(secret_id, decrypting_identity_file)?;
         let path = self.ciphertext_path(secret_id);
-        self.encrypt_to_path(&plaintext, recipients, &path)?;
+        self.encrypt_to_path(&plaintext, &recipient_keys, &path)?;
         Ok(())
     }
 
@@ -103,27 +86,16 @@ impl AgentBackend {
     fn encrypt_to_path(
         &self,
         secret_value: &SecretValue,
-        recipients: Vec<age::x25519::Recipient>,
+        recipient_keys: &[String],
         output_path: &Path,
     ) -> Result<()> {
-        if recipients.is_empty() {
+        if recipient_keys.is_empty() {
             return Err(GlovesError::Crypto("no recipients provided".to_owned()));
         }
         ensure_parent_dir(output_path)?;
-        let encryptor = Encryptor::with_recipients(
-            recipients
-                .iter()
-                .map(|recipient| recipient as &dyn age::Recipient),
-        )
-        .map_err(|error: age::EncryptError| GlovesError::Crypto(error.to_string()))?;
 
-        let mut ciphertext = Vec::new();
-        let mut writer = encryptor.wrap_output(&mut ciphertext)?;
-        secret_value.expose(|value| writer.write_all(value))?;
-        writer
-            .finish()
-            .map_err(|error: std::io::Error| GlovesError::Crypto(error.to_string()))?;
-
+        let ciphertext = secret_value
+            .expose(|value| age_crypto::encrypt_for_recipients(value, recipient_keys))?;
         write_private_file_atomic(output_path, &ciphertext)?;
         Ok(())
     }
@@ -139,23 +111,4 @@ fn checksum_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
-}
-
-/// Parses an age recipient string.
-pub fn parse_recipient(recipient: &str) -> Result<age::x25519::Recipient> {
-    recipient
-        .parse::<age::x25519::Recipient>()
-        .map_err(|error| GlovesError::Crypto(error.to_string()))
-}
-
-/// Returns an age recipient from an identity.
-pub fn identity_recipient(identity: &age::x25519::Identity) -> age::x25519::Recipient {
-    identity.to_public()
-}
-
-/// Parses an age identity string.
-pub fn parse_identity(identity: &str) -> Result<age::x25519::Identity> {
-    identity
-        .parse::<age::x25519::Identity>()
-        .map_err(|error| GlovesError::Crypto(error.to_string()))
 }

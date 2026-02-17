@@ -1,6 +1,9 @@
+mod common;
+
 use std::collections::HashSet;
 
 use chrono::{Duration, Utc};
+use common::{generate_identity, IdentityMaterial};
 use ed25519_dalek::SigningKey;
 use gloves::{
     agent::{backend::AgentBackend, meta::MetadataStore},
@@ -43,6 +46,10 @@ fn signing_key() -> SigningKey {
     SigningKey::from_bytes(&key_bytes)
 }
 
+fn identity_for(temp_dir: &tempfile::TempDir, label: &str) -> IdentityMaterial {
+    generate_identity(temp_dir.path(), label)
+}
+
 #[test]
 fn set_agent_secret() {
     let (manager, _temp) = build_manager(HumanBackend::new());
@@ -51,7 +58,7 @@ fn set_agent_secret() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     let created = manager
         .set(
@@ -62,7 +69,7 @@ fn set_agent_secret() {
                 ttl: Duration::hours(1),
                 created_by: creator,
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();
@@ -102,7 +109,7 @@ fn set_rolls_back_ciphertext_when_metadata_save_fails() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&temp_dir, "agent-a");
 
     let result = manager.set(
         secret_id.clone(),
@@ -112,7 +119,7 @@ fn set_rolls_back_ciphertext_when_metadata_save_fails() {
             ttl: Duration::hours(1),
             created_by: creator,
             recipients,
-            recipient_keys: vec![identity.to_public().to_string()],
+            recipient_keys: vec![identity.recipient],
         },
     );
 
@@ -131,7 +138,7 @@ fn set_rolls_back_metadata_and_ciphertext_when_audit_fails() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&temp_dir, "agent-a");
 
     let result = manager.set(
         secret_id.clone(),
@@ -141,7 +148,7 @@ fn set_rolls_back_metadata_and_ciphertext_when_audit_fails() {
             ttl: Duration::hours(1),
             created_by: creator,
             recipients,
-            recipient_keys: vec![identity.to_public().to_string()],
+            recipient_keys: vec![identity.recipient],
         },
     );
 
@@ -158,7 +165,7 @@ fn get_routes_agent() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -169,12 +176,14 @@ fn get_routes_agent() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient.clone()],
             },
         )
         .unwrap();
 
-    let secret = manager.get(&id, &creator, Some(identity)).unwrap();
+    let secret = manager
+        .get(&id, &creator, Some(identity.identity_file.as_path()))
+        .unwrap();
     assert_eq!(secret.expose(|bytes| bytes.to_vec()), b"agent-secret");
 }
 
@@ -264,7 +273,7 @@ fn get_expired() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -275,13 +284,13 @@ fn get_expired() {
                 ttl: Duration::seconds(-1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient.clone()],
             },
         )
         .unwrap();
 
     assert!(matches!(
-        manager.get(&id, &creator, Some(identity)),
+        manager.get(&id, &creator, Some(identity.identity_file.as_path())),
         Err(GlovesError::Expired)
     ));
 }
@@ -294,7 +303,7 @@ fn get_unauthorized() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -305,14 +314,19 @@ fn get_unauthorized() {
                 ttl: Duration::hours(1),
                 created_by: creator,
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();
 
     let outsider = AgentId::new("agent-b").unwrap();
+    let outsider_identity = identity_for(&_temp, "agent-b");
     assert!(matches!(
-        manager.get(&id, &outsider, Some(age::x25519::Identity::generate())),
+        manager.get(
+            &id,
+            &outsider,
+            Some(outsider_identity.identity_file.as_path())
+        ),
         Err(GlovesError::Unauthorized)
     ));
 }
@@ -325,7 +339,7 @@ fn get_agent_without_identity_is_unauthorized() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -336,7 +350,7 @@ fn get_agent_without_identity_is_unauthorized() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();
@@ -355,7 +369,7 @@ fn get_increments_access() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -366,12 +380,14 @@ fn get_increments_access() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient.clone()],
             },
         )
         .unwrap();
 
-    manager.get(&id, &creator, Some(identity)).unwrap();
+    manager
+        .get(&id, &creator, Some(identity.identity_file.as_path()))
+        .unwrap();
     let meta = manager.metadata_store.load(&id).unwrap();
     assert_eq!(meta.access_count, 1);
 }
@@ -384,7 +400,7 @@ fn get_tampered_ciphertext_fails_integrity() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -395,7 +411,7 @@ fn get_tampered_ciphertext_fails_integrity() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient.clone()],
             },
         )
         .unwrap();
@@ -406,7 +422,7 @@ fn get_tampered_ciphertext_fails_integrity() {
     std::fs::write(ciphertext_path, bytes).unwrap();
 
     assert!(matches!(
-        manager.get(&id, &creator, Some(identity)),
+        manager.get(&id, &creator, Some(identity.identity_file.as_path())),
         Err(GlovesError::IntegrityViolation)
     ));
 }
@@ -419,7 +435,7 @@ fn get_with_empty_checksum_allows_legacy_metadata() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -430,7 +446,7 @@ fn get_with_empty_checksum_allows_legacy_metadata() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient.clone()],
             },
         )
         .unwrap();
@@ -439,7 +455,9 @@ fn get_with_empty_checksum_allows_legacy_metadata() {
     meta.checksum.clear();
     manager.metadata_store.save(&meta).unwrap();
 
-    let value = manager.get(&id, &creator, Some(identity)).unwrap();
+    let value = manager
+        .get(&id, &creator, Some(identity.identity_file.as_path()))
+        .unwrap();
     assert_eq!(value.expose(|bytes| bytes.to_vec()), b"agent-secret");
 }
 
@@ -471,8 +489,9 @@ fn grant_agent_ok() {
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
 
-    let creator_identity = age::x25519::Identity::generate();
-    let new_identity = age::x25519::Identity::generate();
+    let creator_identity = identity_for(&_temp, "agent-a");
+    let new_identity = identity_for(&_temp, "agent-b");
+    let extra_identity = identity_for(&_temp, "agent-c");
 
     manager
         .set(
@@ -483,7 +502,7 @@ fn grant_agent_ok() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![creator_identity.to_public().to_string()],
+                recipient_keys: vec![creator_identity.recipient.clone()],
             },
         )
         .unwrap();
@@ -492,16 +511,18 @@ fn grant_agent_ok() {
         .grant(
             &id,
             &creator,
-            creator_identity,
+            creator_identity.identity_file.as_path(),
             new_agent.clone(),
             &[
-                new_identity.to_public().to_string(),
-                age::x25519::Identity::generate().to_public().to_string(),
+                new_identity.recipient.clone(),
+                extra_identity.recipient.clone(),
             ],
         )
         .unwrap();
 
-    let value = manager.get(&id, &new_agent, Some(new_identity)).unwrap();
+    let value = manager
+        .get(&id, &new_agent, Some(new_identity.identity_file.as_path()))
+        .unwrap();
     assert_eq!(value.expose(|bytes| bytes.to_vec()), b"agent-secret");
 }
 
@@ -526,12 +547,14 @@ fn grant_human_forbidden() {
         })
         .unwrap();
 
+    let grant_identity = identity_for(&_temp, "grant-a");
+    let grant_recipient = identity_for(&_temp, "grant-b");
     let result = manager.grant(
         &id,
         &creator,
-        age::x25519::Identity::generate(),
+        grant_identity.identity_file.as_path(),
         AgentId::new("agent-b").unwrap(),
-        &[age::x25519::Identity::generate().to_public().to_string()],
+        &[grant_recipient.recipient],
     );
 
     assert!(matches!(result, Err(GlovesError::Forbidden)));
@@ -546,7 +569,7 @@ fn grant_by_non_creator_forbidden() {
     let outsider = AgentId::new("agent-b").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let creator_identity = age::x25519::Identity::generate();
+    let creator_identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -557,17 +580,19 @@ fn grant_by_non_creator_forbidden() {
                 ttl: Duration::hours(1),
                 created_by: creator,
                 recipients,
-                recipient_keys: vec![creator_identity.to_public().to_string()],
+                recipient_keys: vec![creator_identity.recipient],
             },
         )
         .unwrap();
 
+    let outsider_identity = identity_for(&_temp, "agent-b");
+    let new_agent_identity = identity_for(&_temp, "agent-c");
     let result = manager.grant(
         &id,
         &outsider,
-        age::x25519::Identity::generate(),
+        outsider_identity.identity_file.as_path(),
         AgentId::new("agent-c").unwrap(),
-        &[age::x25519::Identity::generate().to_public().to_string()],
+        &[new_agent_identity.recipient],
     );
     assert!(matches!(result, Err(GlovesError::Forbidden)));
 }
@@ -580,7 +605,7 @@ fn revoke_by_creator() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -591,7 +616,7 @@ fn revoke_by_creator() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();
@@ -609,7 +634,7 @@ fn revoke_by_noncreator() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -620,7 +645,7 @@ fn revoke_by_noncreator() {
                 ttl: Duration::hours(1),
                 created_by: creator,
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();
@@ -641,7 +666,7 @@ fn list_all() {
     let creator = AgentId::new("agent-a").unwrap();
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
-    let identity = age::x25519::Identity::generate();
+    let identity = identity_for(&_temp, "agent-a");
 
     manager
         .set(
@@ -652,7 +677,7 @@ fn list_all() {
                 ttl: Duration::hours(1),
                 created_by: creator.clone(),
                 recipients,
-                recipient_keys: vec![identity.to_public().to_string()],
+                recipient_keys: vec![identity.recipient],
             },
         )
         .unwrap();

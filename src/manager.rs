@@ -1,14 +1,12 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 
 use crate::{
-    agent::{
-        backend::{parse_recipient, AgentBackend},
-        meta::MetadataStore,
-    },
+    agent::{backend::AgentBackend, meta::MetadataStore},
     audit::{AuditEvent, AuditLog},
     error::{GlovesError, Result},
     human::{backend::HumanBackend, pending::PendingRequestStore},
@@ -82,14 +80,8 @@ impl SecretsManager {
             return Err(GlovesError::Forbidden);
         }
 
-        let parsed_recipients = options
-            .recipient_keys
-            .iter()
-            .map(|value| parse_recipient(value))
-            .collect::<Result<Vec<_>>>()?;
-
         self.agent_backend
-            .encrypt(&secret_id, &secret_value, parsed_recipients)?;
+            .encrypt(&secret_id, &secret_value, options.recipient_keys)?;
         let checksum = self.agent_backend.ciphertext_checksum(&secret_id)?;
 
         let now = Utc::now();
@@ -124,7 +116,7 @@ impl SecretsManager {
         &self,
         secret_id: &SecretId,
         caller: &AgentId,
-        caller_identity: Option<age::x25519::Identity>,
+        caller_identity_file: Option<&Path>,
     ) -> Result<SecretValue> {
         let mut meta = self.metadata_store.load(secret_id)?;
 
@@ -144,8 +136,8 @@ impl SecretsManager {
                     }
                 }
 
-                let identity = caller_identity.ok_or(GlovesError::Unauthorized)?;
-                self.agent_backend.decrypt(secret_id, vec![identity])?
+                let identity_file = caller_identity_file.ok_or(GlovesError::Unauthorized)?;
+                self.agent_backend.decrypt(secret_id, identity_file)?
             }
             Owner::Human => {
                 if !self.pending_store.is_fulfilled(secret_id, caller)? {
@@ -183,7 +175,7 @@ impl SecretsManager {
         &self,
         secret_id: &SecretId,
         granter: &AgentId,
-        granter_identity: age::x25519::Identity,
+        granter_identity_file: &Path,
         new_recipient: AgentId,
         all_recipient_keys: &[String],
     ) -> Result<()> {
@@ -196,12 +188,11 @@ impl SecretsManager {
         }
 
         meta.recipients.insert(new_recipient);
-        let parsed_recipients = all_recipient_keys
-            .iter()
-            .map(|value| parse_recipient(value))
-            .collect::<Result<Vec<_>>>()?;
-        self.agent_backend
-            .grant(secret_id, granter_identity, parsed_recipients)?;
+        self.agent_backend.grant(
+            secret_id,
+            granter_identity_file,
+            all_recipient_keys.to_vec(),
+        )?;
         meta.checksum = self.agent_backend.ciphertext_checksum(secret_id)?;
         self.metadata_store.save(&meta)
     }

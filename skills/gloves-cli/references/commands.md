@@ -8,6 +8,7 @@ gloves --root <root> <command> [args...]
 
 - Default root: `.openclaw/secrets`
 - Primary command router: `src/cli/mod.rs`
+- Crypto backend: in-process age-format library (no external rage binary required)
 
 ## Commands
 
@@ -73,5 +74,5 @@ Built by `SecretsPaths` in `src/paths.rs`:
 - `<root>/meta/` per-secret metadata JSON
 - `<root>/pending.json` request records
 - `<root>/audit.jsonl` append-only audit events
-- `<root>/default-agent.agekey` generated default identity
+- `<root>/default-agent.agekey` generated default age identity
 - `<root>/default-agent.signing.key` generated signing key

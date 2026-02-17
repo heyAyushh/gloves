@@ -282,8 +282,8 @@ fn execute_daemon_request_inner(
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
             let caller = AgentId::new(DEFAULT_AGENT_ID)?;
-            let identity = runtime::load_or_create_default_identity(paths)?;
-            let secret_value = manager.get(&secret_id, &caller, Some(identity))?;
+            let identity_file = runtime::load_or_create_default_identity(paths)?;
+            let secret_value = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
             let value = secret_value.expose(|bytes| String::from_utf8_lossy(bytes).to_string());
             Ok((
                 "ok".to_owned(),
@@ -299,8 +299,7 @@ fn execute_daemon_request_inner(
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
             let creator = AgentId::new(DEFAULT_AGENT_ID)?;
-            let identity = runtime::load_or_create_default_identity(paths)?;
-            let recipient = identity.to_public().to_string();
+            let recipient = runtime::load_or_create_default_recipient(paths)?;
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
             let ttl_days =

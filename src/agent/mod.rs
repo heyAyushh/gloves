@@ -1,3 +1,5 @@
+/// In-process age-format encryption/decryption helpers.
+pub mod age_crypto;
 /// Agent backend implementation.
 pub mod backend;
 /// Agent key derivation helpers.

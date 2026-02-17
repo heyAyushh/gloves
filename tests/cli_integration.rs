@@ -434,11 +434,11 @@ fn cli_vault_mode_required_fails_without_binaries() {
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains("missing required binaries"));
+        .stderr(predicates::str::contains("gocryptfs"));
 }
 
 #[test]
-fn cli_vault_mode_auto_keeps_non_vault_commands_available() {
+fn cli_vault_mode_auto_allows_non_crypto_commands_without_runtime_bins() {
     let temp_dir = tempfile::tempdir().unwrap();
     let empty_path = temp_dir.path().join("empty-path");
     fs::create_dir_all(&empty_path).unwrap();
@@ -453,7 +453,38 @@ fn cli_vault_mode_auto_keeps_non_vault_commands_available() {
             "list",
         ])
         .assert()
+        .success()
+        .stdout(predicates::str::contains("["));
+}
+
+#[test]
+fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "placeholder-secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
         .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args(["--root", root, "get", "x"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("placeholder-secret"));
 }
 
 #[test]

@@ -47,7 +47,7 @@ We need a repository-local config model like `openclaw.json`:
 ## 3. Non-goals
 
 - No secret values in config.
-- No replacement of `age`, `pass`, or vault crypto internals.
+- No replacement of `pass` or vault crypto internals.
 - No dynamic policy engine.
 - No implicit trust handoff beyond explicit config + existing audit trail.
 

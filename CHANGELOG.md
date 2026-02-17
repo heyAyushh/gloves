@@ -4,7 +4,9 @@
 
 ### Minor Changes
 
-- No unreleased changes yet.
+- Replaced runtime `rage`/`rage-keygen` subprocess crypto with in-process `age` library encryption/decryption (rage project format).
+- Removed runtime dependency on external rage binaries for `set`/`get`/daemon secret operations.
+- Updated setup/docs/tests/CI to reflect the in-process crypto backend.
 
 ## 0.2.0
 
@@ -14,7 +16,7 @@
 - Added `.gloves.toml` bootstrap config parsing and validation with discovery precedence (`--config`, `GLOVES_CONFIG`, parent discovery, `--no-config`).
 - Added CLI runtime wiring for config-driven defaults, plus new `config validate` and `access paths` commands.
 - Added vault runtime mode enforcement (`auto`, `required`, `disabled`) with dependency checks for `gocryptfs`, `fusermount`, and `mountpoint`.
-- Updated direct dependencies to latest stable releases and applied compatibility updates for `age`, `rand`, and `secrecy`.
+- Updated direct dependencies to latest stable releases and applied compatibility updates for crypto and security crates.
 
 ## 0.1.1
 
@@ -31,7 +33,7 @@
 ### Minor Changes
 
 - Initial release of `gloves`, a dual-backend secrets manager for OpenClaw-style and other multi-agent runtimes.
-- Added agent-owned secret storage with `age` encryption and checksum integrity validation.
+- Added agent-owned secret storage with age-format encryption and checksum integrity validation.
 - Added human-owned secret access flow via `pass` with request/approve/deny/status lifecycle.
 - Added runtime security controls: restricted file permissions, append-only audit logging, and TTL-based expiry reaping.
 - Added CLI command suite: `init`, `set`, `get`, `env`, `request`, `approve`, `deny`, `list`, `revoke`, and `verify`.
