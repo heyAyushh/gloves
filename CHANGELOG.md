@@ -4,6 +4,20 @@
 
 ### Minor Changes
 
+- No unreleased changes yet.
+
+## 0.3.1
+
+### Patch Changes
+
+- Fixed GitHub publish workflow macOS matrix to use supported runners for Intel macOS artifacts.
+- Added GitHub Release binary assets and SHA-256 checksum publishing in CI.
+- Updated OpenClaw setup script to install prebuilt release binaries by default, with source fallback.
+
+## 0.3.0
+
+### Minor Changes
+
 - Replaced runtime `rage`/`rage-keygen` subprocess crypto with in-process `age` library encryption/decryption (rage project format).
 - Removed runtime dependency on external rage binaries for `set`/`get`/daemon secret operations.
 - Updated setup/docs/tests/CI to reflect the in-process crypto backend.
