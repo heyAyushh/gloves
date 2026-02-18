@@ -6,6 +6,16 @@
 
 - No unreleased changes yet.
 
+## 0.3.2
+
+### Patch Changes
+
+- Fixed vault extpass wiring by introducing an internal `extpass-get` helper with explicit environment propagation, removing shell-quote dependent command construction.
+- Fixed CLI output handling to gracefully tolerate broken pipes and preserve exact raw bytes for `gloves get` (no lossy UTF-8 conversion, no forced newline).
+- Fixed vault bootstrap defaults to honor configured `agent_id`, `vault_secret_ttl_days`, and `vault_secret_length_bytes` values.
+- Fixed vault mount error handling to clean up failed mount sessions and propagate actionable missing-binary diagnostics.
+- Added regression coverage for extpass env requirements, raw-byte secret output, broken-pipe behavior, vault defaults wiring, mount cleanup, and driver error propagation.
+
 ## 0.3.1
 
 ### Patch Changes
