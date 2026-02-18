@@ -261,15 +261,39 @@ Environment variables:
 
 - `GLOVES_GET_PIPE_ALLOWLIST`: comma-separated executable names allowed by `gloves get --pipe-to`.
 
-Secret ACL example (`.gloves.toml`):
+Secret ACL operations map:
+
+- `read`: `gloves get`
+- `write`: `gloves set`
+- `list`: `gloves list` (plus list filtering by path)
+- `revoke`: `gloves revoke`
+- `request`: `gloves request`
+- `status`: `gloves status`
+- `approve`: `gloves approve`
+- `deny`: `gloves deny`
+
+Comprehensive secret ACL example (`.gloves.toml`):
 
 ```toml
 [secrets.acl.agent-main]
 paths = ["github/*", "shared/*"]
-operations = ["read", "write", "list", "revoke", "request", "status"]
+operations = ["read", "write", "list", "revoke", "request", "status", "approve", "deny"]
+
+[secrets.acl.agent-relationships]
+paths = ["contacts/*", "shared/contacts/*"]
+operations = ["read", "write", "list", "request", "status"]
+
+[secrets.acl.agent-workflows]
+paths = ["workflows/*", "shared/webhooks/*"]
+operations = ["read", "write", "list", "request", "status", "approve", "deny"]
 ```
 
 When `[secrets.acl]` is present, only listed agents/operations/path patterns are allowed.
+Path pattern forms:
+
+- `"*"`: all secrets
+- `"namespace/*"`: all secrets in one namespace
+- `"namespace/secret-name"`: one exact secret
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
 Bootstrap config spec: [`GLOVES_CONFIG_SPEC.md`](GLOVES_CONFIG_SPEC.md)

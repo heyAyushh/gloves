@@ -142,8 +142,27 @@ operations = ["read", "list"]
 # - "exact/secret-id" (one secret)
 [secrets.acl.default-agent]
 paths = ["github/*", "shared/*"]
-operations = ["read", "write", "list", "revoke", "request", "status"]
+operations = ["read", "write", "list", "revoke", "request", "status", "approve", "deny"]
+
+[secrets.acl.agent-relationships]
+paths = ["contacts/*", "shared/contacts/*"]
+operations = ["read", "write", "list", "request", "status"]
+
+[secrets.acl.agent-workflows]
+paths = ["workflows/*", "shared/webhooks/*"]
+operations = ["read", "write", "list", "request", "status", "approve", "deny"]
 ```
+
+Secret ACL operation mapping:
+
+- `read`: `gloves get`
+- `write`: `gloves set`
+- `list`: `gloves list`
+- `revoke`: `gloves revoke`
+- `request`: `gloves request`
+- `status`: `gloves status`
+- `approve`: `gloves approve`
+- `deny`: `gloves deny`
 
 ## 7. Validation Rules
 

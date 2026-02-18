@@ -487,6 +487,32 @@ operations = ["read", "list"]
 }
 
 #[test]
+fn config_secret_acl_parses_all_operations() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.acl.default-agent]
+paths = ["github/*"]
+operations = ["read", "write", "list", "revoke", "request", "status", "approve", "deny"]
+"#;
+
+    let config = GlovesConfig::parse_from_str(raw, &source).unwrap();
+    let agent = AgentId::new("default-agent").unwrap();
+    let policy = config.secret_access_policy(&agent).unwrap();
+
+    assert!(policy.allows_operation(SecretAclOperation::Read));
+    assert!(policy.allows_operation(SecretAclOperation::Write));
+    assert!(policy.allows_operation(SecretAclOperation::List));
+    assert!(policy.allows_operation(SecretAclOperation::Revoke));
+    assert!(policy.allows_operation(SecretAclOperation::Request));
+    assert!(policy.allows_operation(SecretAclOperation::Status));
+    assert!(policy.allows_operation(SecretAclOperation::Approve));
+    assert!(policy.allows_operation(SecretAclOperation::Deny));
+}
+
+#[test]
 fn config_secret_acl_rejects_invalid_pattern() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join(".gloves.toml");

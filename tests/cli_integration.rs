@@ -18,6 +18,9 @@ const DAEMON_WAIT_ATTEMPTS: usize = 100;
 const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
 const GET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
 const TEST_PIPE_COMMAND: &str = "cat";
+const ACL_TEST_AGENT_MAIN: &str = "agent-main";
+const ACL_TEST_SECRET_GITHUB_TOKEN: &str = "github/token";
+const ACL_TEST_REASON: &str = "acl coverage";
 #[cfg(unix)]
 const TEST_GPG_FINGERPRINT: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
 static DAEMON_TEST_LOCK: Mutex<()> = Mutex::new(());
@@ -102,6 +105,37 @@ fn write_config(path: &Path, body: &str) {
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions).unwrap();
     }
+}
+
+fn toml_string_array(values: &[&str]) -> String {
+    let quoted = values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>();
+    format!("[{}]", quoted.join(", "))
+}
+
+fn write_secret_acl_config(
+    path: &Path,
+    root: &Path,
+    agent: &str,
+    paths: &[&str],
+    operations: &[&str],
+) {
+    let content = format!(
+        "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.{agent}]\npaths = {}\noperations = {}\n",
+        root.display(),
+        toml_string_array(paths),
+        toml_string_array(operations),
+    );
+    write_config(path, &content);
+}
+
+fn first_pending_request_id(root: &Path) -> String {
+    let pending_path = root.join("pending.json");
+    let pending: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(pending_path).unwrap()).unwrap();
+    pending[0]["id"].as_str().unwrap().to_owned()
 }
 
 #[cfg(unix)]
@@ -977,6 +1011,318 @@ fn cli_secret_acl_uses_agent_override_policy() {
         .assert()
         .success()
         .stdout(predicates::str::contains("contacts-secret"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_list_without_list_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["read"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "list",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_request_without_request_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["read"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_request_for_non_matching_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["contacts/*"],
+        &["request"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_status_for_non_matching_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["contacts/*"],
+        &["status"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "status",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_revoke_without_revoke_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["read", "write"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "revoke",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_approve_without_approve_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let root_str = root.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(&root);
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["deny"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "approve",
+            &request_id,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_deny_without_deny_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let root_str = root.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(&root);
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["approve"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "deny",
+            &request_id,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_allows_approve_with_exact_path_and_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let root_str = root.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(&root);
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &[ACL_TEST_SECRET_GITHUB_TOKEN],
+        &["approve"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "approve",
+            &request_id,
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_secret_acl_allows_deny_with_matching_path_and_operation() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let root_str = root.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "request",
+            ACL_TEST_SECRET_GITHUB_TOKEN,
+            "--reason",
+            ACL_TEST_REASON,
+        ])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(&root);
+    write_secret_acl_config(
+        &config_path,
+        &root,
+        ACL_TEST_AGENT_MAIN,
+        &["github/*"],
+        &["deny"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            ACL_TEST_AGENT_MAIN,
+            "deny",
+            &request_id,
+        ])
+        .assert()
+        .success();
 }
 
 #[test]
@@ -2396,6 +2742,36 @@ fn cli_daemon_ping_roundtrip_over_tcp() {
 
     assert!(response_line.contains("\"status\":\"ok\""));
     assert!(response_line.contains("\"message\":\"pong\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn cli_daemon_invalid_request_returns_error_and_continues() {
+    let _guard = daemon_test_guard();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 2);
+
+    let mut stream = connect_with_retry(&bind);
+    stream.write_all(br#"{"action":"ping""#).unwrap();
+    stream.write_all(b"\n").unwrap();
+
+    let mut response_line = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response_line).unwrap();
+    assert!(response_line.contains("\"status\":\"error\""));
+    assert!(response_line.contains("invalid daemon request"));
+
+    let mut second_stream = connect_with_retry(&bind);
+    second_stream.write_all(br#"{"action":"ping"}"#).unwrap();
+    second_stream.write_all(b"\n").unwrap();
+
+    let mut second_response_line = String::new();
+    let mut second_reader = BufReader::new(second_stream);
+    second_reader.read_line(&mut second_response_line).unwrap();
+    assert!(second_response_line.contains("\"status\":\"ok\""));
+    assert!(second_response_line.contains("\"message\":\"pong\""));
 
     let status = child.wait().unwrap();
     assert!(status.success());

@@ -379,3 +379,226 @@ fn execute_daemon_request_inner(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn setup_paths() -> (tempfile::TempDir, SecretsPaths) {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let paths = SecretsPaths::new(temp_dir.path());
+        runtime::init_layout(&paths).expect("layout");
+        (temp_dir, paths)
+    }
+
+    fn expect_data(data: Option<Value>) -> Value {
+        data.expect("expected response data")
+    }
+
+    #[test]
+    fn parse_daemon_bind_rejects_invalid_address() {
+        let error = parse_daemon_bind("not-a-socket-address").expect_err("must fail");
+        assert!(error.to_string().contains("invalid daemon bind address"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn assert_private_directory_rejects_group_world_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut permissions = std::fs::metadata(temp_dir.path())
+            .expect("metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(temp_dir.path(), permissions).expect("permissions");
+
+        let error = assert_private_directory(temp_dir.path(), "secrets root").expect_err("error");
+        assert!(error
+            .to_string()
+            .contains("secrets root must not be group/world accessible"));
+    }
+
+    #[test]
+    fn read_daemon_request_validates_empty_and_size_limits() {
+        let mut empty_input: &[u8] = b"";
+        let error = read_daemon_request(&mut empty_input, 64).expect_err("must fail");
+        assert!(error.to_string().contains("empty daemon request"));
+
+        let mut blank_line: &[u8] = b"\n";
+        let error = read_daemon_request(&mut blank_line, 64).expect_err("must fail");
+        assert!(error.to_string().contains("empty daemon request"));
+
+        let mut oversized: &[u8] = br#"{"action":"ping"}"#;
+        let error = read_daemon_request(&mut oversized, 4).expect_err("must fail");
+        assert!(error.to_string().contains("daemon request too large"));
+    }
+
+    #[test]
+    fn read_daemon_request_rejects_invalid_json_and_accepts_ping() {
+        let mut invalid: &[u8] = br#"{"action":"ping""#;
+        let error = read_daemon_request(&mut invalid, 64).expect_err("must fail");
+        assert!(error.to_string().contains("invalid daemon request"));
+
+        let mut valid: &[u8] = br#"{"action":"ping"}"#;
+        let request = read_daemon_request(&mut valid, 64).expect("request");
+        assert!(matches!(request, DaemonRequest::Ping));
+    }
+
+    #[test]
+    fn write_daemon_response_outputs_json_line() {
+        let mut buffer = Vec::new();
+        write_daemon_response(
+            &mut buffer,
+            &DaemonResponse::Ok {
+                message: "ok".to_owned(),
+                data: Some(serde_json::json!({ "value": 1 })),
+            },
+        )
+        .expect("response");
+
+        let text = String::from_utf8(buffer).expect("utf8");
+        assert!(text.ends_with('\n'));
+        let payload = text.trim_end_matches('\n');
+        let value: Value = serde_json::from_str(payload).expect("json");
+        assert_eq!(value["status"], "ok");
+        assert_eq!(value["message"], "ok");
+        assert_eq!(value["data"]["value"], 1);
+    }
+
+    #[test]
+    fn execute_daemon_request_inner_supports_set_get_list_status_and_revoke() {
+        let (_temp_dir, paths) = setup_paths();
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Set {
+                name: "alpha".to_owned(),
+                generate: false,
+                value: Some("secret-value".to_owned()),
+                ttl_days: None,
+            },
+        )
+        .expect("set");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data)["id"], "alpha");
+
+        let (message, data) =
+            execute_daemon_request_inner(&paths, DaemonRequest::List).expect("list");
+        assert_eq!(message, "ok");
+        assert!(expect_data(data).to_string().contains("alpha"));
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Status {
+                name: "alpha".to_owned(),
+            },
+        )
+        .expect("status");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data), serde_json::json!("fulfilled"));
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Get {
+                name: "alpha".to_owned(),
+            },
+        )
+        .expect("get");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data)["secret"], "secret-value");
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Revoke {
+                name: "alpha".to_owned(),
+            },
+        )
+        .expect("revoke");
+        assert_eq!(message, "revoked");
+        assert!(data.is_none());
+    }
+
+    #[test]
+    fn execute_daemon_request_inner_supports_request_approve_deny_and_verify() {
+        let (_temp_dir, paths) = setup_paths();
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Request {
+                name: "alpha".to_owned(),
+                reason: "need access".to_owned(),
+            },
+        )
+        .expect("request");
+        assert_eq!(message, "pending");
+        let request_id = expect_data(data)["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_owned();
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Status {
+                name: "alpha".to_owned(),
+            },
+        )
+        .expect("status");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data), serde_json::json!("pending"));
+
+        let (message, data) =
+            execute_daemon_request_inner(&paths, DaemonRequest::Approve { request_id })
+                .expect("approve");
+        assert_eq!(message, "approved");
+        assert!(data.is_none());
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Request {
+                name: "bravo".to_owned(),
+                reason: "need access".to_owned(),
+            },
+        )
+        .expect("request");
+        assert_eq!(message, "pending");
+        let deny_request_id = expect_data(data)["request_id"]
+            .as_str()
+            .expect("request id")
+            .to_owned();
+
+        let (message, data) = execute_daemon_request_inner(
+            &paths,
+            DaemonRequest::Deny {
+                request_id: deny_request_id,
+            },
+        )
+        .expect("deny");
+        assert_eq!(message, "denied");
+        assert!(data.is_none());
+
+        let (message, data) =
+            execute_daemon_request_inner(&paths, DaemonRequest::Verify).expect("verify");
+        assert_eq!(message, "ok");
+        assert!(data.is_none());
+    }
+
+    #[test]
+    fn execute_daemon_request_wraps_errors() {
+        let (_temp_dir, paths) = setup_paths();
+        let response = execute_daemon_request(
+            &paths,
+            DaemonRequest::Approve {
+                request_id: "not-a-uuid".to_owned(),
+            },
+        );
+
+        match response {
+            DaemonResponse::Error { error } => {
+                assert!(error.contains("invalid character"));
+            }
+            DaemonResponse::Ok { .. } => panic!("expected error response"),
+        }
+    }
+}
