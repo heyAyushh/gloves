@@ -73,6 +73,32 @@ Command details and examples:
    gloves --root <root> status <secret-name>
    ```
 
+### Human `pass` Handoff To Agent
+
+1. Human stores secret in `pass` under the same secret name used by gloves:
+   ```bash
+   pass insert <secret-name>
+   ```
+2. Agent creates access request:
+   ```bash
+   gloves --root <root> --agent <requester-agent> request <secret-name> --reason "<why>"
+   ```
+3. Human approves or denies:
+   ```bash
+   gloves --root <root> --agent <operator-agent> approve <request-uuid>
+   # or:
+   gloves --root <root> --agent <operator-agent> deny <request-uuid>
+   ```
+4. Approved agent reads via gloves (prefer piping over raw tty output):
+   ```bash
+   GLOVES_GET_PIPE_ALLOWLIST=cat \
+   gloves --root <root> --agent <requester-agent> get <secret-name> --pipe-to cat
+   ```
+5. If access fails with `gpg denied`, unlock/check the same secret once with `pass` in the human session:
+   ```bash
+   pass show <secret-name>
+   ```
+
 ### Expiry and Maintenance
 
 1. Run expiry reaper and integrity checks:

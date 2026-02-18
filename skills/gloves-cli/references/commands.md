@@ -51,6 +51,28 @@ gloves --root .openclaw/secrets approve <request-uuid>
 gloves --root .openclaw/secrets status prod/db
 ```
 
+### Human `pass` Secret Handoff To Agent
+
+```bash
+# human stores secret in pass
+pass insert prod/db
+
+# agent requests access
+gloves --root .openclaw/secrets --agent agent-a request prod/db --reason "run migration"
+
+# operator resolves request
+gloves --root .openclaw/secrets --agent agent-main approve <request-uuid>
+
+# approved agent reads through gloves
+GLOVES_GET_PIPE_ALLOWLIST=cat \
+gloves --root .openclaw/secrets --agent agent-a get prod/db --pipe-to cat
+```
+
+Notes:
+- Secret name must match between `pass` and `gloves`.
+- If ACL is enabled, requester needs `request/read/status` and operator needs `approve/deny`.
+- If `gpg denied` occurs, verify `pass show prod/db` works in the human session.
+
 ### Verify and Reap Expired State
 
 ```bash
