@@ -81,6 +81,10 @@ fn all_events_serialize() {
             trusted_agent: AgentId::new("agent-b").unwrap(),
             requested_file: "docs/notes.txt".to_owned(),
         },
+        AuditEvent::GpgKeyCreated {
+            agent: AgentId::new("agent-c").unwrap(),
+            fingerprint: "ABCDEF0123456789".to_owned(),
+        },
     ];
 
     for event in events {

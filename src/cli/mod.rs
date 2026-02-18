@@ -30,6 +30,9 @@ pub struct Cli {
     /// Root storage directory override.
     #[arg(long)]
     pub root: Option<PathBuf>,
+    /// Agent identifier override for this invocation.
+    #[arg(long)]
+    pub agent: Option<String>,
     /// Config file override path.
     #[arg(long)]
     pub config: Option<PathBuf>,
@@ -70,6 +73,9 @@ pub enum Command {
     Get {
         /// Secret name.
         name: String,
+        /// Pipe secret bytes to an approved command.
+        #[arg(long)]
+        pipe_to: Option<String>,
     },
     /// Prints redacted env export text.
     Env {
@@ -139,6 +145,12 @@ pub enum Command {
         /// Access operation.
         #[command(subcommand)]
         command: AccessCommand,
+    },
+    /// Manages per-agent GPG keys used for human secret workflows.
+    Gpg {
+        /// GPG operation.
+        #[command(subcommand)]
+        command: GpgCommand,
     },
     /// Internal helper to print one secret for gocryptfs -extpass.
     #[command(hide = true)]
@@ -262,6 +274,15 @@ pub enum AccessCommand {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Supported GPG subcommands.
+#[derive(Debug, Subcommand)]
+pub enum GpgCommand {
+    /// Creates a GPG key for the selected agent if one does not exist.
+    Create,
+    /// Prints the selected agent GPG key fingerprint.
+    Fingerprint,
 }
 
 /// Runs CLI and returns process exit code.

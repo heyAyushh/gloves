@@ -20,6 +20,7 @@ pub(crate) fn init_layout(paths: &SecretsPaths) -> Result<()> {
     ensure_private_dir(&paths.store_dir())?;
     ensure_private_dir(&paths.metadata_dir())?;
     ensure_private_dir(&paths.vaults_dir())?;
+    ensure_private_dir(&paths.gpg_homes_dir())?;
     ensure_private_dir(&paths.encrypted_dir())?;
     ensure_private_dir(&paths.mounts_dir())?;
     create_private_file_if_missing(&paths.pending_file(), b"[]")?;

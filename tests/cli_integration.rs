@@ -16,6 +16,10 @@ use std::os::unix::fs::PermissionsExt;
 
 const DAEMON_WAIT_ATTEMPTS: usize = 100;
 const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
+const GET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
+const TEST_PIPE_COMMAND: &str = "cat";
+#[cfg(unix)]
+const TEST_GPG_FINGERPRINT: &str = "0123456789ABCDEF0123456789ABCDEF01234567";
 static DAEMON_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn daemon_test_guard() -> MutexGuard<'static, ()> {
@@ -175,6 +179,69 @@ if [[ "$1" == "show" ]]; then
   printf 'dummy-pass-value'
 fi
 "#,
+    );
+}
+
+#[cfg(unix)]
+fn install_fake_gpg_binary(bin_dir: &Path) {
+    install_fake_gpg_binary_with_homedir_limit(bin_dir, None);
+}
+
+#[cfg(unix)]
+fn install_fake_gpg_binary_with_homedir_limit(bin_dir: &Path, max_homedir_length: Option<usize>) {
+    fs::create_dir_all(bin_dir).unwrap();
+    let max_homedir_length = max_homedir_length.unwrap_or(0);
+    write_executable(
+        &bin_dir.join("gpg"),
+        &format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+homedir=""
+mode=""
+for ((index=1; index<=$#; index++)); do
+  arg="${{!index}}"
+  if [[ "$arg" == "--homedir" ]]; then
+    next_index=$((index + 1))
+    homedir="${{!next_index}}"
+  elif [[ "$arg" == "--quick-generate-key" ]]; then
+    mode="generate"
+  elif [[ "$arg" == "--list-secret-keys" ]]; then
+    mode="list"
+  fi
+done
+
+if [[ -z "$homedir" ]]; then
+  echo "missing --homedir" >&2
+  exit 2
+fi
+
+if [[ {max_homedir_length} -gt 0 && ${{#homedir}} -gt {max_homedir_length} ]]; then
+  echo "homedir too long: ${{#homedir}}" >&2
+  exit 2
+fi
+
+mkdir -p "$homedir"
+fingerprint_file="$homedir/fingerprint.txt"
+
+if [[ "$mode" == "generate" ]]; then
+  printf '{TEST_GPG_FINGERPRINT}' > "$fingerprint_file"
+  exit 0
+fi
+
+if [[ "$mode" == "list" ]]; then
+  if [[ ! -f "$fingerprint_file" ]]; then
+    exit 0
+  fi
+  fingerprint="$(cat "$fingerprint_file")"
+  printf 'sec:u:255:22:1234567890ABCDEF:1700000000::::::scESC:\n'
+  printf 'fpr:::::::::%s:\n' "$fingerprint"
+  exit 0
+fi
+
+echo "unsupported fake gpg invocation: $*" >&2
+exit 2
+"#,
+        ),
     );
 }
 
@@ -435,6 +502,483 @@ operations = ["read"]
         .failure();
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_gpg_create_generates_fingerprint_and_audit_event() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary(&fake_bin);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["agent"], "agent-main");
+    assert_eq!(payload["fingerprint"], TEST_GPG_FINGERPRINT);
+    assert_eq!(payload["created"], true);
+
+    let audit = fs::read_to_string(root.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("\"event\":\"gpg_key_created\""));
+    assert!(audit.contains(TEST_GPG_FINGERPRINT));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gpg_create_is_idempotent_for_existing_key() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary(&fake_bin);
+    let root_literal = root.to_str().unwrap();
+
+    let first_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root_literal,
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first_payload: serde_json::Value = serde_json::from_slice(&first_output).unwrap();
+    assert_eq!(first_payload["created"], true);
+
+    let second_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root_literal,
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second_payload: serde_json::Value = serde_json::from_slice(&second_output).unwrap();
+    assert_eq!(second_payload["created"], false);
+    assert_eq!(second_payload["fingerprint"], TEST_GPG_FINGERPRINT);
+
+    let audit = fs::read_to_string(root.join("audit.jsonl")).unwrap();
+    assert_eq!(audit.matches("\"event\":\"gpg_key_created\"").count(), 1);
+}
+
+#[test]
+fn cli_gpg_create_requires_gpg_binary() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args(["--root", root.to_str().unwrap(), "gpg", "create"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("required binary not found: gpg"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gpg_fingerprint_returns_not_found_when_key_is_missing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary(&fake_bin);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "gpg",
+            "fingerprint",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not found"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gpg_fingerprint_returns_existing_key() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary(&fake_bin);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "gpg",
+            "fingerprint",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["fingerprint"], TEST_GPG_FINGERPRINT);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gpg_create_supports_long_roots_via_short_homedir_alias() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir
+        .path()
+        .join(format!("long-root-{}", "x".repeat(160)))
+        .join("secrets");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary_with_homedir_limit(&fake_bin, Some(90));
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["fingerprint"], TEST_GPG_FINGERPRINT);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_gpg_create_with_relative_root_writes_to_workspace_home() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_gpg_binary(&fake_bin);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .current_dir(&workspace)
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            ".openclaw/secrets",
+            "--agent",
+            "agent-main",
+            "gpg",
+            "create",
+        ])
+        .assert()
+        .success();
+
+    assert!(workspace
+        .join(".openclaw/secrets/gpg/agent-main/fingerprint.txt")
+        .exists());
+}
+
+#[test]
+fn cli_secret_acl_blocks_non_matching_set() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.agent-main]\npaths = [\"github/*\"]\noperations = [\"write\"]\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "set",
+            "rustical/token",
+            "--value",
+            "secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_blocks_non_matching_get() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "rustical/token",
+            "--value",
+            "secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.agent-main]\npaths = [\"github/*\"]\noperations = [\"read\"]\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "get",
+            "rustical/token",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_cannot_be_bypassed_with_no_config_for_same_root() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "rustical/token",
+            "--value",
+            "secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.agent-main]\npaths = [\"github/*\"]\noperations = [\"read\"]\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "get",
+            "rustical/token",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[test]
+fn cli_secret_acl_filters_list_results() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "github/token",
+            "--value",
+            "gh",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "rustical/token",
+            "--value",
+            "rs",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.agent-main]\npaths = [\"github/*\"]\noperations = [\"list\", \"write\"]\n",
+            root.display()
+        ),
+    );
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "list",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output_text = String::from_utf8(output).unwrap();
+    assert!(output_text.contains("github/token"));
+    assert!(!output_text.contains("rustical/token"));
+}
+
+#[test]
+fn cli_secret_acl_uses_agent_override_policy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "--agent",
+            "agent-relationships",
+            "set",
+            "contacts/token",
+            "--value",
+            "contacts-secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[secrets.acl.agent-main]\npaths = [\"github/*\"]\noperations = [\"read\"]\n[secrets.acl.agent-relationships]\npaths = [\"contacts/*\"]\noperations = [\"read\", \"write\"]\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "get",
+            "contacts/token",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-relationships",
+            "get",
+            "contacts/token",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("contacts-secret"));
+}
+
 #[test]
 fn cli_vault_mode_disabled_blocks_vault_commands() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -519,11 +1063,18 @@ fn cli_vault_mode_auto_reports_missing_binary_actionably() {
         ));
 }
 
+#[cfg(unix)]
 #[test]
 fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
     let temp_dir = tempfile::tempdir().unwrap();
     let empty_path = temp_dir.path().join("empty-path");
     fs::create_dir_all(&empty_path).unwrap();
+    write_executable(
+        &empty_path.join(TEST_PIPE_COMMAND),
+        r#"#!/bin/sh
+/bin/cat
+"#,
+    );
     let root = temp_dir.path().to_str().unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
@@ -543,7 +1094,8 @@ fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", empty_path.to_str().unwrap())
-        .args(["--root", root, "get", "x"])
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
@@ -645,7 +1197,15 @@ fn cli_set_then_get_roundtrip() {
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", temp_dir.path().to_str().unwrap(), "get", "x"])
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
@@ -664,7 +1224,8 @@ fn cli_get_preserves_non_utf8_bytes_without_newline() {
         .success();
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "get", "bin"])
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args(["--root", root, "get", "bin", "--pipe-to", TEST_PIPE_COMMAND])
         .assert()
         .success()
         .get_output()
@@ -675,10 +1236,19 @@ fn cli_get_preserves_non_utf8_bytes_without_newline() {
 
 #[cfg(unix)]
 #[test]
-fn cli_get_pipe_close_does_not_panic() {
+fn cli_get_pipe_to_handles_early_reader_exit() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root = temp_dir.path().to_str().unwrap();
     let huge = vec![b'A'; 5_000_000];
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("drain-one-byte"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+head -c 1 >/dev/null || true
+"#,
+    );
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", root, "set", "huge", "--stdin", "--ttl", "1"])
@@ -691,14 +1261,118 @@ fn cli_get_pipe_close_does_not_panic() {
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success());
 
-    let status = std::process::Command::new("bash")
-        .env("GLOVES_BIN", assert_cmd::cargo::cargo_bin!("gloves"))
-        .env("GLOVES_ROOT", root)
-        .arg("-c")
-        .arg("set -o pipefail; \"$GLOVES_BIN\" --root \"$GLOVES_ROOT\" get huge | head -c 1 >/dev/null")
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "drain-one-byte")
+        .args(["--root", root, "get", "huge", "--pipe-to", "drain-one-byte"])
+        .assert()
+        .get_output()
+        .clone();
+    assert!(
+        output.status.success(),
+        "expected success, got stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn cli_get_non_tty_requires_pipe_target() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "get", "x"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "refusing to write secret bytes to non-tty stdout",
+        ));
+}
+
+#[test]
+fn cli_get_pipe_to_requires_allowlist() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("secret piping is disabled"));
+}
+
+#[test]
+fn cli_get_pipe_to_rejects_unallowlisted_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args(["--root", root, "get", "x", "--pipe-to", "tee"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not allowlisted"));
+}
+
+#[test]
+fn cli_get_pipe_to_rejects_non_bare_command_names() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args(["--root", root, "get", "x", "--pipe-to", "./cat"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("must be a bare executable name"));
+}
+
+#[test]
+fn cli_get_pipe_to_allowed_command_streams_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("secret"));
 }
 
 #[test]
@@ -719,11 +1393,14 @@ fn cli_set_from_stdin() {
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
             "get",
             "stdin_secret",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
         ])
         .assert()
         .success()
@@ -1130,11 +1807,14 @@ fn cli_vault_init_respects_configured_agent_id() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
         .args([
             "--config",
             config_path.to_str().unwrap(),
             "get",
             "vault/agent_data",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
         ])
         .assert()
         .success();
@@ -1189,11 +1869,14 @@ fn cli_vault_init_uses_configured_secret_defaults() {
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
         .args([
             "--config",
             config_path.to_str().unwrap(),
             "get",
             "vault/agent_data",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
         ])
         .assert()
         .success()

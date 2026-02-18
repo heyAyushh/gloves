@@ -83,6 +83,13 @@ pub enum AuditEvent {
         /// Requested file path inside the vault.
         requested_file: String,
     },
+    /// Agent GPG key was created.
+    GpgKeyCreated {
+        /// Agent the key belongs to.
+        agent: AgentId,
+        /// Primary key fingerprint.
+        fingerprint: String,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

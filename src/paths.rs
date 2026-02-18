@@ -54,6 +54,16 @@ impl SecretsPaths {
         self.root.join("vaults")
     }
 
+    /// Per-agent GPG homedir root.
+    pub fn gpg_homes_dir(&self) -> PathBuf {
+        self.root.join("gpg")
+    }
+
+    /// GPG homedir for one agent id.
+    pub fn gpg_home(&self, agent_id: &str) -> PathBuf {
+        self.gpg_homes_dir().join(agent_id)
+    }
+
     /// Vault session metadata file.
     pub fn vault_sessions_file(&self) -> PathBuf {
         self.vaults_dir().join("sessions.json")

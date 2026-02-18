@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     error::{GlovesError, Result},
-    types::AgentId,
+    types::{AgentId, SecretId},
 };
 
 const CONFIG_VERSION_V1: u32 = 1;
@@ -64,6 +64,28 @@ pub enum PathOperation {
     Mount,
 }
 
+/// Allowed operations for one agent's secret ACL.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum SecretAclOperation {
+    /// Read secret values.
+    Read,
+    /// Create/update secrets.
+    Write,
+    /// List visible secrets.
+    List,
+    /// Revoke secrets.
+    Revoke,
+    /// Create human access requests.
+    Request,
+    /// Read request status for a secret.
+    Status,
+    /// Approve pending requests.
+    Approve,
+    /// Deny pending requests.
+    Deny,
+}
+
 /// Runtime mode for vault command availability and dependency enforcement.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -100,6 +122,9 @@ pub struct GlovesConfigFile {
     /// Agent path visibility policies.
     #[serde(default)]
     pub agents: BTreeMap<String, AgentAccessFile>,
+    /// Secret ACL policies.
+    #[serde(default)]
+    pub secrets: SecretsConfigFile,
 }
 
 /// Raw `[paths]` section from TOML.
@@ -144,6 +169,27 @@ pub struct DefaultsConfigFile {
     pub vault_secret_ttl_days: Option<i64>,
     /// Default generated vault secret length in bytes.
     pub vault_secret_length_bytes: Option<usize>,
+}
+
+/// Raw `[secrets]` section from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretsConfigFile {
+    /// Per-agent ACL rules for secret operations.
+    #[serde(default)]
+    pub acl: BTreeMap<String, SecretAccessFile>,
+}
+
+/// Raw per-agent secret ACL from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretAccessFile {
+    /// Secret path patterns (`*`, `foo/*`, or exact secret id).
+    #[serde(default)]
+    pub paths: Vec<String>,
+    /// Allowed secret operations.
+    #[serde(default)]
+    pub operations: Vec<SecretAclOperation>,
 }
 
 /// Raw per-agent access policy from TOML.
@@ -198,6 +244,15 @@ pub struct AgentAccessPolicy {
     pub operations: Vec<PathOperation>,
 }
 
+/// Effective secret ACL policy for one configured agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretAccessPolicy {
+    /// Secret path patterns (`*`, `foo/*`, or exact secret id).
+    pub paths: Vec<String>,
+    /// Allowed secret operations.
+    pub operations: Vec<SecretAclOperation>,
+}
+
 /// Effective and validated `.gloves.toml` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlovesConfig {
@@ -215,6 +270,8 @@ pub struct GlovesConfig {
     pub defaults: DefaultBootstrapConfig,
     /// Agent access policies.
     pub agents: BTreeMap<String, AgentAccessPolicy>,
+    /// Agent secret ACL policies.
+    pub secret_access: BTreeMap<String, SecretAccessPolicy>,
 }
 
 /// Resolved path visibility entry for one agent.
@@ -277,6 +334,30 @@ impl GlovesConfig {
             });
         }
         Ok(entries)
+    }
+
+    /// Returns `true` when the config enables per-agent secret ACLs.
+    pub fn has_secret_acl(&self) -> bool {
+        !self.secret_access.is_empty()
+    }
+
+    /// Returns secret ACL policy for one agent.
+    pub fn secret_access_policy(&self, agent: &AgentId) -> Option<&SecretAccessPolicy> {
+        self.secret_access.get(agent.as_str())
+    }
+}
+
+impl SecretAccessPolicy {
+    /// Returns `true` when this policy allows an operation.
+    pub fn allows_operation(&self, operation: SecretAclOperation) -> bool {
+        self.operations.contains(&operation)
+    }
+
+    /// Returns `true` when this policy allows one secret name.
+    pub fn allows_secret(&self, secret_name: &str) -> bool {
+        self.paths
+            .iter()
+            .any(|pattern| secret_pattern_matches(pattern, secret_name))
     }
 }
 
@@ -389,6 +470,19 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         );
     }
 
+    let mut secret_access = BTreeMap::new();
+    for (agent_name, policy) in &raw.secrets.acl {
+        AgentId::new(agent_name)?;
+        validate_secret_access_policy(agent_name, policy)?;
+        secret_access.insert(
+            agent_name.clone(),
+            SecretAccessPolicy {
+                paths: policy.paths.clone(),
+                operations: policy.operations.clone(),
+            },
+        );
+    }
+
     Ok(GlovesConfig {
         source_path,
         root,
@@ -397,6 +491,7 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         vault,
         defaults,
         agents,
+        secret_access,
     })
 }
 
@@ -420,6 +515,11 @@ fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
     let _ = resolve_daemon_config(&config.daemon)?;
     let _ = resolve_vault_config(&config.vault);
     let _ = resolve_default_config(&config.defaults)?;
+
+    for (agent_name, policy) in &config.secrets.acl {
+        AgentId::new(agent_name)?;
+        validate_secret_access_policy(agent_name, policy)?;
+    }
 
     Ok(())
 }
@@ -563,6 +663,90 @@ fn validate_agent_policy(
     }
 
     Ok(())
+}
+
+fn validate_secret_access_policy(agent_name: &str, policy: &SecretAccessFile) -> Result<()> {
+    if policy.paths.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret ACL for agent '{agent_name}' must include at least one path pattern"
+        )));
+    }
+    if policy.operations.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret ACL for agent '{agent_name}' must include at least one operation"
+        )));
+    }
+
+    let mut patterns = BTreeSet::new();
+    for pattern in &policy.paths {
+        validate_secret_pattern(pattern)?;
+        if !patterns.insert(pattern.as_str()) {
+            return Err(GlovesError::InvalidInput(format!(
+                "secret ACL for agent '{agent_name}' contains duplicate pattern '{pattern}'"
+            )));
+        }
+    }
+
+    let mut operations = BTreeSet::new();
+    for operation in &policy.operations {
+        if !operations.insert(*operation) {
+            return Err(GlovesError::InvalidInput(format!(
+                "secret ACL for agent '{agent_name}' contains duplicate operation '{operation:?}'"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_secret_pattern(pattern: &str) -> Result<()> {
+    if pattern == "*" {
+        return Ok(());
+    }
+
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        if prefix.is_empty() {
+            return Err(GlovesError::InvalidInput(
+                "secret ACL pattern '/*' is not allowed; use '*' for all secrets".to_owned(),
+            ));
+        }
+        if prefix.contains('*') {
+            return Err(GlovesError::InvalidInput(format!(
+                "secret ACL pattern '{pattern}' may only use one trailing '*'"
+            )));
+        }
+        SecretId::new(prefix).map_err(|_| {
+            GlovesError::InvalidInput(format!(
+                "secret ACL pattern '{pattern}' has an invalid namespace prefix"
+            ))
+        })?;
+        return Ok(());
+    }
+
+    if pattern.contains('*') {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret ACL pattern '{pattern}' must be '*', '<namespace>/*', or an exact secret id"
+        )));
+    }
+
+    SecretId::new(pattern).map_err(|_| {
+        GlovesError::InvalidInput(format!(
+            "secret ACL pattern '{pattern}' is not a valid secret id"
+        ))
+    })?;
+    Ok(())
+}
+
+fn secret_pattern_matches(pattern: &str, secret_name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return secret_name.len() > prefix.len()
+            && secret_name.starts_with(prefix)
+            && secret_name.as_bytes().get(prefix.len()) == Some(&b'/');
+    }
+    secret_name == pattern
 }
 
 fn resolve_path_value(value: &str, source_dir: &Path) -> Result<PathBuf> {

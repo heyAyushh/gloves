@@ -10,6 +10,8 @@ fn secrets_paths_layout() {
     assert!(paths.pending_file().ends_with("pending.json"));
     assert!(paths.audit_file().ends_with("audit.jsonl"));
     assert!(paths.vaults_dir().ends_with("vaults"));
+    assert!(paths.gpg_homes_dir().ends_with("gpg"));
+    assert!(paths.gpg_home("agent-main").ends_with("gpg/agent-main"));
     assert!(paths
         .vault_sessions_file()
         .ends_with("vaults/sessions.json"));

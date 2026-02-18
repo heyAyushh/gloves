@@ -3,8 +3,8 @@ use std::{fs, path::Path};
 use gloves::{
     config::{
         discover_config, resolve_config_path, AgentAccessFile, ConfigPathsFile, ConfigSource,
-        DaemonConfigFile, DefaultsConfigFile, GlovesConfig, GlovesConfigFile, VaultConfigFile,
-        VaultMode,
+        DaemonConfigFile, DefaultsConfigFile, GlovesConfig, GlovesConfigFile, SecretAclOperation,
+        VaultConfigFile, VaultMode,
     },
     error::GlovesError,
     types::AgentId,
@@ -56,6 +56,7 @@ fn config_roundtrip_v1() {
             vault_secret_length_bytes: Some(64),
         },
         agents,
+        secrets: gloves::config::SecretsConfigFile::default(),
     };
 
     let encoded = toml::to_string(&source).unwrap();
@@ -459,6 +460,78 @@ operations = ["read"]
 
     let error = config.agent_paths(&missing_agent).unwrap_err();
     assert!(matches!(error, GlovesError::NotFound));
+}
+
+#[test]
+fn config_secret_acl_parses_and_matches_patterns() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.acl.default-agent]
+paths = ["github/*", "shared/token", "*"]
+operations = ["read", "list"]
+"#;
+
+    let config = GlovesConfig::parse_from_str(raw, &source).unwrap();
+    let agent = AgentId::new("default-agent").unwrap();
+    let policy = config.secret_access_policy(&agent).unwrap();
+
+    assert!(config.has_secret_acl());
+    assert!(policy.allows_operation(SecretAclOperation::Read));
+    assert!(policy.allows_operation(SecretAclOperation::List));
+    assert!(policy.allows_secret("github/token"));
+    assert!(policy.allows_secret("shared/token"));
+    assert!(policy.allows_secret("other/secret"));
+}
+
+#[test]
+fn config_secret_acl_rejects_invalid_pattern() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.acl.default-agent]
+paths = ["github*"]
+operations = ["read"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
+#[test]
+fn config_secret_acl_rejects_duplicate_pattern() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.acl.default-agent]
+paths = ["github/*", "github/*"]
+operations = ["read"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
+#[test]
+fn config_secret_acl_rejects_duplicate_operations() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.acl.default-agent]
+paths = ["github/*"]
+operations = ["read", "read"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
 }
 
 #[cfg(unix)]

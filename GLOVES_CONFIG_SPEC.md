@@ -134,6 +134,15 @@ operations = ["read", "write", "list", "mount"]
 [agents.agent-b]
 paths = ["runtime_root"]
 operations = ["read", "list"]
+
+# Optional per-agent secret ACLs.
+# Pattern forms:
+# - "*" (all secrets)
+# - "namespace/*" (all descendants)
+# - "exact/secret-id" (one secret)
+[secrets.acl.default-agent]
+paths = ["github/*", "shared/*"]
+operations = ["read", "write", "list", "revoke", "request", "status"]
 ```
 
 ## 7. Validation Rules
@@ -165,6 +174,8 @@ On non-Unix:
 - Unknown agent in `gloves access paths --agent` returns `NotFound`.
 - Operations are constrained to enum: `read`, `write`, `list`, `mount`.
 - Access output is visibility metadata only; it does not bypass existing secret/vault authorization.
+- Secret ACL policy is optional under `[secrets.acl.<agent>]`.
+- When secret ACL policy is configured, only matching path patterns + operations are permitted.
 
 ### 7.4 Vault mode and dependency checks
 

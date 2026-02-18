@@ -228,7 +228,7 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
 | `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
-| `get <name>` | Retrieve secret value | warns when printing to TTY |
+| `get <name>` | Retrieve secret value | `--pipe-to <command>` for non-TTY output; command must be in `GLOVES_GET_PIPE_ALLOWLIST`; warns on TTY |
 | `env <name> <var>` | Print redacted env export | outputs `export VAR=<REDACTED>` |
 | `request <name> --reason <text>` | Create human access request | reason is required |
 | `approve <request_id>` | Approve pending request | request UUID |
@@ -246,13 +246,30 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 | `vault ask-file <name>` | Generate trusted-agent handoff prompt for one file | `--file`, `--requester`, `--trusted-agent`, `--reason` |
 | `config validate` | Validate effective bootstrap config | honors `--config`, `--no-config`, `GLOVES_CONFIG`; checks vault deps when mode is `required` |
 | `access paths --agent <id>` | Show one agent's configured private path visibility | add `--json` for machine-readable output |
+| `gpg create` | Create a per-agent GPG key when missing | idempotent; prints JSON with `fingerprint` and `created` |
+| `gpg fingerprint` | Show per-agent GPG key fingerprint | fails with `not found` when no key exists |
 
 Global flags:
 
 - `--root <PATH>`: override runtime root.
+- `--agent <ID>`: override the caller agent id for one invocation.
 - `--config <PATH>`: use one config file.
 - `--no-config`: disable config loading/discovery.
 - `--vault-mode <auto|required|disabled>`: override vault runtime mode for one invocation.
+
+Environment variables:
+
+- `GLOVES_GET_PIPE_ALLOWLIST`: comma-separated executable names allowed by `gloves get --pipe-to`.
+
+Secret ACL example (`.gloves.toml`):
+
+```toml
+[secrets.acl.agent-main]
+paths = ["github/*", "shared/*"]
+operations = ["read", "write", "list", "revoke", "request", "status"]
+```
+
+When `[secrets.acl]` is present, only listed agents/operations/path patterns are allowed.
 
 Full CLI implementation: [`src/cli/mod.rs`](src/cli/mod.rs)
 Bootstrap config spec: [`GLOVES_CONFIG_SPEC.md`](GLOVES_CONFIG_SPEC.md)
@@ -297,6 +314,7 @@ Default root: `.openclaw/secrets`
 .openclaw/secrets/
   store/                    # encrypted *.age files
   meta/                     # per-secret metadata JSON
+  gpg/                      # per-agent GPG homedirs
   vaults/                   # per-vault config + sessions JSON
   encrypted/                # vault ciphertext directories
   mnt/                      # default vault mountpoints
