@@ -6,6 +6,16 @@
 
 - No unreleased changes yet.
 
+## 0.4.0
+
+### Minor Changes
+
+- Added native per-agent secret ACL policy under `[secrets.acl.<agent>]` with path pattern validation and operation-level enforcement.
+- Enforced ACLs across `set/get/list/revoke/request/status/approve/deny`, including list filtering and hardening against `--no-config` bypass for the same root.
+- Added secure `get --pipe-to <command>` support with command allowlisting via `GLOVES_GET_PIPE_ALLOWLIST` and non-TTY raw-output blocking by default.
+- Added per-agent GPG key management commands (`gpg create`, `gpg fingerprint`) with `gpg_key_created` audit events.
+- Hardened GPG key generation for deep or relative runtime roots by routing through a short stable homedir alias and added regression coverage.
+
 ## 0.3.3
 
 ### Patch Changes
