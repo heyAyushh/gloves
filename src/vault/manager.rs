@@ -18,7 +18,9 @@ use crate::{
 
 use super::{
     config::VaultConfigFile,
-    gocryptfs::{FsEncryptionDriver, InitRequest, MountRequest},
+    gocryptfs::{
+        FsEncryptionDriver, InitRequest, MountRequest, EXTPASS_AGENT_ENV_VAR, EXTPASS_ROOT_ENV_VAR,
+    },
     session::{load_sessions, save_sessions, VaultSession},
     types::{VaultListEntry, VaultSecretProvider, VaultStatusEntry},
     validation::{validate_requested_file_path, validate_ttl_minutes, validate_vault_name},
@@ -36,6 +38,7 @@ where
     paths: SecretsPaths,
     driver: D,
     secret_provider: P,
+    extpass_agent: AgentId,
     audit_log: AuditLog,
 }
 
@@ -45,11 +48,18 @@ where
     P: VaultSecretProvider,
 {
     /// Constructs a vault manager.
-    pub fn new(paths: SecretsPaths, driver: D, secret_provider: P, audit_log: AuditLog) -> Self {
+    pub fn new(
+        paths: SecretsPaths,
+        driver: D,
+        secret_provider: P,
+        extpass_agent: AgentId,
+        audit_log: AuditLog,
+    ) -> Self {
         Self {
             paths,
             driver,
             secret_provider,
+            extpass_agent,
             audit_log,
         }
     }
@@ -80,11 +90,8 @@ where
 
         self.driver.init(&InitRequest {
             cipher_dir: config.vault.cipher_dir.clone(),
-            extpass_command: extpass_command(
-                &self.paths,
-                &config.vault.owner,
-                &config.vault.secret_name,
-            ),
+            extpass_command: extpass_command(&config.vault.owner, &config.vault.secret_name),
+            extpass_environment: extpass_environment(&self.paths, &self.extpass_agent),
         })?;
 
         let encoded = toml::to_string_pretty(&config).map_err(|error| {
@@ -145,14 +152,14 @@ where
         let pid = self.driver.mount(&MountRequest {
             cipher_dir: config.vault.cipher_dir.clone(),
             mount_point: mountpoint.clone(),
-            extpass_command: extpass_command(
-                &self.paths,
-                &config.vault.owner,
-                &config.vault.secret_name,
-            ),
+            extpass_command: extpass_command(&config.vault.owner, &config.vault.secret_name),
+            extpass_environment: extpass_environment(&self.paths, &self.extpass_agent),
             idle_timeout: Some(idle_timeout),
         })?;
-        self.wait_for_mount_readiness(&mountpoint)?;
+        if let Err(error) = self.wait_for_mount_readiness(&mountpoint) {
+            let _ = self.driver.unmount(&mountpoint);
+            return Err(error);
+        }
         let now = Utc::now();
         let session = VaultSession {
             vault_name: vault_name.to_owned(),
@@ -356,20 +363,22 @@ where
     }
 }
 
-fn extpass_command(paths: &SecretsPaths, owner: &Owner, secret_name: &str) -> String {
+fn extpass_command(owner: &Owner, secret_name: &str) -> String {
     match owner {
-        Owner::Agent => format!(
-            "gloves --root {} get {}",
-            shell_quote(&paths.root().display().to_string()),
-            shell_quote(secret_name)
-        ),
-        Owner::Human => format!("pass show {}", shell_quote(secret_name)),
+        Owner::Agent => format!("gloves extpass-get {secret_name}"),
+        Owner::Human => format!("pass show {secret_name}"),
     }
 }
 
-fn shell_quote(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_owned();
-    }
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
+fn extpass_environment(paths: &SecretsPaths, extpass_agent: &AgentId) -> Vec<(String, String)> {
+    vec![
+        (
+            EXTPASS_ROOT_ENV_VAR.to_owned(),
+            paths.root().display().to_string(),
+        ),
+        (
+            EXTPASS_AGENT_ENV_VAR.to_owned(),
+            extpass_agent.as_str().to_owned(),
+        ),
+    ]
 }

@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use chrono::{DateTime, Utc};
 
 use std::{
     fs,
@@ -115,21 +116,33 @@ fn install_fake_vault_binaries(bin_dir: &Path) {
         &bin_dir.join("gocryptfs"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
+extpass=""
+previous=""
+for arg in "$@"; do
+  if [[ "$previous" == "-extpass" ]]; then
+    extpass="$arg"
+  fi
+  previous="$arg"
+done
+if [[ -n "$extpass" ]]; then
+  read -r -a extpass_parts <<< "$extpass"
+  "${extpass_parts[@]}" > /dev/null
+fi
 if [[ "$1" == "-init" ]]; then
   cipher=""
   for arg in "$@"; do
     cipher="$arg"
   done
-  mkdir -p "$cipher"
-  touch "$cipher/gocryptfs.conf"
+  /bin/mkdir -p "$cipher"
+  /usr/bin/touch "$cipher/gocryptfs.conf"
   exit 0
 fi
 mountpoint=""
 for arg in "$@"; do
   mountpoint="$arg"
 done
-mkdir -p "$mountpoint"
-touch "$mountpoint/.mounted"
+/bin/mkdir -p "$mountpoint"
+/usr/bin/touch "$mountpoint/.mounted"
 "#,
     );
     write_executable(
@@ -137,7 +150,7 @@ touch "$mountpoint/.mounted"
         r#"#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "-u" ]]; then
-  rm -f "$2/.mounted"
+  /bin/rm -f "$2/.mounted"
 fi
 "#,
     );
@@ -154,12 +167,35 @@ fi
 exit 1
 "#,
     );
+    write_executable(
+        &bin_dir.join("pass"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "show" ]]; then
+  printf 'dummy-pass-value'
+fi
+"#,
+    );
 }
 
 #[cfg(unix)]
 fn with_fake_path(fake_bin: &Path) -> String {
     let current_path = std::env::var("PATH").unwrap_or_default();
-    format!("{}:{}", fake_bin.display(), current_path)
+    let gloves_bin = assert_cmd::cargo::cargo_bin!("gloves");
+    let gloves_dir = gloves_bin.parent().unwrap();
+    format!(
+        "{}:{}:{}",
+        fake_bin.display(),
+        gloves_dir.display(),
+        current_path
+    )
+}
+
+#[cfg(unix)]
+fn with_fake_path_and_gloves_only(fake_bin: &Path) -> String {
+    let gloves_bin = assert_cmd::cargo::cargo_bin!("gloves");
+    let gloves_dir = gloves_bin.parent().unwrap();
+    format!("{}:{}", fake_bin.display(), gloves_dir.display())
 }
 
 #[test]
@@ -458,6 +494,32 @@ fn cli_vault_mode_auto_allows_non_crypto_commands_without_runtime_bins() {
 }
 
 #[test]
+fn cli_vault_mode_auto_reports_missing_binary_actionably() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let empty_path = temp_dir.path().join("empty-path");
+    fs::create_dir_all(&empty_path).unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", empty_path.to_str().unwrap())
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--vault-mode",
+            "auto",
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "required binary not found: gocryptfs",
+        ));
+}
+
+#[test]
 fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
     let temp_dir = tempfile::tempdir().unwrap();
     let empty_path = temp_dir.path().join("empty-path");
@@ -485,6 +547,49 @@ fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
+}
+
+#[test]
+fn cli_extpass_get_requires_env() {
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["extpass-get", "vault/agent_data"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "missing required environment variable: GLOVES_EXTPASS_ROOT",
+        ));
+}
+
+#[test]
+fn cli_extpass_get_reads_raw_secret_bytes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let expected = vec![0xff, 0x10, 0x61, 0x80];
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "vault/agent_data",
+            "--stdin",
+            "--ttl",
+            "1",
+        ])
+        .write_stdin(expected.clone())
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("GLOVES_EXTPASS_ROOT", root)
+        .env("GLOVES_EXTPASS_AGENT", "default-agent")
+        .args(["extpass-get", "vault/agent_data"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(output, expected);
 }
 
 #[test]
@@ -544,6 +649,56 @@ fn cli_set_then_get_roundtrip() {
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
+}
+
+#[test]
+fn cli_get_preserves_non_utf8_bytes_without_newline() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let expected = vec![0xff, 0x00, 0x61, 0x80];
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "set", "bin", "--stdin", "--ttl", "1"])
+        .write_stdin(expected.clone())
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "get", "bin"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(output, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_close_does_not_panic() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let huge = vec![b'A'; 5_000_000];
+
+    let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "set", "huge", "--stdin", "--ttl", "1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&huge).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+
+    let status = std::process::Command::new("bash")
+        .env("GLOVES_BIN", assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("GLOVES_ROOT", root)
+        .arg("-c")
+        .arg("set -o pipefail; \"$GLOVES_BIN\" --root \"$GLOVES_ROOT\" get huge | head -c 1 >/dev/null")
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[test]
@@ -945,6 +1100,111 @@ fn cli_vault_init() {
 
 #[cfg(unix)]
 #[test]
+fn cli_vault_init_respects_configured_agent_id() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[defaults]\nagent_id = \"main\"\nsecret_ttl_days = 1\nvault_mount_ttl = \"1h\"\nvault_secret_ttl_days = 2\nvault_secret_length_bytes = 16\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "vault/agent_data",
+        ])
+        .assert()
+        .success();
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("meta/vault/agent_data.json")).unwrap())
+            .unwrap();
+    assert_eq!(metadata["created_by"], "main");
+    assert_eq!(metadata["recipients"][0], "main");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_init_uses_configured_secret_defaults() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[defaults]\nagent_id = \"main\"\nsecret_ttl_days = 1\nvault_mount_ttl = \"1h\"\nvault_secret_ttl_days = 2\nvault_secret_length_bytes = 16\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("meta/vault/agent_data.json")).unwrap())
+            .unwrap();
+    let created = DateTime::parse_from_rfc3339(metadata["created_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    let expires = DateTime::parse_from_rfc3339(metadata["expires_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!(expires - created, chrono::Duration::days(2));
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "vault/agent_data",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(output.len(), 16);
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_vault_mount() {
     let temp_dir = tempfile::tempdir().unwrap();
     let fake_bin = temp_dir.path().join("fake-bin");
@@ -981,6 +1241,92 @@ fn cli_vault_mount() {
 
     let sessions = std::fs::read_to_string(temp_dir.path().join("vaults/sessions.json")).unwrap();
     assert!(sessions.contains("agent_data"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_mount_missing_mountpoint_binary_is_actionable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    write_executable(
+        &fake_bin.join("gocryptfs"),
+        r#"#!/bin/bash
+set -euo pipefail
+extpass=""
+previous=""
+for arg in "$@"; do
+  if [[ "$previous" == "-extpass" ]]; then
+    extpass="$arg"
+  fi
+  previous="$arg"
+done
+if [[ -n "$extpass" ]]; then
+  read -r -a extpass_parts <<< "$extpass"
+  "${extpass_parts[@]}" >/dev/null
+fi
+if [[ "$1" == "-init" ]]; then
+  cipher=""
+  for arg in "$@"; do
+    cipher="$arg"
+  done
+  /bin/mkdir -p "$cipher"
+  /usr/bin/touch "$cipher/gocryptfs.conf"
+  exit 0
+fi
+mountpoint=""
+for arg in "$@"; do
+  mountpoint="$arg"
+done
+/bin/mkdir -p "$mountpoint"
+/usr/bin/touch "$mountpoint/.mounted"
+"#,
+    );
+    write_executable(
+        &fake_bin.join("fusermount"),
+        r#"#!/bin/bash
+set -euo pipefail
+if [[ "$1" == "-u" ]]; then
+  /bin/rm -f "$2/.mounted"
+fi
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path_and_gloves_only(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path_and_gloves_only(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "mount",
+            "agent_data",
+            "--ttl",
+            "1h",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "required binary not found: mountpoint",
+        ));
+
+    let sessions = std::fs::read_to_string(temp_dir.path().join("vaults/sessions.json")).unwrap();
+    assert_eq!(sessions.trim(), "[]");
 }
 
 #[cfg(unix)]

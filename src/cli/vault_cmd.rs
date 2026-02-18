@@ -1,32 +1,47 @@
 use crate::{
     audit::AuditLog,
-    error::Result,
+    error::{GlovesError, Result},
     paths::SecretsPaths,
     types::AgentId,
     vault::{gocryptfs::GocryptfsDriver, VaultManager, VaultSecretProvider},
 };
 
-use super::{runtime, secret_input, VaultCommand};
+use super::{
+    output::{self, OutputStatus},
+    runtime, secret_input, VaultCommand,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct VaultCommandDefaults {
     pub mount_ttl: String,
     pub agent_id: AgentId,
+    pub vault_secret_ttl_days: i64,
+    pub vault_secret_length_bytes: usize,
 }
 
 #[derive(Debug, Clone)]
 struct CliVaultSecretProvider {
     paths: SecretsPaths,
+    agent_id: AgentId,
+    ttl_days: i64,
+    length_bytes: usize,
 }
 
 impl VaultSecretProvider for CliVaultSecretProvider {
     fn ensure_agent_secret(&self, secret_name: &str) -> Result<()> {
-        runtime::ensure_agent_vault_secret(&self.paths, secret_name)
+        runtime::ensure_agent_vault_secret(
+            &self.paths,
+            secret_name,
+            &self.agent_id,
+            self.ttl_days,
+            self.length_bytes,
+        )
     }
 }
 
 fn vault_manager_for_paths(
     paths: &SecretsPaths,
+    defaults: &VaultCommandDefaults,
 ) -> Result<VaultManager<GocryptfsDriver, CliVaultSecretProvider>> {
     runtime::init_layout(paths)?;
     let audit_log = AuditLog::new(paths.audit_file())?;
@@ -35,7 +50,11 @@ fn vault_manager_for_paths(
         GocryptfsDriver::new(),
         CliVaultSecretProvider {
             paths: paths.clone(),
+            agent_id: defaults.agent_id.clone(),
+            ttl_days: defaults.vault_secret_ttl_days,
+            length_bytes: defaults.vault_secret_length_bytes,
         },
+        defaults.agent_id.clone(),
         audit_log,
     ))
 }
@@ -52,11 +71,11 @@ pub(crate) fn run_vault_command(
     command: VaultCommand,
     defaults: &VaultCommandDefaults,
 ) -> Result<()> {
-    let manager = vault_manager_for_paths(paths)?;
+    let manager = vault_manager_for_paths(paths, defaults)?;
     match command {
         VaultCommand::Init { name, owner } => {
             manager.init(&name, owner.into())?;
-            println!("initialized");
+            emit_stdout_line("initialized")?;
         }
         VaultCommand::Mount {
             name,
@@ -68,20 +87,20 @@ pub(crate) fn run_vault_command(
             let ttl_duration = secret_input::parse_duration_value(&ttl_literal, "--ttl")?;
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
             manager.mount(&name, ttl_duration, mountpoint, mounted_by)?;
-            println!("mounted");
+            emit_stdout_line("mounted")?;
         }
         VaultCommand::Unmount { name, agent } => {
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
             manager.unmount(&name, "explicit", mounted_by)?;
-            println!("unmounted");
+            emit_stdout_line("unmounted")?;
         }
         VaultCommand::Status => {
             let status = manager.status()?;
-            println!("{}", serde_json::to_string_pretty(&status)?);
+            emit_stdout_line(&serde_json::to_string_pretty(&status)?)?;
         }
         VaultCommand::List => {
             let entries = manager.list()?;
-            println!("{}", serde_json::to_string_pretty(&entries)?);
+            emit_stdout_line(&serde_json::to_string_pretty(&entries)?)?;
         }
         VaultCommand::AskFile {
             name,
@@ -98,8 +117,15 @@ pub(crate) fn run_vault_command(
                 AgentId::new(&trusted_agent)?,
                 reason,
             )?;
-            println!("{prompt}");
+            emit_stdout_line(&prompt)?;
         }
     }
     Ok(())
+}
+
+fn emit_stdout_line(line: &str) -> Result<()> {
+    match output::stdout_line(line) {
+        Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
+        Err(error) => Err(GlovesError::Io(error)),
+    }
 }

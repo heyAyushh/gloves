@@ -20,7 +20,10 @@ use crate::{
     vault::gocryptfs::GocryptfsDriver,
 };
 
-use super::{runtime, secret_input, DEFAULT_AGENT_ID, DEFAULT_TTL_DAYS};
+use super::{
+    output::{self, OutputStatus},
+    runtime, secret_input, DEFAULT_AGENT_ID, DEFAULT_TTL_DAYS,
+};
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -139,30 +142,32 @@ fn run_daemon_tcp(
     if check {
         let listener = TcpListener::bind(bind_addr)?;
         drop(listener);
-        println!("ok");
+        emit_stdout_line("ok")?;
         return Ok(());
     }
 
     let listener = TcpListener::bind(bind_addr)?;
     let listening_addr = listener.local_addr()?;
-    println!("listening: {}", listening_addr);
+    emit_stdout_line(&format!("listening: {listening_addr}"))?;
 
     let mut handled_requests = 0_usize;
     for stream in listener.incoming() {
         let mut stream = match stream {
             Ok(stream) => stream,
             Err(error) => {
-                eprintln!("error: daemon accept failed: {error}");
+                let _ = emit_stderr_line(&format!("error: daemon accept failed: {error}"));
                 continue;
             }
         };
         let io_timeout = Some(StdDuration::from_secs(options.io_timeout_seconds));
         if let Err(error) = stream.set_read_timeout(io_timeout) {
-            eprintln!("error: daemon read-timeout setup failed: {error}");
+            let _ = emit_stderr_line(&format!("error: daemon read-timeout setup failed: {error}"));
             continue;
         }
         if let Err(error) = stream.set_write_timeout(io_timeout) {
-            eprintln!("error: daemon write-timeout setup failed: {error}");
+            let _ = emit_stderr_line(&format!(
+                "error: daemon write-timeout setup failed: {error}"
+            ));
             continue;
         }
 
@@ -183,6 +188,20 @@ fn run_daemon_tcp(
         }
     }
     Ok(())
+}
+
+fn emit_stdout_line(line: &str) -> Result<()> {
+    match output::stdout_line(line) {
+        Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
+        Err(error) => Err(GlovesError::Io(error)),
+    }
+}
+
+fn emit_stderr_line(line: &str) -> std::io::Result<()> {
+    match output::stderr_line(line) {
+        Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn handle_daemon_connection<S>(

@@ -1,5 +1,6 @@
 mod commands;
 mod daemon;
+mod output;
 mod runtime;
 mod secret_input;
 mod vault_cmd;
@@ -138,6 +139,12 @@ pub enum Command {
         /// Access operation.
         #[command(subcommand)]
         command: AccessCommand,
+    },
+    /// Internal helper to print one secret for gocryptfs -extpass.
+    #[command(hide = true)]
+    ExtpassGet {
+        /// Secret name.
+        name: String,
     },
 }
 

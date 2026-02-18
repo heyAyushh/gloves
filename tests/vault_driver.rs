@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use gloves::vault::gocryptfs::{FsEncryptionDriver, GocryptfsDriver, InitRequest, MountRequest};
+use gloves::{
+    error::GlovesError,
+    vault::gocryptfs::{FsEncryptionDriver, GocryptfsDriver, InitRequest, MountRequest},
+};
 
 fn write_script(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
@@ -90,7 +93,11 @@ exit 1
     driver
         .init(&InitRequest {
             cipher_dir: cipher_dir.clone(),
-            extpass_command: "gloves --root /tmp get vault/agent_data".to_owned(),
+            extpass_command: "gloves extpass-get vault/agent_data".to_owned(),
+            extpass_environment: vec![
+                ("GLOVES_EXTPASS_ROOT".to_owned(), "/tmp".to_owned()),
+                ("GLOVES_EXTPASS_AGENT".to_owned(), "agent-a".to_owned()),
+            ],
         })
         .unwrap();
 
@@ -100,6 +107,63 @@ exit 1
     let log = fs::read_to_string(args_log).unwrap();
     assert!(log.contains("-init"));
     assert!(log.contains("-extpass"));
+    assert!(log.contains("gloves extpass-get vault/agent_data"));
+}
+
+#[test]
+fn init_passes_extpass_environment() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    let logs_dir = temp_dir.path().join("logs");
+    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&logs_dir).unwrap();
+
+    let env_log = logs_dir.join("env.log");
+    let gocryptfs_script = r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "${GLOVES_EXTPASS_ROOT}:${GLOVES_EXTPASS_AGENT}" >> "__ENV_LOG__"
+if [[ "$1" == "-init" ]]; then
+  cipher=""
+  for arg in "$@"; do
+    cipher="$arg"
+  done
+  mkdir -p "$cipher"
+  touch "$cipher/gocryptfs.conf"
+fi
+"#;
+    write_script(
+        &bin_dir.join("gocryptfs"),
+        &gocryptfs_script.replace("__ENV_LOG__", &env_log.to_string_lossy()),
+    );
+    write_script(
+        &bin_dir.join("fusermount"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+"#,
+    );
+    write_script(
+        &bin_dir.join("mountpoint"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+"#,
+    );
+
+    let driver = build_driver(&bin_dir);
+    driver
+        .init(&InitRequest {
+            cipher_dir: temp_dir.path().join("cipher"),
+            extpass_command: "gloves extpass-get vault/agent_data".to_owned(),
+            extpass_environment: vec![
+                ("GLOVES_EXTPASS_ROOT".to_owned(), "/tmp/root".to_owned()),
+                ("GLOVES_EXTPASS_AGENT".to_owned(), "agent-a".to_owned()),
+            ],
+        })
+        .unwrap();
+
+    assert!(wait_for(|| env_log.exists()));
+    let logged = fs::read_to_string(env_log).unwrap();
+    assert!(logged.contains("/tmp/root:agent-a"));
 }
 
 #[test]
@@ -161,7 +225,11 @@ exit 1
         .mount(&MountRequest {
             cipher_dir: temp_dir.path().join("cipher"),
             mount_point: mount_point.clone(),
-            extpass_command: "gloves --root /tmp get vault/agent_data".to_owned(),
+            extpass_command: "gloves extpass-get vault/agent_data".to_owned(),
+            extpass_environment: vec![
+                ("GLOVES_EXTPASS_ROOT".to_owned(), "/tmp".to_owned()),
+                ("GLOVES_EXTPASS_AGENT".to_owned(), "agent-a".to_owned()),
+            ],
             idle_timeout: Some(Duration::from_secs(3600)),
         })
         .unwrap();
@@ -169,7 +237,7 @@ exit 1
     assert!(wait_for(|| args_log.exists()));
     let log = fs::read_to_string(args_log).unwrap();
     assert!(log.contains("-idle 3600s"));
-    assert!(log.contains("gloves --root /tmp get vault/agent_data"));
+    assert!(log.contains("gloves extpass-get vault/agent_data"));
 }
 
 #[test]
@@ -226,7 +294,11 @@ exit 1
         .mount(&MountRequest {
             cipher_dir: temp_dir.path().join("cipher"),
             mount_point: mount_point.clone(),
-            extpass_command: "gloves --root /tmp get vault/agent_data".to_owned(),
+            extpass_command: "gloves extpass-get vault/agent_data".to_owned(),
+            extpass_environment: vec![
+                ("GLOVES_EXTPASS_ROOT".to_owned(), "/tmp".to_owned()),
+                ("GLOVES_EXTPASS_AGENT".to_owned(), "agent-a".to_owned()),
+            ],
             idle_timeout: None,
         })
         .unwrap();
@@ -280,4 +352,37 @@ exit 1
     assert!(!driver
         .is_mounted(PathBuf::from("/tmp/missing").as_path())
         .unwrap());
+}
+
+#[test]
+fn is_mounted_missing_binary_returns_error() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    write_script(
+        &bin_dir.join("gocryptfs"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+"#,
+    );
+    write_script(
+        &bin_dir.join("fusermount"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+"#,
+    );
+    let driver = GocryptfsDriver::with_binaries(
+        bin_dir.join("gocryptfs").to_string_lossy().to_string(),
+        bin_dir.join("fusermount").to_string_lossy().to_string(),
+        bin_dir
+            .join("missing-mountpoint")
+            .to_string_lossy()
+            .to_string(),
+    );
+
+    let result = driver.is_mounted(PathBuf::from("/tmp/missing").as_path());
+    assert!(
+        matches!(result, Err(GlovesError::Crypto(message)) if message.contains("required binary not found"))
+    );
 }

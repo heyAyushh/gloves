@@ -48,6 +48,7 @@ struct DriverState {
     is_mounted_calls: Mutex<Vec<PathBuf>>,
     mounted: Mutex<HashSet<PathBuf>>,
     mount_readiness_lag_checks: Mutex<usize>,
+    fail_is_mounted: Mutex<bool>,
     next_pid: AtomicU32,
 }
 
@@ -82,6 +83,11 @@ impl FsEncryptionDriver for MockDriver {
     }
 
     fn is_mounted(&self, mount_point: &Path) -> Result<bool> {
+        if *self.state.fail_is_mounted.lock().unwrap() {
+            return Err(GlovesError::Crypto(
+                "injected is_mounted failure".to_owned(),
+            ));
+        }
         self.state
             .is_mounted_calls
             .lock()
@@ -121,6 +127,7 @@ fn build_manager() -> (
         MockSecretProvider {
             state: secret_provider_state.clone(),
         },
+        AgentId::new("default-agent").unwrap(),
         audit,
     );
     (manager, temp_dir, driver_state, secret_provider_state)
@@ -145,13 +152,26 @@ fn vault_init_agent() {
 
 #[test]
 fn vault_init_human() {
-    let (manager, _temp_dir, driver_state, secret_provider_state) = build_manager();
+    let (manager, temp_dir, driver_state, secret_provider_state) = build_manager();
     let _ = manager.init("personal", Owner::Human).unwrap();
 
     assert!(secret_provider_state.generated.lock().unwrap().is_empty());
     let init_calls = driver_state.init_calls.lock().unwrap();
     assert_eq!(init_calls.len(), 1);
-    assert_eq!(init_calls[0].extpass_command, "pass show 'vault/personal'");
+    assert_eq!(init_calls[0].extpass_command, "pass show vault/personal");
+    assert_eq!(
+        init_calls[0].extpass_environment,
+        vec![
+            (
+                "GLOVES_EXTPASS_ROOT".to_owned(),
+                temp_dir.path().display().to_string()
+            ),
+            (
+                "GLOVES_EXTPASS_AGENT".to_owned(),
+                "default-agent".to_owned()
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -189,12 +209,26 @@ fn vault_mount_passes_extpass_and_idle_timeout() {
 
     let mount_calls = driver_state.mount_calls.lock().unwrap();
     assert_eq!(mount_calls.len(), 1);
-    assert!(mount_calls[0]
-        .extpass_command
-        .contains("get 'vault/agent_data'"));
+    assert_eq!(
+        mount_calls[0].extpass_command,
+        "gloves extpass-get vault/agent_data"
+    );
     assert_eq!(
         mount_calls[0].idle_timeout,
         Some(std::time::Duration::from_secs(30 * 60))
+    );
+    assert_eq!(
+        mount_calls[0].extpass_environment,
+        vec![
+            (
+                "GLOVES_EXTPASS_ROOT".to_owned(),
+                _temp_dir.path().display().to_string()
+            ),
+            (
+                "GLOVES_EXTPASS_AGENT".to_owned(),
+                "default-agent".to_owned()
+            ),
+        ]
     );
 }
 
@@ -214,6 +248,7 @@ fn vault_extpass_quotes_paths() {
         MockSecretProvider {
             state: secret_provider_state,
         },
+        AgentId::new("default-agent").unwrap(),
         audit,
     );
 
@@ -228,13 +263,20 @@ fn vault_extpass_quotes_paths() {
         .unwrap();
 
     let init_calls = driver_state.init_calls.lock().unwrap();
-    assert!(init_calls[0].extpass_command.contains("gloves --root "));
-    assert!(init_calls[0]
-        .extpass_command
-        .contains("root with '\"'\"'quote"));
-    assert!(init_calls[0]
-        .extpass_command
-        .ends_with("get 'vault/agent_data'"));
+    assert_eq!(
+        init_calls[0].extpass_command,
+        "gloves extpass-get vault/agent_data"
+    );
+    assert_eq!(
+        init_calls[0].extpass_environment,
+        vec![
+            ("GLOVES_EXTPASS_ROOT".to_owned(), root.display().to_string()),
+            (
+                "GLOVES_EXTPASS_AGENT".to_owned(),
+                "default-agent".to_owned()
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -281,6 +323,25 @@ fn vault_mount_waits_for_mountpoint_readiness() {
 
     let is_mounted_call_count = driver_state.is_mounted_calls.lock().unwrap().len();
     assert!(is_mounted_call_count > MOUNT_READINESS_LAG_CHECKS);
+}
+
+#[test]
+fn vault_mount_readiness_failure_cleans_up_mount() {
+    let (manager, temp_dir, driver_state, _secret_provider_state) = build_manager();
+    manager.init("agent_data", Owner::Agent).unwrap();
+    *driver_state.fail_is_mounted.lock().unwrap() = true;
+
+    let result = manager.mount(
+        "agent_data",
+        Duration::minutes(30),
+        None,
+        AgentId::new("agent-a").unwrap(),
+    );
+
+    assert!(matches!(result, Err(GlovesError::Crypto(_))));
+    assert_eq!(driver_state.unmount_calls.lock().unwrap().len(), 1);
+    let sessions = read_sessions(&SecretsPaths::new(temp_dir.path()).vault_sessions_file());
+    assert!(sessions.is_empty());
 }
 
 #[test]

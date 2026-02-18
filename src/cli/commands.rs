@@ -10,15 +10,18 @@ use crate::{
     paths::SecretsPaths,
     reaper::TtlReaper,
     types::{AgentId, Owner, SecretId, SecretValue},
-    vault::gocryptfs::GocryptfsDriver,
+    vault::gocryptfs::{GocryptfsDriver, EXTPASS_AGENT_ENV_VAR, EXTPASS_ROOT_ENV_VAR},
 };
 
 use super::{
-    daemon, runtime, secret_input,
+    daemon,
+    output::{self, OutputStatus},
+    runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
     AccessCommand, Cli, Command, ConfigCommand, DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND,
     DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR,
-    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL,
+    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
+    DEFAULT_VAULT_SECRET_TTL_DAYS,
 };
 
 const REQUIRED_VAULT_BINARIES: [&str; 3] = ["gocryptfs", "fusermount", "mountpoint"];
@@ -30,6 +33,8 @@ struct EffectiveCliState {
     default_agent_id: AgentId,
     default_secret_ttl_days: i64,
     default_vault_mount_ttl: String,
+    default_vault_secret_ttl_days: i64,
+    default_vault_secret_length_bytes: usize,
     daemon_bind: String,
     daemon_io_timeout_seconds: u64,
     daemon_request_limit_bytes: usize,
@@ -37,13 +42,19 @@ struct EffectiveCliState {
 }
 
 pub(crate) fn run(cli: Cli) -> Result<i32> {
+    if let Command::ExtpassGet { name } = &cli.command {
+        return run_extpass_get(name);
+    }
+
     let state = load_effective_state(&cli)?;
     enforce_vault_mode(&state.vault_mode, &cli.command)?;
 
     match cli.command {
         Command::Init => {
             runtime::init_layout(&state.paths)?;
-            println!("initialized");
+            if let Some(code) = stdout_line_or_exit("initialized")? {
+                return Ok(code);
+            }
         }
         Command::Set {
             name,
@@ -73,14 +84,16 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                     recipient_keys: vec![recipient],
                 },
             )?;
-            println!("ok");
+            if let Some(code) = stdout_line_or_exit("ok")? {
+                return Ok(code);
+            }
         }
         Command::Get { name } => {
             let force_tty_warning = std::env::var("GLOVES_FORCE_TTY_WARNING")
                 .map(|value| value == "1")
                 .unwrap_or(false);
             if atty::is(atty::Stream::Stdout) || force_tty_warning {
-                eprintln!("warning: raw secret output on tty");
+                let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
             }
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
@@ -88,16 +101,23 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let identity_file = runtime::load_or_create_default_identity(&state.paths)?;
             let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
             match value {
-                Ok(secret) => secret.expose(|bytes| println!("{}", String::from_utf8_lossy(bytes))),
+                Ok(secret) => {
+                    let secret_bytes = secret.expose(ToOwned::to_owned);
+                    if let Some(code) = stdout_bytes_or_exit(&secret_bytes)? {
+                        return Ok(code);
+                    }
+                }
                 Err(error) => {
-                    eprintln!("error: {error}");
+                    let _ = stderr_line_ignore_broken_pipe(&format!("error: {error}"));
                     return Ok(1);
                 }
             }
         }
         Command::Env { name, var } => {
             let _ = name;
-            println!("export {var}=<REDACTED>");
+            if let Some(code) = stdout_line_or_exit(&format!("export {var}=<REDACTED>"))? {
+                return Ok(code);
+            }
         }
         Command::Request { name, reason } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
@@ -111,30 +131,42 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 Duration::days(state.default_secret_ttl_days),
                 &signing_key,
             )?;
-            println!("pending");
+            if let Some(code) = stdout_line_or_exit("pending")? {
+                return Ok(code);
+            }
         }
         Command::Approve { request_id } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
             manager.approve_request(request_id)?;
-            println!("approved");
+            if let Some(code) = stdout_line_or_exit("approved")? {
+                return Ok(code);
+            }
         }
         Command::Deny { request_id } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
             manager.deny_request(request_id)?;
-            println!("denied");
+            if let Some(code) = stdout_line_or_exit("denied")? {
+                return Ok(code);
+            }
         }
         Command::List => {
             let manager = runtime::manager_for_paths(&state.paths)?;
-            println!("{}", serde_json::to_string_pretty(&manager.list_all()?)?);
+            if let Some(code) =
+                stdout_line_or_exit(&serde_json::to_string_pretty(&manager.list_all()?)?)?
+            {
+                return Ok(code);
+            }
         }
         Command::Revoke { name } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
             let caller = state.default_agent_id.clone();
             manager.revoke(&secret_id, &caller)?;
-            println!("revoked");
+            if let Some(code) = stdout_line_or_exit("revoked")? {
+                return Ok(code);
+            }
         }
         Command::Status { name } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
@@ -144,7 +176,9 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 .find(|request| request.secret_name.as_str() == name)
                 .map(|request| request.status)
                 .unwrap_or(crate::types::RequestStatus::Fulfilled);
-            println!("{}", serde_json::to_string(&status)?);
+            if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
+                return Ok(code);
+            }
         }
         Command::Verify => {
             let manager = runtime::manager_for_paths(&state.paths)?;
@@ -158,7 +192,9 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 &state.paths,
                 &manager.audit_log,
             )?;
-            println!("ok");
+            if let Some(code) = stdout_line_or_exit("ok")? {
+                return Ok(code);
+            }
         }
         Command::Daemon {
             bind,
@@ -184,6 +220,8 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 &VaultCommandDefaults {
                     mount_ttl: state.default_vault_mount_ttl.clone(),
                     agent_id: state.default_agent_id.clone(),
+                    vault_secret_ttl_days: state.default_vault_secret_ttl_days,
+                    vault_secret_length_bytes: state.default_vault_secret_length_bytes,
                 },
             )?;
         }
@@ -192,7 +230,9 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 if matches!(state.vault_mode, VaultMode::Required) {
                     ensure_vault_dependencies()?;
                 }
-                println!("ok");
+                if let Some(code) = stdout_line_or_exit("ok")? {
+                    return Ok(code);
+                }
             }
         },
         Command::Access { command } => match command {
@@ -210,7 +250,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                         "agent": agent_id.as_str(),
                         "paths": entries,
                     });
-                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                    if let Some(code) =
+                        stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)?
+                    {
+                        return Ok(code);
+                    }
                 } else {
                     for entry in entries {
                         let operations = entry
@@ -219,13 +263,76 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                             .map(path_operation_label)
                             .collect::<Vec<_>>()
                             .join(",");
-                        println!("{}\t{}\t{}", entry.alias, entry.path.display(), operations);
+                        if let Some(code) = stdout_line_or_exit(&format!(
+                            "{}\t{}\t{}",
+                            entry.alias,
+                            entry.path.display(),
+                            operations
+                        ))? {
+                            return Ok(code);
+                        }
                     }
                 }
             }
         },
+        Command::ExtpassGet { .. } => {}
     }
     Ok(0)
+}
+
+fn stdout_line_or_exit(line: &str) -> Result<Option<i32>> {
+    match output::stdout_line(line) {
+        Ok(OutputStatus::Written) => Ok(None),
+        Ok(OutputStatus::BrokenPipe) => Ok(Some(0)),
+        Err(error) => Err(GlovesError::Io(error)),
+    }
+}
+
+fn stdout_bytes_or_exit(bytes: &[u8]) -> Result<Option<i32>> {
+    match output::stdout_bytes(bytes) {
+        Ok(OutputStatus::Written) => Ok(None),
+        Ok(OutputStatus::BrokenPipe) => Ok(Some(0)),
+        Err(error) => Err(GlovesError::Io(error)),
+    }
+}
+
+fn stderr_line_ignore_broken_pipe(line: &str) -> std::io::Result<()> {
+    match output::stderr_line(line) {
+        Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn run_extpass_get(secret_name: &str) -> Result<i32> {
+    let root = read_required_env_var(EXTPASS_ROOT_ENV_VAR)?;
+    let agent = read_required_env_var(EXTPASS_AGENT_ENV_VAR)?;
+
+    let paths = SecretsPaths::new(root);
+    let manager = runtime::manager_for_paths(&paths)?;
+    let secret_id = SecretId::new(secret_name)?;
+    let caller = AgentId::new(&agent)?;
+    let identity_file = runtime::load_or_create_default_identity(&paths)?;
+    let secret = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
+    let secret_bytes = secret.expose(ToOwned::to_owned);
+    if let Some(code) = stdout_bytes_or_exit(&secret_bytes)? {
+        return Ok(code);
+    }
+    Ok(0)
+}
+
+fn read_required_env_var(key: &str) -> Result<String> {
+    match std::env::var(key) {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        Ok(_) => Err(GlovesError::InvalidInput(format!(
+            "{key} must not be empty"
+        ))),
+        Err(VarError::NotPresent) => Err(GlovesError::InvalidInput(format!(
+            "missing required environment variable: {key}"
+        ))),
+        Err(VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(format!(
+            "{key} must be valid UTF-8"
+        ))),
+    }
 }
 
 fn load_effective_state(cli: &Cli) -> Result<EffectiveCliState> {
@@ -259,6 +366,14 @@ fn load_effective_state(cli: &Cli) -> Result<EffectiveCliState> {
         .as_ref()
         .map(|config| config.defaults.vault_mount_ttl.clone())
         .unwrap_or_else(|| DEFAULT_VAULT_MOUNT_TTL.to_owned());
+    let default_vault_secret_ttl_days = loaded_config
+        .as_ref()
+        .map(|config| config.defaults.vault_secret_ttl_days)
+        .unwrap_or(DEFAULT_VAULT_SECRET_TTL_DAYS);
+    let default_vault_secret_length_bytes = loaded_config
+        .as_ref()
+        .map(|config| config.defaults.vault_secret_length_bytes)
+        .unwrap_or(DEFAULT_VAULT_SECRET_LENGTH_BYTES);
     let daemon_bind = loaded_config
         .as_ref()
         .map(|config| config.daemon.bind.clone())
@@ -284,6 +399,8 @@ fn load_effective_state(cli: &Cli) -> Result<EffectiveCliState> {
         default_agent_id,
         default_secret_ttl_days,
         default_vault_mount_ttl,
+        default_vault_secret_ttl_days,
+        default_vault_secret_length_bytes,
         daemon_bind,
         daemon_io_timeout_seconds,
         daemon_request_limit_bytes,

@@ -15,8 +15,6 @@ use crate::{
     types::{AgentId, Owner, SecretId, SecretValue},
 };
 
-use super::{DEFAULT_AGENT_ID, DEFAULT_VAULT_SECRET_LENGTH_BYTES, DEFAULT_VAULT_SECRET_TTL_DAYS};
-
 pub(crate) fn init_layout(paths: &SecretsPaths) -> Result<()> {
     ensure_private_dir(paths.root())?;
     ensure_private_dir(&paths.store_dir())?;
@@ -99,27 +97,32 @@ pub(crate) fn parse_request_uuid(request_id: &str) -> Result<uuid::Uuid> {
         .map_err(|error| GlovesError::InvalidInput(error.to_string()))
 }
 
-pub(crate) fn ensure_agent_vault_secret(paths: &SecretsPaths, secret_name: &str) -> Result<()> {
+pub(crate) fn ensure_agent_vault_secret(
+    paths: &SecretsPaths,
+    secret_name: &str,
+    creator: &AgentId,
+    ttl_days: i64,
+    length_bytes: usize,
+) -> Result<()> {
     let manager = manager_for_paths(paths)?;
     let secret_id = SecretId::new(secret_name)?;
     if manager.metadata_store.path_for(&secret_id).exists() {
         return Ok(());
     }
 
-    let creator = AgentId::new(DEFAULT_AGENT_ID)?;
     let recipient = load_or_create_default_recipient(paths)?;
     let mut recipients = HashSet::new();
     recipients.insert(creator.clone());
 
-    let mut secret_bytes = vec![0_u8; DEFAULT_VAULT_SECRET_LENGTH_BYTES];
+    let mut secret_bytes = vec![0_u8; length_bytes];
     rand::rng().fill(secret_bytes.as_mut_slice());
     match manager.set(
         secret_id,
         SecretValue::new(secret_bytes),
         SetSecretOptions {
             owner: Owner::Agent,
-            ttl: Duration::days(DEFAULT_VAULT_SECRET_TTL_DAYS),
-            created_by: creator,
+            ttl: Duration::days(ttl_days),
+            created_by: creator.clone(),
             recipients,
             recipient_keys: vec![recipient],
         },

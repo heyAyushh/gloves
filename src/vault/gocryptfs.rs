@@ -10,6 +10,10 @@ use crate::error::{GlovesError, Result};
 
 const EXEC_BUSY_RETRY_ATTEMPTS: usize = 20;
 const EXEC_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
+/// Root path environment key used by the internal extpass helper.
+pub const EXTPASS_ROOT_ENV_VAR: &str = "GLOVES_EXTPASS_ROOT";
+/// Agent id environment key used by the internal extpass helper.
+pub const EXTPASS_AGENT_ENV_VAR: &str = "GLOVES_EXTPASS_AGENT";
 
 /// Request payload for initializing a gocryptfs directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +22,8 @@ pub struct InitRequest {
     pub cipher_dir: PathBuf,
     /// External password command.
     pub extpass_command: String,
+    /// Extra environment variables for the extpass command.
+    pub extpass_environment: Vec<(String, String)>,
 }
 
 /// Request payload for mounting a gocryptfs directory.
@@ -29,6 +35,8 @@ pub struct MountRequest {
     pub mount_point: PathBuf,
     /// External password command.
     pub extpass_command: String,
+    /// Extra environment variables for the extpass command.
+    pub extpass_environment: Vec<(String, String)>,
     /// Optional idle timeout for auto-unmount.
     pub idle_timeout: Option<Duration>,
 }
@@ -88,12 +96,15 @@ impl FsEncryptionDriver for GocryptfsDriver {
         fs::create_dir_all(&request.cipher_dir)?;
 
         let output = retry_exec_busy(|| {
-            Command::new(&self.gocryptfs_binary)
+            let mut command = Command::new(&self.gocryptfs_binary);
+            command
                 .args(["-init", "-extpass"])
                 .arg(&request.extpass_command)
-                .arg(&request.cipher_dir)
-                .output()
-        })?;
+                .arg(&request.cipher_dir);
+            apply_extpass_environment(&mut command, &request.extpass_environment);
+            command.output()
+        })
+        .map_err(|error| map_command_execution_error(&self.gocryptfs_binary, error))?;
         if output.status.success() {
             return Ok(());
         }
@@ -120,8 +131,10 @@ impl FsEncryptionDriver for GocryptfsDriver {
             .arg(&request.mount_point)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        apply_extpass_environment(&mut command, &request.extpass_environment);
 
-        let child = retry_exec_busy(|| command.spawn())?;
+        let child = retry_exec_busy(|| command.spawn())
+            .map_err(|error| map_command_execution_error(&self.gocryptfs_binary, error))?;
         Ok(child.id())
     }
 
@@ -131,7 +144,8 @@ impl FsEncryptionDriver for GocryptfsDriver {
                 .args(["-u"])
                 .arg(mount_point)
                 .status()
-        })?;
+        })
+        .map_err(|error| map_command_execution_error(&self.fusermount_binary, error))?;
         if status.success() {
             return Ok(());
         }
@@ -139,15 +153,28 @@ impl FsEncryptionDriver for GocryptfsDriver {
     }
 
     fn is_mounted(&self, mount_point: &Path) -> Result<bool> {
-        Ok(retry_exec_busy(|| {
+        let status = retry_exec_busy(|| {
             Command::new(&self.mountpoint_binary)
                 .arg("-q")
                 .arg(mount_point)
                 .status()
         })
-        .map(|status| status.success())
-        .unwrap_or(false))
+        .map_err(|error| map_command_execution_error(&self.mountpoint_binary, error))?;
+        Ok(status.success())
     }
+}
+
+fn apply_extpass_environment(command: &mut Command, extpass_environment: &[(String, String)]) {
+    for (key, value) in extpass_environment {
+        command.env(key, value);
+    }
+}
+
+fn map_command_execution_error(binary: &str, error: io::Error) -> GlovesError {
+    if error.kind() == io::ErrorKind::NotFound {
+        return GlovesError::Crypto(format!("required binary not found: {binary}"));
+    }
+    GlovesError::Io(error)
 }
 
 fn retry_exec_busy<T, F>(mut operation: F) -> io::Result<T>
