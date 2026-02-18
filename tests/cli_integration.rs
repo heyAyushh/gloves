@@ -1205,6 +1205,53 @@ fn cli_vault_init_uses_configured_secret_defaults() {
 
 #[cfg(unix)]
 #[test]
+fn cli_vault_mount_without_config_discovers_config_from_root() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let workspace = temp_dir.path().join("workspace");
+    let root = workspace.join("secrets");
+    fs::create_dir_all(&workspace).unwrap();
+    let config_path = workspace.join(".gloves.toml");
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n[defaults]\nagent_id = \"main\"\nsecret_ttl_days = 1\nvault_mount_ttl = \"1h\"\nvault_secret_ttl_days = 2\nvault_secret_length_bytes = 16\n",
+            root.display()
+        ),
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "vault",
+            "mount",
+            "agent_data",
+            "--ttl",
+            "1h",
+        ])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_vault_mount() {
     let temp_dir = tempfile::tempdir().unwrap();
     let fake_bin = temp_dir.path().join("fake-bin");
@@ -1288,6 +1335,7 @@ done
         &fake_bin.join("fusermount"),
         r#"#!/bin/bash
 set -euo pipefail
+echo "FUSERMOUNT_CALLED" >&2
 if [[ "$1" == "-u" ]]; then
   /bin/rm -f "$2/.mounted"
 fi
@@ -1308,7 +1356,7 @@ fi
         .assert()
         .success();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", with_fake_path_and_gloves_only(&fake_bin))
         .args([
             "--root",
@@ -1321,9 +1369,12 @@ fi
         ])
         .assert()
         .failure()
-        .stderr(predicates::str::contains(
-            "required binary not found: mountpoint",
-        ));
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8_lossy(&output);
+    assert!(stderr.contains("required binary not found: mountpoint"));
+    assert!(!stderr.contains("FUSERMOUNT_CALLED"));
 
     let sessions = std::fs::read_to_string(temp_dir.path().join("vaults/sessions.json")).unwrap();
     assert_eq!(sessions.trim(), "[]");

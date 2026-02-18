@@ -6,6 +6,17 @@
 
 - No unreleased changes yet.
 
+## 0.3.3
+
+### Patch Changes
+
+- Fixed vault mount config resolution by extending discovery to walk from `--root` when cwd-based discovery does not find `.gloves.toml`.
+- Fixed failed mount cleanup to terminate the spawned foreground `gocryptfs` process first and avoid unconditional `fusermount -u` noise on non-mounted paths.
+- Increased vault mount readiness timeout from 3s to 10s to reduce false-negative readiness failures on slower environments.
+- Updated unmount execution to capture `fusermount` stderr and return structured errors instead of leaking raw cleanup noise to CLI output.
+- Added regression tests for root-based config discovery on mount and for suppressing misleading cleanup stderr in missing-binary mount failures.
+- Documented that `set --stdin` trims trailing CR/LF bytes.
+
 ## 0.3.2
 
 ### Patch Changes

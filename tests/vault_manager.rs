@@ -339,7 +339,7 @@ fn vault_mount_readiness_failure_cleans_up_mount() {
     );
 
     assert!(matches!(result, Err(GlovesError::Crypto(_))));
-    assert_eq!(driver_state.unmount_calls.lock().unwrap().len(), 1);
+    assert_eq!(driver_state.unmount_calls.lock().unwrap().len(), 0);
     let sessions = read_sessions(&SecretsPaths::new(temp_dir.path()).vault_sessions_file());
     assert!(sessions.is_empty());
 }

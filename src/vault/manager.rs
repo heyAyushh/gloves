@@ -26,8 +26,9 @@ use super::{
     validation::{validate_requested_file_path, validate_ttl_minutes, validate_vault_name},
 };
 
-const MOUNT_READY_TIMEOUT: StdDuration = StdDuration::from_secs(3);
+const MOUNT_READY_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 const MOUNT_READY_POLL_INTERVAL: StdDuration = StdDuration::from_millis(25);
+const MOUNT_CLEANUP_POLL_ATTEMPTS: usize = 8;
 
 /// Coordinator for vault lifecycle operations.
 pub struct VaultManager<D, P>
@@ -157,7 +158,7 @@ where
             idle_timeout: Some(idle_timeout),
         })?;
         if let Err(error) = self.wait_for_mount_readiness(&mountpoint) {
-            let _ = self.driver.unmount(&mountpoint);
+            self.cleanup_failed_mount(&mountpoint, pid);
             return Err(error);
         }
         let now = Utc::now();
@@ -328,6 +329,18 @@ where
         }
     }
 
+    fn cleanup_failed_mount(&self, mountpoint: &Path, pid: u32) {
+        terminate_process(pid);
+        for _ in 0..MOUNT_CLEANUP_POLL_ATTEMPTS {
+            match self.driver.is_mounted(mountpoint) {
+                Ok(false) => return,
+                Ok(true) => thread::sleep(MOUNT_READY_POLL_INTERVAL),
+                Err(_) => return,
+            }
+        }
+        let _ = self.driver.unmount(mountpoint);
+    }
+
     fn ensure_layout(&self) -> Result<()> {
         ensure_private_dir(self.paths.root())?;
         ensure_private_dir(&self.paths.vaults_dir())?;
@@ -382,3 +395,14 @@ fn extpass_environment(paths: &SecretsPaths, extpass_agent: &AgentId) -> Vec<(St
         ),
     ]
 }
+
+#[cfg(unix)]
+fn terminate_process(pid: u32) {
+    if let Ok(pid_value) = i32::try_from(pid) {
+        // Best effort cleanup for foreground gocryptfs processes when mount readiness fails.
+        let _ = unsafe { libc::kill(pid_value, libc::SIGTERM) };
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_process(_pid: u32) {}

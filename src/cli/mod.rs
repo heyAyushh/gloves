@@ -59,7 +59,7 @@ pub enum Command {
         /// Inline secret value (less secure than stdin).
         #[arg(long)]
         value: Option<String>,
-        /// Read secret value from stdin.
+        /// Read secret value from stdin (trims trailing CR/LF).
         #[arg(long)]
         stdin: bool,
         /// TTL in days.

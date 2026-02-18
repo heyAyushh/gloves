@@ -5,7 +5,9 @@ use std::path::Path;
 use chrono::Duration;
 
 use crate::{
-    config::{resolve_config_path, GlovesConfig, PathOperation, VaultMode},
+    config::{
+        discover_config, resolve_config_path, ConfigSource, GlovesConfig, PathOperation, VaultMode,
+    },
     error::{GlovesError, Result},
     paths::SecretsPaths,
     reaper::TtlReaper,
@@ -338,12 +340,27 @@ fn read_required_env_var(key: &str) -> Result<String> {
 fn load_effective_state(cli: &Cli) -> Result<EffectiveCliState> {
     let current_dir = std::env::current_dir()?;
     let env_path = read_config_env_var()?;
-    let selection = resolve_config_path(
+    let mut selection = resolve_config_path(
         cli.config.as_deref(),
         env_path.as_deref(),
         cli.no_config,
         &current_dir,
     )?;
+    if selection.path.is_none() && !cli.no_config {
+        if let Some(root_override) = cli.root.as_deref() {
+            let discovery_start = if root_override.is_absolute() {
+                root_override.to_path_buf()
+            } else {
+                current_dir.join(root_override)
+            };
+            if let Some(discovered) = discover_config(discovery_start) {
+                selection = crate::config::ConfigSelection {
+                    source: ConfigSource::Discovered,
+                    path: Some(discovered),
+                };
+            }
+        }
+    }
     let loaded_config = match selection.path {
         Some(path) => Some(GlovesConfig::load_from_path(path)?),
         None => None,

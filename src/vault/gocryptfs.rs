@@ -139,17 +139,23 @@ impl FsEncryptionDriver for GocryptfsDriver {
     }
 
     fn unmount(&self, mount_point: &Path) -> Result<()> {
-        let status = retry_exec_busy(|| {
+        let output = retry_exec_busy(|| {
             Command::new(&self.fusermount_binary)
                 .args(["-u"])
                 .arg(mount_point)
-                .status()
+                .output()
         })
         .map_err(|error| map_command_execution_error(&self.fusermount_binary, error))?;
-        if status.success() {
+        if output.status.success() {
             return Ok(());
         }
-        Err(GlovesError::Crypto("gocryptfs unmount failed".to_owned()))
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.is_empty() {
+            return Err(GlovesError::Crypto("gocryptfs unmount failed".to_owned()));
+        }
+        Err(GlovesError::Crypto(format!(
+            "gocryptfs unmount failed: {stderr}"
+        )))
     }
 
     fn is_mounted(&self, mount_point: &Path) -> Result<bool> {
