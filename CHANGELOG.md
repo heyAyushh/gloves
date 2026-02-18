@@ -6,6 +6,15 @@
 
 - No unreleased changes yet.
 
+## 0.4.1
+
+### Patch Changes
+
+- Added extensive ACL regression coverage for all ACL-gated secret operations, including request/approve/deny path matching and deny-by-default cases.
+- Added daemon coverage for request parsing, error responses, and runtime handling branches to keep CI coverage thresholds stable.
+- Expanded operator docs with a complete secret ACL operation map and multi-agent ACL config examples.
+- Added `pass`-to-agent handoff guidance to the `gloves-cli` skill and command reference, including ACL requirements and `gpg denied` troubleshooting.
+
 ## 0.4.0
 
 ### Minor Changes
