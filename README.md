@@ -46,7 +46,8 @@ sudo apt-get install pass gnupg
 This script installs:
 
 - prebuilt `gloves` CLI from GitHub Releases (no local build)
-- `skills/gloves-cli` into `~/.openclaw/skills/gloves-cli`
+- `skills/gloves-cli-usage` into `~/.openclaw/skills/gloves-cli-usage`
+- `skills/gloves-setup-migrate` into `~/.openclaw/skills/gloves-setup-migrate`
 - initialized secrets root at `~/.openclaw/secrets`
 
 ```bash
@@ -73,10 +74,11 @@ cd gloves
 cargo install --path .
 ```
 
-### Install Agent skill
+### Install Agent skills
 
 ```bash
-npx skills add heyAyushh/gloves --skill gloves-cli
+npx skills add heyAyushh/gloves --skill gloves-cli-usage
+npx skills add heyAyushh/gloves --skill gloves-setup-migrate
 ```
 
 ### OpenClaw setup script (CLI + skill)
@@ -84,7 +86,9 @@ npx skills add heyAyushh/gloves --skill gloves-cli
 Run this repository script to:
 
 - install `gloves` from GitHub Releases (default `--install-mode release`)
-- install `skills/gloves-cli` to `~/.openclaw/skills/gloves-cli`
+- install both skill directories to `~/.openclaw/skills/`:
+  - `gloves-cli-usage`
+  - `gloves-setup-migrate`
 - initialize `~/.openclaw/secrets` with `gloves --root ... init`
 
 ```bash
@@ -102,7 +106,8 @@ Useful options:
 - `--skip-cli-install`: only install skill files and init root
 - `--skip-init`: skip `gloves --root <PATH> init`
 - `--secrets-root <PATH>`: override default secrets root
-- `--skill-dest <PATH>`: override skill destination path
+- `--skills-dest <PATH>`: override destination root for installed skill directories
+- `--skill-dest <PATH>`: deprecated alias for `--skills-dest`
 
 Each tagged release now includes these installable assets:
 

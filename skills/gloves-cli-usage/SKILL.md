@@ -1,9 +1,9 @@
 ---
-name: gloves-cli
-description: Operate and troubleshoot the gloves secrets CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to initialize secret storage, set/get/list/revoke agent secrets, create or resolve human access requests (request/approve/deny/status), run expiry verification (verify), inspect runtime files, or explain command behavior from implementation/tests.
+name: gloves-cli-usage
+description: Operate and troubleshoot the gloves secrets CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to run or explain CLI operations (`set/get/list/revoke/request/approve/deny/status/verify/daemon/vault/config/access/gpg`) and command behavior from implementation/tests. Use `gloves-setup-migrate` for bootstrap or migration playbooks.
 ---
 
-# Gloves CLI
+# Gloves CLI Usage
 
 ## Overview
 
@@ -120,6 +120,28 @@ Command details and examples:
 2. Start daemon:
    ```bash
    gloves --root <root> daemon --bind 127.0.0.1:7788
+   ```
+
+### Access and Config Visibility
+
+1. Validate effective config:
+   ```bash
+   gloves --root <root> config validate
+   ```
+2. Show one agent's private-path visibility:
+   ```bash
+   gloves --root <root> access paths --agent <agent-id> --json
+   ```
+
+### Agent GPG Operations
+
+1. Create one agent key if missing:
+   ```bash
+   gloves --root <root> --agent <agent-id> gpg create
+   ```
+2. Print fingerprint:
+   ```bash
+   gloves --root <root> --agent <agent-id> gpg fingerprint
    ```
 
 ## Guardrails

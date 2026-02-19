@@ -36,6 +36,10 @@ Users can install from prebuilt binaries via:
 curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash
 ```
 
+The setup script installs both OpenClaw skills by default:
+- `gloves-cli-usage`
+- `gloves-setup-migrate`
+
 ## Preflight (all channels)
 
 ```bash

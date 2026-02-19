@@ -1,4 +1,4 @@
-# Gloves CLI Command Reference
+# Gloves CLI Usage Command Reference
 
 ## Top-Level
 
@@ -26,6 +26,11 @@ gloves --root <root> <command> [args...]
 | `status <name>` | Print request status for secret | none |
 | `verify` | Reap expired items and verify state | none |
 | `daemon` | Run local sidecar daemon | `--check`, `--bind` |
+| `vault <subcommand>` | Manage encrypted vault workflows | `init`, `mount`, `unmount`, `status`, `list`, `ask-file` |
+| `config validate` | Validate effective config | honors `--config`, `--no-config`, `GLOVES_CONFIG` |
+| `access paths` | Show one agent's private-path visibility | `--agent`, optional `--json` |
+| `gpg create` | Create selected agent GPG key | idempotent |
+| `gpg fingerprint` | Show selected agent GPG fingerprint | returns `not found` when key is absent |
 
 ## Command Patterns
 
@@ -87,6 +92,20 @@ gloves --root .openclaw/secrets daemon --check --bind 127.0.0.1:7788
 
 # start daemon on loopback TCP
 gloves --root .openclaw/secrets daemon --bind 127.0.0.1:7788
+```
+
+### Config and Agent Visibility
+
+```bash
+gloves --root .openclaw/secrets config validate
+gloves --root .openclaw/secrets access paths --agent agent-main --json
+```
+
+### GPG Agent Keys
+
+```bash
+gloves --root .openclaw/secrets --agent agent-main gpg create
+gloves --root .openclaw/secrets --agent agent-main gpg fingerprint
 ```
 
 ## Runtime Paths

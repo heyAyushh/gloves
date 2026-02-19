@@ -13,7 +13,7 @@ INSTALL_MODE_RELEASE="release"
 INSTALL_MODE_SOURCE="source"
 DEFAULT_OPENCLAW_HOME="${OPENCLAW_HOME:-${HOME}/.openclaw}"
 DEFAULT_SECRETS_ROOT="${DEFAULT_OPENCLAW_HOME}/secrets"
-DEFAULT_SKILL_DESTINATION="${DEFAULT_OPENCLAW_HOME}/skills/gloves-cli"
+DEFAULT_SKILLS_DESTINATION="${DEFAULT_OPENCLAW_HOME}/skills"
 DEFAULT_CARGO_BIN_DIR="${CARGO_HOME:-${HOME}/.cargo}/bin"
 BACKUP_TIMESTAMP_FORMAT="+%Y%m%d%H%M%S"
 SUPPORTED_PLATFORM_LINUX_X86_64="Linux/x86_64"
@@ -24,24 +24,27 @@ TARGET_LINUX_X86_64="x86_64-unknown-linux-gnu"
 TARGET_MACOS_X86_64="x86_64-apple-darwin"
 TARGET_MACOS_ARM64="aarch64-apple-darwin"
 ARCHIVE_EXTENSION_TAR_GZ="tar.gz"
+SKILL_PACKAGES=("gloves-cli-usage" "gloves-setup-migrate")
 
 REPO_ROOT="${DEFAULT_REPO_ROOT_CANDIDATE}"
+REPO_ROOT_EXPLICIT=false
 REPOSITORY_SLUG="${DEFAULT_REPOSITORY_SLUG}"
 RELEASE_REF="${DEFAULT_RELEASE_REF}"
 SKILL_REF="${DEFAULT_SKILL_REF}"
 INSTALL_MODE="${DEFAULT_INSTALL_MODE}"
 SECRETS_ROOT="${DEFAULT_SECRETS_ROOT}"
-SKILL_DESTINATION="${DEFAULT_SKILL_DESTINATION}"
+SKILLS_DESTINATION="${DEFAULT_SKILLS_DESTINATION}"
 SKIP_CLI_INSTALL=false
 SKIP_INIT=false
 DRY_RUN=false
 
-SOURCE_SKILL_DIRECTORY=""
+SOURCE_SKILLS_ROOT=""
 RESOLVED_RELEASE_TAG=""
 RESOLVED_RELEASE_VERSION=""
 RESOLVED_BINARY_TARGET=""
 RESOLVED_ARCHIVE_EXTENSION=""
 WORK_DIRECTORY=""
+INSTALLED_SKILL_PATHS=()
 
 cleanup_work_directory() {
     if "${DRY_RUN}"; then
@@ -56,10 +59,10 @@ cleanup_work_directory() {
 trap cleanup_work_directory EXIT
 
 usage() {
-    cat <<EOF
+    cat <<EOF2
 Usage: ${SCRIPT_NAME} [options]
 
-Installs gloves CLI, installs the gloves OpenClaw skill, and initializes
+Installs gloves CLI, installs the gloves OpenClaw skills, and initializes
 the secrets root.
 
 Options:
@@ -75,13 +78,14 @@ Options:
                          (default: ${DEFAULT_SKILL_REF})
   --secrets-root PATH    Secrets root passed to gloves --root
                          (default: ${DEFAULT_SECRETS_ROOT})
-  --skill-dest PATH      Destination for installed skill files
-                         (default: ${DEFAULT_SKILL_DESTINATION})
+  --skills-dest PATH     Destination root for installed skill directories
+                         (default: ${DEFAULT_SKILLS_DESTINATION})
+  --skill-dest PATH      Deprecated alias for --skills-dest
   --skip-cli-install     Skip CLI install step
   --skip-init            Skip gloves --root <PATH> init
   --dry-run              Print commands without executing them
   -h, --help             Show this help
-EOF
+EOF2
 }
 
 log_info() {
@@ -155,6 +159,7 @@ parse_args() {
             --repo-root)
                 [[ $# -ge 2 ]] || die "--repo-root requires a value"
                 REPO_ROOT="$2"
+                REPO_ROOT_EXPLICIT=true
                 shift 2
                 ;;
             --skill-ref)
@@ -167,9 +172,15 @@ parse_args() {
                 SECRETS_ROOT="$2"
                 shift 2
                 ;;
+            --skills-dest)
+                [[ $# -ge 2 ]] || die "--skills-dest requires a value"
+                SKILLS_DESTINATION="$2"
+                shift 2
+                ;;
             --skill-dest)
                 [[ $# -ge 2 ]] || die "--skill-dest requires a value"
-                SKILL_DESTINATION="$2"
+                SKILLS_DESTINATION="$2"
+                log_info "--skill-dest is deprecated; use --skills-dest"
                 shift 2
                 ;;
             --skip-cli-install)
@@ -333,7 +344,22 @@ resolve_skill_ref() {
     printf 'main\n'
 }
 
-download_skill_directory() {
+repo_root_has_required_skills() {
+    local root="$1"
+    local skill_name
+
+    [[ -n "${root}" ]] || return 1
+    [[ -d "${root}/skills" ]] || return 1
+
+    for skill_name in "${SKILL_PACKAGES[@]}"; do
+        [[ -d "${root}/skills/${skill_name}" ]] || return 1
+        [[ -f "${root}/skills/${skill_name}/SKILL.md" ]] || return 1
+    done
+
+    return 0
+}
+
+download_skills_directory() {
     local skill_ref="$1"
     local archive_type="heads"
     local archive_url
@@ -349,13 +375,13 @@ download_skill_directory() {
 
     ensure_work_directory
     archive_url="https://github.com/${REPOSITORY_SLUG}/archive/refs/${archive_type}/${skill_ref}.tar.gz"
-    archive_path="${WORK_DIRECTORY}/skill-${skill_ref//\//-}.tar.gz"
+    archive_path="${WORK_DIRECTORY}/skills-${skill_ref//\//-}.tar.gz"
 
     log_info "Downloading skill files from ${REPOSITORY_SLUG}@${skill_ref}"
     run_command curl -fsSL "${archive_url}" -o "${archive_path}"
 
     if "${DRY_RUN}"; then
-        SOURCE_SKILL_DIRECTORY="${WORK_DIRECTORY}/skills/gloves-cli"
+        SOURCE_SKILLS_ROOT="${WORK_DIRECTORY}/skills"
         return 0
     fi
 
@@ -363,45 +389,61 @@ download_skill_directory() {
     [[ -n "${archive_root}" ]] || die "could not inspect downloaded skill archive"
 
     run_command tar -xzf "${archive_path}" -C "${WORK_DIRECTORY}"
-    SOURCE_SKILL_DIRECTORY="${WORK_DIRECTORY}/${archive_root}/skills/gloves-cli"
-    [[ -d "${SOURCE_SKILL_DIRECTORY}" ]] || die "skill source directory not found in downloaded archive"
-    [[ -f "${SOURCE_SKILL_DIRECTORY}/SKILL.md" ]] || die "downloaded skill is missing SKILL.md"
+    SOURCE_SKILLS_ROOT="${WORK_DIRECTORY}/${archive_root}/skills"
 }
 
-resolve_skill_source_directory() {
-    if [[ -n "${REPO_ROOT}" && -d "${REPO_ROOT}/skills/gloves-cli" ]]; then
-        SOURCE_SKILL_DIRECTORY="${REPO_ROOT}/skills/gloves-cli"
+resolve_skill_source_root() {
+    if repo_root_has_required_skills "${REPO_ROOT}"; then
+        SOURCE_SKILLS_ROOT="${REPO_ROOT}/skills"
         return 0
     fi
 
-    download_skill_directory "$(resolve_skill_ref)"
+    if "${REPO_ROOT_EXPLICIT}"; then
+        die "repo root is missing required skills (${SKILL_PACKAGES[*]}): ${REPO_ROOT}"
+    fi
+
+    download_skills_directory "$(resolve_skill_ref)"
 }
 
 backup_existing_skill() {
+    local destination="$1"
     local backup_path
     local backup_timestamp
 
-    if [[ ! -e "${SKILL_DESTINATION}" ]]; then
+    if [[ ! -e "${destination}" ]]; then
         return 0
     fi
 
     backup_timestamp="$(date "${BACKUP_TIMESTAMP_FORMAT}")"
-    backup_path="${SKILL_DESTINATION}.bak.${backup_timestamp}"
+    backup_path="${destination}.bak.${backup_timestamp}"
     log_info "Backing up existing skill to: ${backup_path}"
-    run_command mv "${SKILL_DESTINATION}" "${backup_path}"
+    run_command mv "${destination}" "${backup_path}"
 }
 
 install_skill_files() {
-    local skill_parent_directory
+    local skill_name
+    local source_directory
+    local destination_directory
 
-    resolve_skill_source_directory
-    skill_parent_directory="$(dirname "${SKILL_DESTINATION}")"
-    run_command mkdir -p "${skill_parent_directory}"
-    backup_existing_skill
-    run_command mkdir -p "${SKILL_DESTINATION}"
+    resolve_skill_source_root
+    run_command mkdir -p "${SKILLS_DESTINATION}"
 
-    log_info "Installing skill files to: ${SKILL_DESTINATION}"
-    run_command cp -R "${SOURCE_SKILL_DIRECTORY}/." "${SKILL_DESTINATION}/"
+    for skill_name in "${SKILL_PACKAGES[@]}"; do
+        source_directory="${SOURCE_SKILLS_ROOT}/${skill_name}"
+        destination_directory="${SKILLS_DESTINATION}/${skill_name}"
+
+        if ! "${DRY_RUN}"; then
+            [[ -d "${source_directory}" ]] || die "skill source directory missing: ${source_directory}"
+            [[ -f "${source_directory}/SKILL.md" ]] || die "skill source missing SKILL.md: ${source_directory}"
+        fi
+
+        backup_existing_skill "${destination_directory}"
+        run_command mkdir -p "${destination_directory}"
+
+        log_info "Installing skill ${skill_name} to: ${destination_directory}"
+        run_command cp -R "${source_directory}/." "${destination_directory}/"
+        INSTALLED_SKILL_PATHS+=("${destination_directory}")
+    done
 }
 
 resolve_gloves_binary() {
@@ -442,6 +484,8 @@ initialize_secrets_root() {
 print_summary() {
     local gloves_binary="$1"
     local install_summary
+    local installed_paths
+    local skill_path
 
     install_summary="${INSTALL_MODE}"
     if [[ "${INSTALL_MODE}" == "${INSTALL_MODE_RELEASE}" ]]; then
@@ -452,25 +496,27 @@ print_summary() {
         fi
     fi
 
-    cat <<EOF
+    installed_paths=""
+    for skill_path in "${INSTALLED_SKILL_PATHS[@]}"; do
+        installed_paths+=$'\n'
+        installed_paths+="  - ${skill_path}"
+    done
+
+    cat <<EOF2
 Setup complete.
 
 CLI binary: ${gloves_binary}
 CLI install mode: ${install_summary}
-Skill install path: ${SKILL_DESTINATION}
+Installed skills:${installed_paths}
 Secrets root: ${SECRETS_ROOT}
 
 Optional daemon command:
   ${gloves_binary} --root ${SECRETS_ROOT} daemon --bind 127.0.0.1:7788
-EOF
+EOF2
 }
 
 main() {
     local gloves_binary
-
-    if [[ ! -d "${REPO_ROOT}/skills/gloves-cli" ]]; then
-        REPO_ROOT=""
-    fi
 
     parse_args "$@"
     validate_inputs

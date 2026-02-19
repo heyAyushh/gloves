@@ -6,6 +6,16 @@
 
 - No unreleased changes yet.
 
+## 0.5.0
+
+### Minor Changes
+
+- Split OpenClaw skill packaging into `gloves-cli-usage` and `gloves-setup-migrate` with a hard break from `gloves-cli`.
+- Added a dedicated setup and migration skill covering bootstrap, ACL migration, optional separate roots, GPG fingerprinting, audit verification, and rollback checklists.
+- Updated `setup-openclaw.sh` to install both skills by default, added `--skills-dest`, and kept `--skill-dest` as a deprecated alias.
+- Added installer regression coverage for two-skill installation, summary output, and explicit-missing-skill failures.
+- Updated README and release docs to reflect the two-skill installation and usage paths.
+
 ## 0.4.1
 
 ### Patch Changes
