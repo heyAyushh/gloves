@@ -47,6 +47,12 @@ Policy behavior:
 - Requires an exact template match after shell-style parsing/normalization.
 - If policy is set and a command has no entry, execution is denied.
 
+Normalization detail:
+
+- Matching uses shell-style tokenization (`shlex`) before comparison.
+- Equivalent whitespace/quoting that resolves to the same argv tokens is treated as the same template.
+- Any token-level argument change (flags, values, URL, ordering) requires an explicit policy entry.
+
 Config URL policy format (`.gloves.toml`):
 
 ```toml
@@ -89,6 +95,14 @@ URL policy behavior:
 - URL prefixes with query/fragment components are rejected.
 - If a command has URL policy entries, templates without URL arguments are denied.
 
+Example behavior:
+
+- Allowed with `url_prefixes = ["https://api.example.com/v1/"]`:
+  - `curl --data '{"a":1}' https://api.example.com/v1/items?token={secret}`
+  - `curl --data '{"a":2}' https://api.example.com/v1/items?token={secret}`
+- Denied:
+  - `curl --data '{"a":1}' https://api.example.com/v2/items?token={secret}`
+
 Operational guidance:
 
 - Prefer `--pipe-to` for highest safety.
@@ -96,6 +110,12 @@ Operational guidance:
 - Keep `GLOVES_GET_PIPE_ALLOWLIST` minimal and explicit.
 - For networked binaries (for example `curl`), set `GLOVES_GET_PIPE_ARG_POLICY` or config URL policy under `[secrets.pipe.commands.<command>]` instead of relying on executable-only allowlists.
 - Prefer `GLOVES_GET_PIPE_ARG_POLICY` for maximal control; use URL-prefix policy when exact-template policy is too strict for dynamic payloads.
+
+Control selection:
+
+- Need flexible payloads against a fixed endpoint set: use config URL policy.
+- Need fixed command shape and fixed flags: use exact template policy.
+- Need temporary low-friction rollout: use executable allowlist, then tighten.
 
 ## 2) Vault execution controls (`vault exec`)
 

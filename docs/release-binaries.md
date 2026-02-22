@@ -67,3 +67,12 @@ It also runs `cargo publish --locked` to publish to crates.io.
 curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash -s -- --release-ref vX.Y.Z
 gloves --version
 ```
+
+## 6) If a tagged publish fails
+
+- Do not re-use a failed semver tag.
+- Fix the failing gate on `main` first (tests/coverage/docs as needed).
+- Bump `Cargo.toml` to the next patch version.
+- Update `CHANGELOG.md` with the fix notes.
+- Re-run full local verification on that exact commit.
+- Create and push a new tag (`vX.Y.(Z+1)`).

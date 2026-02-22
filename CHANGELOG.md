@@ -6,6 +6,14 @@
 
 - No unreleased changes yet.
 
+## 0.5.4
+
+### Patch Changes
+
+- Hardened vault driver regression tests to wait for expected command-log content (not just file creation), removing a CI timing race in `mount_passes_extpass_and_idle`.
+- Expanded security/operator docs with clearer policy-selection guidance between executable allowlists, URL-prefix policies, and exact template policies.
+- Added release runbook guidance for failed tagged publishes (patch bump + new tag flow).
+
 ## 0.5.3
 
 ### Patch Changes

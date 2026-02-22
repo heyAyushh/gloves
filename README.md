@@ -305,6 +305,13 @@ When a command has a config policy entry:
 - The rule applies to any configured executable name, not only `curl`/`wget`.
 - Prefix matching is strict by scheme + authority + path-segment boundary (for example `/v1` does not match `/v10`).
 - Prefixes must not include query (`?`) or fragment (`#`) components.
+- URL policy scopes only URL arguments; non-URL flags and payload arguments remain flexible.
+
+Policy selection guide:
+
+- Executable-only guard: `GLOVES_GET_PIPE_ALLOWLIST` (lowest friction, broadest risk envelope).
+- URL-scoped guard: `.gloves.toml [secrets.pipe.commands.<command>]` with `require_url = true` (same URLs allowed with varying payload/flags).
+- Exact template guard: `GLOVES_GET_PIPE_ARG_POLICY` (strictest; safest for high-risk commands).
 
 Security notes:
 
@@ -313,6 +320,15 @@ Security notes:
 - Prefer `.gloves.toml [secrets.pipe.commands.<command>]` for URL-scoped policy in shared environments; use `GLOVES_GET_PIPE_URL_POLICY` as a compatibility fallback.
 - `vault exec` removes `GLOVES_EXTPASS_ROOT` and `GLOVES_EXTPASS_AGENT` from wrapped command env.
 - Keep allowlists narrow and prefer stdin-based secret piping when possible.
+
+Audit quick view:
+
+```bash
+gloves audit --limit 25
+gloves audit --json --limit 200
+```
+
+`audit --limit` gives a human-readable stream; `audit --json` is suited for automation and SIEM ingestion.
 
 Secret ACL operations map:
 

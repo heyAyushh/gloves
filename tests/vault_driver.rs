@@ -12,6 +12,9 @@ use gloves::{
     vault::gocryptfs::{FsEncryptionDriver, GocryptfsDriver, InitRequest, MountRequest},
 };
 
+const WAIT_FOR_ATTEMPTS: usize = 500;
+const WAIT_FOR_INTERVAL: Duration = Duration::from_millis(10);
+
 fn write_script(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut permissions = fs::metadata(path).unwrap().permissions();
@@ -28,13 +31,21 @@ fn build_driver(bin_dir: &Path) -> GocryptfsDriver {
 }
 
 fn wait_for(predicate: impl Fn() -> bool) -> bool {
-    for _ in 0..500 {
+    for _ in 0..WAIT_FOR_ATTEMPTS {
         if predicate() {
             return true;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(WAIT_FOR_INTERVAL);
     }
     false
+}
+
+fn wait_for_file_contains(path: &Path, expected_substring: &str) -> bool {
+    wait_for(|| {
+        fs::read_to_string(path)
+            .map(|content| content.contains(expected_substring))
+            .unwrap_or(false)
+    })
 }
 
 #[test]
@@ -103,7 +114,11 @@ exit 1
 
     assert!(cipher_dir.exists());
     assert!(cipher_dir.join("gocryptfs.conf").exists());
-    assert!(wait_for(|| args_log.exists()));
+    assert!(wait_for_file_contains(&args_log, "-init"));
+    assert!(wait_for_file_contains(
+        &args_log,
+        "gloves extpass-get vault/agent_data"
+    ));
     let log = fs::read_to_string(args_log).unwrap();
     assert!(log.contains("-init"));
     assert!(log.contains("-extpass"));
@@ -161,7 +176,7 @@ exit 1
         })
         .unwrap();
 
-    assert!(wait_for(|| env_log.exists()));
+    assert!(wait_for_file_contains(&env_log, "/tmp/root:agent-a"));
     let logged = fs::read_to_string(env_log).unwrap();
     assert!(logged.contains("/tmp/root:agent-a"));
 }
@@ -234,7 +249,11 @@ exit 1
         })
         .unwrap();
 
-    assert!(wait_for(|| args_log.exists()));
+    assert!(wait_for_file_contains(&args_log, "-idle 3600s"));
+    assert!(wait_for_file_contains(
+        &args_log,
+        "gloves extpass-get vault/agent_data"
+    ));
     let log = fs::read_to_string(args_log).unwrap();
     assert!(log.contains("-idle 3600s"));
     assert!(log.contains("gloves extpass-get vault/agent_data"));
