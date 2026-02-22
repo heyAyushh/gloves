@@ -2085,3 +2085,69 @@ fn path_operation_label(operation: &PathOperation) -> &'static str {
         PathOperation::Mount => "mount",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_policy_url_argument, parse_policy_url_prefix, policy_url_matches_prefix,
+        validate_pipe_url_prefix, SECRET_PIPE_URL_POLICY_ENV_VAR,
+    };
+
+    #[test]
+    fn parse_policy_url_prefix_rejects_query_and_fragment() {
+        let query_error = parse_policy_url_prefix("https://api.example.com/v1?token=abc")
+            .expect_err("query suffix must be rejected");
+        assert!(query_error.contains("must not include query or fragment"));
+
+        let fragment_error = parse_policy_url_prefix("https://api.example.com/v1#frag")
+            .expect_err("fragment suffix must be rejected");
+        assert!(fragment_error.contains("must not include query or fragment"));
+    }
+
+    #[test]
+    fn parse_policy_url_argument_supports_secret_placeholder() {
+        let parsed = parse_policy_url_argument("https://api.example.com/v1/items?token={secret}")
+            .expect("template URL with {secret} must parse");
+        assert_eq!(parsed.scheme, "https");
+        assert_eq!(parsed.authority, "api.example.com");
+        assert_eq!(parsed.path, "/v1/items");
+    }
+
+    #[test]
+    fn parse_policy_url_argument_defaults_to_root_path_when_missing() {
+        let parsed = parse_policy_url_argument("https://api.example.com?token={secret}")
+            .expect("URL without explicit path must parse");
+        assert_eq!(parsed.path, "/");
+    }
+
+    #[test]
+    fn policy_url_matches_prefix_enforces_host_boundary() {
+        let prefix = parse_policy_url_prefix("https://api.example.com").unwrap();
+        let allowed = parse_policy_url_argument("https://api.example.com/v1").unwrap();
+        let denied = parse_policy_url_argument("https://api.example.com.evil/v1").unwrap();
+
+        assert!(policy_url_matches_prefix(&allowed, &prefix));
+        assert!(!policy_url_matches_prefix(&denied, &prefix));
+    }
+
+    #[test]
+    fn policy_url_matches_prefix_enforces_path_segment_boundary() {
+        let prefix = parse_policy_url_prefix("https://api.example.com/v1").unwrap();
+        let exact = parse_policy_url_argument("https://api.example.com/v1").unwrap();
+        let nested = parse_policy_url_argument("https://api.example.com/v1/contacts").unwrap();
+        let sibling = parse_policy_url_argument("https://api.example.com/v10/contacts").unwrap();
+
+        assert!(policy_url_matches_prefix(&exact, &prefix));
+        assert!(policy_url_matches_prefix(&nested, &prefix));
+        assert!(!policy_url_matches_prefix(&sibling, &prefix));
+    }
+
+    #[test]
+    fn validate_pipe_url_prefix_reports_policy_source() {
+        let error = validate_pipe_url_prefix("curl", "https://api.example.com/v1?x=1")
+            .expect_err("query in URL prefix must be rejected");
+        let text = error.to_string();
+        assert!(text.contains(SECRET_PIPE_URL_POLICY_ENV_VAR));
+        assert!(text.contains("must not include query or fragment"));
+    }
+}

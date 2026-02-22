@@ -6,6 +6,14 @@
 
 - No unreleased changes yet.
 
+## 0.5.3
+
+### Patch Changes
+
+- Added focused URL-policy matcher unit tests in `cli/commands.rs` to cover host-boundary, path-boundary, and query/fragment validation branches.
+- Added integration coverage for exact-authority and exact-path URL-prefix allow cases.
+- Restored coverage gate compliance for release publishing.
+
 ## 0.5.2
 
 ### Minor Changes
