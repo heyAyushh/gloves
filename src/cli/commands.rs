@@ -5,8 +5,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
-use chrono::Duration;
+use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroize;
 
 use crate::{
     audit::AuditEvent,
@@ -37,6 +38,11 @@ use super::{
 const REQUIRED_VAULT_BINARIES: [&str; 3] = ["gocryptfs", "fusermount", "mountpoint"];
 const SECRET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
 const SECRET_PIPE_ALLOWLIST_SEPARATOR: char = ',';
+const SECRET_PIPE_TEMPLATE_PLACEHOLDER: &str = "{secret}";
+const SECRET_PIPE_TEMPLATE_SOURCE: &str = "--pipe-to-args";
+const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
+const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
+const SECRET_PATTERN_SEPARATOR: char = ',';
 const GPG_BINARY: &str = "gpg";
 const GPG_FINGERPRINT_RECORD_PREFIX: &str = "fpr:";
 const GPG_FINGERPRINT_FIELD_INDEX: usize = 9;
@@ -65,6 +71,7 @@ struct EffectiveCliState {
 enum SecretOutputTarget {
     Stdout,
     PipeCommand(String),
+    PipeCommandArgs(String),
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -78,6 +85,23 @@ struct GpgCreateOutput {
 struct GpgFingerprintOutput {
     agent: String,
     fingerprint: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RequestReviewOutput {
+    action: String,
+    request_id: String,
+    secret_name: String,
+    requested_by: String,
+    reason: String,
+    requested_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    status: crate::types::RequestStatus,
+    pending: bool,
+    approved_at: Option<DateTime<Utc>>,
+    approved_by: Option<String>,
+    denied_at: Option<DateTime<Utc>>,
+    denied_by: Option<String>,
 }
 
 struct GpgHomedir {
@@ -138,18 +162,23 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
-        Command::Get { name, pipe_to } => {
+        Command::Get {
+            name,
+            pipe_to,
+            pipe_to_args,
+        } => {
             let secret_id = SecretId::new(&name)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::Read, Some(&secret_id))?;
             let force_tty_warning = std::env::var("GLOVES_FORCE_TTY_WARNING")
                 .map(|value| value == "1")
                 .unwrap_or(false);
             let stdout_is_tty = atty::is(atty::Stream::Stdout);
-            let force_raw_stdout_warning = force_tty_warning && pipe_to.is_none();
+            let force_raw_stdout_warning =
+                force_tty_warning && pipe_to.is_none() && pipe_to_args.is_none();
             if force_raw_stdout_warning {
                 let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
             }
-            let output_target = resolve_secret_output_target(pipe_to, stdout_is_tty)?;
+            let output_target = resolve_secret_output_target(pipe_to, pipe_to_args, stdout_is_tty)?;
             if matches!(&output_target, SecretOutputTarget::Stdout)
                 && stdout_is_tty
                 && !force_raw_stdout_warning
@@ -162,16 +191,19 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
             match value {
                 Ok(secret) => {
-                    let secret_bytes = secret.expose(ToOwned::to_owned);
-                    match output_target {
-                        SecretOutputTarget::Stdout => {
-                            if let Some(code) = stdout_bytes_or_exit(&secret_bytes)? {
-                                return Ok(code);
-                            }
-                        }
+                    let mut secret_bytes = secret.expose(ToOwned::to_owned);
+                    let output_result = match output_target {
+                        SecretOutputTarget::Stdout => stdout_bytes_or_exit(&secret_bytes),
                         SecretOutputTarget::PipeCommand(pipe_command) => {
-                            pipe_secret_to_command(&pipe_command, &secret_bytes)?;
+                            pipe_secret_to_command(&pipe_command, &secret_bytes).map(|_| None)
                         }
+                        SecretOutputTarget::PipeCommandArgs(template) => {
+                            pipe_secret_to_command_args(&template, &secret_bytes).map(|_| None)
+                        }
+                    };
+                    secret_bytes.zeroize();
+                    if let Some(code) = output_result? {
+                        return Ok(code);
                     }
                 }
                 Err(error) => {
@@ -186,10 +218,18 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
-        Command::Request { name, reason } => {
+        Command::Request {
+            name,
+            reason,
+            allowlist,
+            blocklist,
+        } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::Request, Some(&secret_id))?;
+            let request_policy =
+                resolve_request_policy(allowlist.as_deref(), blocklist.as_deref())?;
+            ensure_request_policy_allows(&secret_id, &request_policy, "request")?;
             let requester = state.default_agent_id.clone();
             let signing_key = runtime::load_or_create_default_signing_key(&state.paths)?;
             manager.request(
@@ -206,27 +246,47 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         Command::Approve { request_id } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            let secret_id = pending_secret_id_for_request(&manager, request_id)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Approve, Some(&secret_id))?;
-            manager.approve_request(request_id)?;
-            if let Some(code) = stdout_line_or_exit("approved")? {
+            let pending_request = pending_request_for_id(&manager, request_id)?;
+            ensure_secret_acl_allowed(
+                &state,
+                SecretAclOperation::Approve,
+                Some(&pending_request.secret_name),
+            )?;
+            let request_policy = resolve_request_policy(None, None)?;
+            ensure_request_policy_allows(&pending_request.secret_name, &request_policy, "approve")?;
+            let approved = manager.approve_request(request_id, state.default_agent_id.clone())?;
+            let payload = request_review_output("approved", &approved);
+            if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
                 return Ok(code);
             }
         }
         Command::Deny { request_id } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            let secret_id = pending_secret_id_for_request(&manager, request_id)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Deny, Some(&secret_id))?;
-            manager.deny_request(request_id)?;
-            if let Some(code) = stdout_line_or_exit("denied")? {
+            let pending_request = pending_request_for_id(&manager, request_id)?;
+            ensure_secret_acl_allowed(
+                &state,
+                SecretAclOperation::Deny,
+                Some(&pending_request.secret_name),
+            )?;
+            let denied = manager.deny_request(request_id, state.default_agent_id.clone())?;
+            let payload = request_review_output("denied", &denied);
+            if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
                 return Ok(code);
             }
         }
-        Command::List => {
+        Command::List { pending } => {
             let manager = runtime::manager_for_paths(&state.paths)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::List, None)?;
-            let entries = filter_list_items_for_secret_acl(&state, manager.list_all()?)?;
+            let mut entries = filter_list_items_for_secret_acl(&state, manager.list_all()?)?;
+            if pending {
+                entries.retain(|entry| {
+                    matches!(
+                        entry,
+                        ListItem::Pending(request) if request.status == crate::types::RequestStatus::Pending
+                    )
+                });
+            }
             if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&entries)?)? {
                 return Ok(code);
             }
@@ -289,7 +349,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             )?;
         }
         Command::Vault { command } => {
-            vault_cmd::run_vault_command(
+            if let Some(code) = vault_cmd::run_vault_command(
                 &state.paths,
                 command,
                 &VaultCommandDefaults {
@@ -298,7 +358,9 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                     vault_secret_ttl_days: state.default_vault_secret_ttl_days,
                     vault_secret_length_bytes: state.default_vault_secret_length_bytes,
                 },
-            )?;
+            )? {
+                return Ok(code);
+            }
         }
         Command::Config { command } => match command {
             ConfigCommand::Validate => {
@@ -682,27 +744,189 @@ fn filter_list_items_for_secret_acl(
         .collect())
 }
 
-fn pending_secret_id_for_request(
+fn pending_request_for_id(
     manager: &crate::manager::SecretsManager,
     request_id: uuid::Uuid,
-) -> Result<SecretId> {
+) -> Result<crate::types::PendingRequest> {
     manager
         .pending_store
         .load_all()?
         .into_iter()
         .find(|request| request.id == request_id)
-        .map(|request| request.secret_name)
         .ok_or(GlovesError::NotFound)
+}
+
+fn request_review_output(
+    action: &str,
+    request: &crate::types::PendingRequest,
+) -> RequestReviewOutput {
+    RequestReviewOutput {
+        action: action.to_owned(),
+        request_id: request.id.to_string(),
+        secret_name: request.secret_name.as_str().to_owned(),
+        requested_by: request.requested_by.as_str().to_owned(),
+        reason: request.reason.clone(),
+        requested_at: request.requested_at,
+        expires_at: request.expires_at,
+        status: request.status.clone(),
+        pending: request.pending,
+        approved_at: request.approved_at,
+        approved_by: request
+            .approved_by
+            .as_ref()
+            .map(|agent| agent.as_str().to_owned()),
+        denied_at: request.denied_at,
+        denied_by: request
+            .denied_by
+            .as_ref()
+            .map(|agent| agent.as_str().to_owned()),
+    }
+}
+
+struct RequestPolicy {
+    allowlist: Vec<String>,
+    blocklist: Vec<String>,
+}
+
+fn resolve_request_policy(
+    cli_allowlist: Option<&str>,
+    cli_blocklist: Option<&str>,
+) -> Result<RequestPolicy> {
+    Ok(RequestPolicy {
+        allowlist: resolve_secret_pattern_source(REQUEST_ALLOWLIST_ENV_VAR, cli_allowlist)?,
+        blocklist: resolve_secret_pattern_source(REQUEST_BLOCKLIST_ENV_VAR, cli_blocklist)?,
+    })
+}
+
+fn resolve_secret_pattern_source(env_key: &str, cli_value: Option<&str>) -> Result<Vec<String>> {
+    if let Some(raw) = cli_value {
+        return parse_secret_pattern_list(raw, env_key);
+    }
+    match std::env::var(env_key) {
+        Ok(raw) => parse_secret_pattern_list(&raw, env_key),
+        Err(VarError::NotPresent) => Ok(Vec::new()),
+        Err(VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(format!(
+            "{env_key} must be valid UTF-8"
+        ))),
+    }
+}
+
+fn parse_secret_pattern_list(raw: &str, source: &str) -> Result<Vec<String>> {
+    let mut patterns = Vec::new();
+    let mut seen = HashSet::new();
+    for item in raw.split(SECRET_PATTERN_SEPARATOR) {
+        let pattern = item.trim();
+        if pattern.is_empty() {
+            return Err(GlovesError::InvalidInput(format!(
+                "{source} contains an empty pattern entry"
+            )));
+        }
+        validate_secret_pattern(pattern, source)?;
+        if seen.insert(pattern.to_owned()) {
+            patterns.push(pattern.to_owned());
+        }
+    }
+    Ok(patterns)
+}
+
+fn validate_secret_pattern(pattern: &str, source: &str) -> Result<()> {
+    if pattern == "*" {
+        return Ok(());
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        if prefix.is_empty() {
+            return Err(GlovesError::InvalidInput(format!(
+                "{source} pattern '/*' is invalid; use '*' for all secrets"
+            )));
+        }
+        if prefix.contains('*') {
+            return Err(GlovesError::InvalidInput(format!(
+                "{source} pattern '{pattern}' may only include one trailing '*'"
+            )));
+        }
+        SecretId::new(prefix).map_err(|_| {
+            GlovesError::InvalidInput(format!(
+                "{source} pattern '{pattern}' has an invalid namespace prefix"
+            ))
+        })?;
+        return Ok(());
+    }
+    if pattern.contains('*') {
+        return Err(GlovesError::InvalidInput(format!(
+            "{source} pattern '{pattern}' must be '*', '<namespace>/*', or exact secret id"
+        )));
+    }
+    SecretId::new(pattern).map_err(|_| {
+        GlovesError::InvalidInput(format!(
+            "{source} pattern '{pattern}' is not a valid secret id"
+        ))
+    })?;
+    Ok(())
+}
+
+fn secret_pattern_matches(pattern: &str, secret_name: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        return secret_name.len() > prefix.len()
+            && secret_name.starts_with(prefix)
+            && secret_name.as_bytes().get(prefix.len()) == Some(&b'/');
+    }
+    secret_name == pattern
+}
+
+fn ensure_request_policy_allows(
+    secret_id: &SecretId,
+    request_policy: &RequestPolicy,
+    operation: &str,
+) -> Result<()> {
+    let secret_name = secret_id.as_str();
+    if request_policy
+        .blocklist
+        .iter()
+        .any(|pattern| secret_pattern_matches(pattern, secret_name))
+    {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret '{secret_name}' is blocked for {operation}"
+        )));
+    }
+    if !request_policy.allowlist.is_empty()
+        && !request_policy
+            .allowlist
+            .iter()
+            .any(|pattern| secret_pattern_matches(pattern, secret_name))
+    {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret '{secret_name}' is not allowlisted for {operation}"
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_secret_output_target(
     pipe_to: Option<String>,
+    pipe_to_args: Option<String>,
     stdout_is_tty: bool,
 ) -> Result<SecretOutputTarget> {
+    if pipe_to.is_some() && pipe_to_args.is_some() {
+        return Err(GlovesError::InvalidInput(
+            "--pipe-to and --pipe-to-args cannot be combined".to_owned(),
+        ));
+    }
+
     if let Some(pipe_command) = pipe_to {
         validate_pipe_command_name(&pipe_command, "--pipe-to")?;
         ensure_pipe_command_allowed(&pipe_command)?;
         return Ok(SecretOutputTarget::PipeCommand(pipe_command));
+    }
+
+    if let Some(command_template) = pipe_to_args {
+        validate_pipe_command_template(&command_template, "--pipe-to-args")?;
+        let executable =
+            pipe_command_executable_from_template(&command_template, "--pipe-to-args")?;
+        ensure_pipe_command_allowed(&executable)?;
+        return Ok(SecretOutputTarget::PipeCommandArgs(command_template));
     }
 
     if stdout_is_tty {
@@ -771,6 +995,50 @@ fn validate_pipe_command_name(command: &str, source: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_pipe_command_template(command_template: &str, source: &str) -> Result<()> {
+    let parsed_parts = parse_pipe_command_template(command_template, source)?;
+    if !parsed_parts
+        .iter()
+        .any(|part| part.contains(SECRET_PIPE_TEMPLATE_PLACEHOLDER))
+    {
+        return Err(GlovesError::InvalidInput(format!(
+            "{source} must include {SECRET_PIPE_TEMPLATE_PLACEHOLDER} placeholder"
+        )));
+    }
+    if parsed_parts[0].contains(SECRET_PIPE_TEMPLATE_PLACEHOLDER) {
+        return Err(GlovesError::InvalidInput(format!(
+            "{source} executable must not contain {SECRET_PIPE_TEMPLATE_PLACEHOLDER}"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_pipe_command_template(command_template: &str, source: &str) -> Result<Vec<String>> {
+    if command_template.trim().is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "{source} command template must not be empty"
+        )));
+    }
+    let parsed_parts = shlex::split(command_template).ok_or_else(|| {
+        GlovesError::InvalidInput(format!(
+            "{source} command template has invalid shell quoting"
+        ))
+    })?;
+    if parsed_parts.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "{source} command template must include an executable"
+        )));
+    }
+    Ok(parsed_parts)
+}
+
+fn pipe_command_executable_from_template(command_template: &str, source: &str) -> Result<String> {
+    let parsed_parts = parse_pipe_command_template(command_template, source)?;
+    let executable = parsed_parts[0].clone();
+    validate_pipe_command_name(&executable, source)?;
+    Ok(executable)
+}
+
 fn pipe_secret_to_command(pipe_command: &str, secret_bytes: &[u8]) -> Result<()> {
     let mut child = ProcessCommand::new(pipe_command)
         .stdin(Stdio::piped())
@@ -806,6 +1074,79 @@ fn pipe_secret_to_command(pipe_command: &str, secret_bytes: &[u8]) -> Result<()>
     }
 }
 
+fn pipe_secret_to_command_args(command_template: &str, secret_bytes: &[u8]) -> Result<()> {
+    let mut parsed_parts =
+        parse_pipe_command_template(command_template, SECRET_PIPE_TEMPLATE_SOURCE)?;
+    let executable = parsed_parts.remove(0);
+    validate_pipe_command_name(&executable, SECRET_PIPE_TEMPLATE_SOURCE)?;
+
+    let secret_literal = std::str::from_utf8(secret_bytes).map_err(|_| {
+        GlovesError::InvalidInput(format!(
+            "secret is not valid UTF-8; {SECRET_PIPE_TEMPLATE_SOURCE} only supports UTF-8 secrets"
+        ))
+    })?;
+    ensure_secret_is_safe_for_argument_interpolation(secret_literal)?;
+
+    let mut replaced_any = false;
+    let mut resolved_arguments = parsed_parts
+        .iter()
+        .map(|part| {
+            if part.contains(SECRET_PIPE_TEMPLATE_PLACEHOLDER) {
+                replaced_any = true;
+                part.replace(SECRET_PIPE_TEMPLATE_PLACEHOLDER, secret_literal)
+            } else {
+                part.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if !replaced_any {
+        return Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_TEMPLATE_SOURCE} must include {SECRET_PIPE_TEMPLATE_PLACEHOLDER} placeholder"
+        )));
+    }
+
+    let status_result = ProcessCommand::new(&executable)
+        .args(&resolved_arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|error| {
+            GlovesError::InvalidInput(format!(
+                "failed to start pipe command '{executable}': {error}"
+            ))
+        });
+
+    for argument in &mut resolved_arguments {
+        argument.zeroize();
+    }
+
+    let status = status_result?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    match status.code() {
+        Some(code) => Err(GlovesError::InvalidInput(format!(
+            "pipe command '{executable}' failed with exit code {code}"
+        ))),
+        None => Err(GlovesError::InvalidInput(format!(
+            "pipe command '{executable}' terminated by signal"
+        ))),
+    }
+}
+
+fn ensure_secret_is_safe_for_argument_interpolation(secret_literal: &str) -> Result<()> {
+    if secret_literal.chars().any(char::is_control) {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret contains control characters; use --pipe-to for raw byte-safe forwarding instead of {SECRET_PIPE_TEMPLATE_SOURCE}"
+        )));
+    }
+    Ok(())
+}
+
 fn write_secret_to_stdin(handle: &mut impl Write, bytes: &[u8]) -> Result<()> {
     match handle.write_all(bytes).and_then(|_| handle.flush()) {
         Ok(()) => Ok(()),
@@ -824,10 +1165,12 @@ fn run_extpass_get(secret_name: &str) -> Result<i32> {
     let caller = AgentId::new(&agent)?;
     let identity_file = runtime::load_or_create_default_identity(&paths)?;
     let secret = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
-    let secret_bytes = secret.expose(ToOwned::to_owned);
+    let mut secret_bytes = secret.expose(ToOwned::to_owned);
     if let Some(code) = stdout_bytes_or_exit(&secret_bytes)? {
+        secret_bytes.zeroize();
         return Ok(code);
     }
+    secret_bytes.zeroize();
     Ok(0)
 }
 

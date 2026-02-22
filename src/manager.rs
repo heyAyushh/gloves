@@ -166,8 +166,17 @@ impl SecretsManager {
         ttl: Duration,
         signing_key: &SigningKey,
     ) -> Result<PendingRequest> {
-        self.pending_store
-            .create(secret_id, requested_by, reason, ttl, signing_key)
+        let request =
+            self.pending_store
+                .create(secret_id, requested_by, reason, ttl, signing_key)?;
+        let _ = self.audit_log.log(AuditEvent::RequestCreated {
+            request_id: request.id,
+            secret_id: request.secret_name.clone(),
+            requested_by: request.requested_by.clone(),
+            reason: request.reason.clone(),
+            expires_at: request.expires_at,
+        });
+        Ok(request)
     }
 
     /// Grants access to an agent secret by adding a recipient.
@@ -230,12 +239,32 @@ impl SecretsManager {
     }
 
     /// Approves a pending human request.
-    pub fn approve_request(&self, request_id: Uuid) -> Result<()> {
-        self.pending_store.approve(request_id)
+    pub fn approve_request(
+        &self,
+        request_id: Uuid,
+        approved_by: AgentId,
+    ) -> Result<PendingRequest> {
+        let request = self
+            .pending_store
+            .approve(request_id, approved_by.clone())?;
+        let _ = self.audit_log.log(AuditEvent::RequestApproved {
+            request_id: request.id,
+            secret_id: request.secret_name.clone(),
+            requested_by: request.requested_by.clone(),
+            approved_by,
+        });
+        Ok(request)
     }
 
     /// Denies a pending human request.
-    pub fn deny_request(&self, request_id: Uuid) -> Result<()> {
-        self.pending_store.deny(request_id)
+    pub fn deny_request(&self, request_id: Uuid, denied_by: AgentId) -> Result<PendingRequest> {
+        let request = self.pending_store.deny(request_id, denied_by.clone())?;
+        let _ = self.audit_log.log(AuditEvent::RequestDenied {
+            request_id: request.id,
+            secret_id: request.secret_name.clone(),
+            requested_by: request.requested_by.clone(),
+            denied_by,
+        });
+        Ok(request)
     }
 }

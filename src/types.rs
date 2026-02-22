@@ -156,4 +156,19 @@ pub struct PendingRequest {
     pub verifying_key: Vec<u8>,
     /// Request lifecycle status.
     pub status: RequestStatus,
+    /// Explicit pending flag for fast filtering and operator views.
+    #[serde(default)]
+    pub pending: bool,
+    /// Timestamp of approval, when approved.
+    #[serde(default)]
+    pub approved_at: Option<DateTime<Utc>>,
+    /// Agent that approved the request, when approved.
+    #[serde(default)]
+    pub approved_by: Option<AgentId>,
+    /// Timestamp of denial, when denied.
+    #[serde(default)]
+    pub denied_at: Option<DateTime<Utc>>,
+    /// Agent that denied the request, when denied.
+    #[serde(default)]
+    pub denied_by: Option<AgentId>,
 }

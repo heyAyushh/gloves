@@ -5,6 +5,7 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::{
     error::Result,
@@ -41,6 +42,41 @@ pub enum AuditEvent {
         secret_id: SecretId,
         /// Agent that revoked the secret.
         by: AgentId,
+    },
+    /// Human secret request was created.
+    RequestCreated {
+        /// Request UUID.
+        request_id: Uuid,
+        /// Secret being requested.
+        secret_id: SecretId,
+        /// Agent that opened the request.
+        requested_by: AgentId,
+        /// Operator-visible request reason.
+        reason: String,
+        /// Request expiry timestamp.
+        expires_at: DateTime<Utc>,
+    },
+    /// Human secret request was approved.
+    RequestApproved {
+        /// Request UUID.
+        request_id: Uuid,
+        /// Secret that was requested.
+        secret_id: SecretId,
+        /// Original requester.
+        requested_by: AgentId,
+        /// Agent that approved the request.
+        approved_by: AgentId,
+    },
+    /// Human secret request was denied.
+    RequestDenied {
+        /// Request UUID.
+        request_id: Uuid,
+        /// Secret that was requested.
+        secret_id: SecretId,
+        /// Original requester.
+        requested_by: AgentId,
+        /// Agent that denied the request.
+        denied_by: AgentId,
     },
     /// Vault was created.
     VaultCreated {

@@ -74,8 +74,11 @@ pub enum Command {
         /// Secret name.
         name: String,
         /// Pipe secret bytes to an approved command.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "pipe_to_args")]
         pipe_to: Option<String>,
+        /// Execute an approved command template with `{secret}` interpolation.
+        #[arg(long, conflicts_with = "pipe_to")]
+        pipe_to_args: Option<String>,
     },
     /// Prints redacted env export text.
     Env {
@@ -91,6 +94,14 @@ pub enum Command {
         /// Justification.
         #[arg(long)]
         reason: String,
+        /// Optional allowlist of requestable secret patterns.
+        /// Format: comma-separated patterns (`*`, `namespace/*`, or exact id).
+        #[arg(long)]
+        allowlist: Option<String>,
+        /// Optional blocklist of disallowed secret patterns.
+        /// Format: comma-separated patterns (`*`, `namespace/*`, or exact id).
+        #[arg(long)]
+        blocklist: Option<String>,
     },
     /// Approves a pending request by id.
     Approve {
@@ -103,7 +114,11 @@ pub enum Command {
         request_id: String,
     },
     /// Lists entries.
-    List,
+    List {
+        /// Show only pending request entries.
+        #[arg(long)]
+        pending: bool,
+    },
     /// Revokes a secret.
     Revoke {
         /// Secret name.
@@ -223,6 +238,23 @@ pub enum VaultCommand {
         /// Agent identity for this mount session.
         #[arg(long)]
         agent: Option<String>,
+    },
+    /// Mounts a vault, runs a command, and unmounts automatically.
+    Exec {
+        /// Vault name.
+        name: String,
+        /// Mount session TTL.
+        #[arg(long)]
+        ttl: Option<String>,
+        /// Optional mountpoint override.
+        #[arg(long)]
+        mountpoint: Option<PathBuf>,
+        /// Agent identity for this exec session.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Command and arguments to execute after mount.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
     },
     /// Unmounts a vault.
     Unmount {

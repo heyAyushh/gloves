@@ -368,14 +368,48 @@ fn execute_daemon_request_inner(
         DaemonRequest::Approve { request_id } => {
             let manager = runtime::manager_for_paths(paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            manager.approve_request(request_id)?;
-            Ok(("approved".to_owned(), None))
+            let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
+            let request = manager.approve_request(request_id, reviewer)?;
+            Ok((
+                "approved".to_owned(),
+                Some(serde_json::json!({
+                    "request_id": request.id,
+                    "secret_name": request.secret_name,
+                    "requested_by": request.requested_by,
+                    "reason": request.reason,
+                    "requested_at": request.requested_at,
+                    "expires_at": request.expires_at,
+                    "status": request.status,
+                    "pending": request.pending,
+                    "approved_at": request.approved_at,
+                    "approved_by": request.approved_by,
+                    "denied_at": request.denied_at,
+                    "denied_by": request.denied_by,
+                })),
+            ))
         }
         DaemonRequest::Deny { request_id } => {
             let manager = runtime::manager_for_paths(paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            manager.deny_request(request_id)?;
-            Ok(("denied".to_owned(), None))
+            let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
+            let request = manager.deny_request(request_id, reviewer)?;
+            Ok((
+                "denied".to_owned(),
+                Some(serde_json::json!({
+                    "request_id": request.id,
+                    "secret_name": request.secret_name,
+                    "requested_by": request.requested_by,
+                    "reason": request.reason,
+                    "requested_at": request.requested_at,
+                    "expires_at": request.expires_at,
+                    "status": request.status,
+                    "pending": request.pending,
+                    "approved_at": request.approved_at,
+                    "approved_by": request.approved_by,
+                    "denied_at": request.denied_at,
+                    "denied_by": request.denied_by,
+                })),
+            ))
         }
     }
 }
@@ -552,7 +586,12 @@ mod tests {
             execute_daemon_request_inner(&paths, DaemonRequest::Approve { request_id })
                 .expect("approve");
         assert_eq!(message, "approved");
-        assert!(data.is_none());
+        let approved_payload = expect_data(data);
+        assert_eq!(approved_payload["status"], "fulfilled");
+        assert_eq!(approved_payload["pending"], false);
+        assert_eq!(approved_payload["approved_by"], "default-agent");
+        assert!(approved_payload["approved_at"].is_string());
+        assert!(approved_payload["denied_by"].is_null());
 
         let (message, data) = execute_daemon_request_inner(
             &paths,
@@ -576,7 +615,12 @@ mod tests {
         )
         .expect("deny");
         assert_eq!(message, "denied");
-        assert!(data.is_none());
+        let denied_payload = expect_data(data);
+        assert_eq!(denied_payload["status"], "denied");
+        assert_eq!(denied_payload["pending"], false);
+        assert_eq!(denied_payload["denied_by"], "default-agent");
+        assert!(denied_payload["denied_at"].is_string());
+        assert!(denied_payload["approved_by"].is_null());
 
         let (message, data) =
             execute_daemon_request_inner(&paths, DaemonRequest::Verify).expect("verify");

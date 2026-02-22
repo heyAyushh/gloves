@@ -1,9 +1,14 @@
+use std::process::{Command as ProcessCommand, Stdio};
+
 use crate::{
     audit::AuditLog,
     error::{GlovesError, Result},
     paths::SecretsPaths,
     types::AgentId,
-    vault::{gocryptfs::GocryptfsDriver, VaultManager, VaultSecretProvider},
+    vault::{
+        gocryptfs::{GocryptfsDriver, EXTPASS_AGENT_ENV_VAR, EXTPASS_ROOT_ENV_VAR},
+        VaultManager, VaultSecretProvider,
+    },
 };
 
 use super::{
@@ -42,6 +47,7 @@ impl VaultSecretProvider for CliVaultSecretProvider {
 fn vault_manager_for_paths(
     paths: &SecretsPaths,
     defaults: &VaultCommandDefaults,
+    extpass_agent: &AgentId,
 ) -> Result<VaultManager<GocryptfsDriver, CliVaultSecretProvider>> {
     runtime::init_layout(paths)?;
     let audit_log = AuditLog::new(paths.audit_file())?;
@@ -54,7 +60,7 @@ fn vault_manager_for_paths(
             ttl_days: defaults.vault_secret_ttl_days,
             length_bytes: defaults.vault_secret_length_bytes,
         },
-        defaults.agent_id.clone(),
+        extpass_agent.clone(),
         audit_log,
     ))
 }
@@ -70,10 +76,10 @@ pub(crate) fn run_vault_command(
     paths: &SecretsPaths,
     command: VaultCommand,
     defaults: &VaultCommandDefaults,
-) -> Result<()> {
-    let manager = vault_manager_for_paths(paths, defaults)?;
+) -> Result<Option<i32>> {
     match command {
         VaultCommand::Init { name, owner } => {
+            let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             manager.init(&name, owner.into())?;
             emit_stdout_line("initialized")?;
         }
@@ -86,19 +92,58 @@ pub(crate) fn run_vault_command(
             let ttl_literal = ttl.unwrap_or_else(|| defaults.mount_ttl.clone());
             let ttl_duration = secret_input::parse_duration_value(&ttl_literal, "--ttl")?;
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
+            let manager = vault_manager_for_paths(paths, defaults, &mounted_by)?;
             manager.mount(&name, ttl_duration, mountpoint, mounted_by)?;
             emit_stdout_line("mounted")?;
         }
+        VaultCommand::Exec {
+            name,
+            ttl,
+            mountpoint,
+            agent,
+            command,
+        } => {
+            let ttl_literal = ttl.unwrap_or_else(|| defaults.mount_ttl.clone());
+            let ttl_duration = secret_input::parse_duration_value(&ttl_literal, "--ttl")?;
+            let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
+            let manager = vault_manager_for_paths(paths, defaults, &mounted_by)?;
+            manager.mount(&name, ttl_duration, mountpoint, mounted_by.clone())?;
+
+            let command_exit_code = run_vault_exec_command(&command);
+            let unmount_reason = if command_exit_code.is_ok() {
+                "exec-complete"
+            } else {
+                "exec-error"
+            };
+            let unmount_result = manager.unmount(&name, unmount_reason, mounted_by);
+            match (command_exit_code, unmount_result) {
+                (Ok(exit_code), Ok(())) => return Ok(Some(exit_code)),
+                (Ok(exit_code), Err(unmount_error)) => {
+                    return Err(GlovesError::InvalidInput(format!(
+                        "vault exec command exited with code {exit_code}, but unmount failed: {unmount_error}"
+                    )));
+                }
+                (Err(command_error), Ok(())) => return Err(command_error),
+                (Err(command_error), Err(unmount_error)) => {
+                    return Err(GlovesError::InvalidInput(format!(
+                        "vault exec command failed: {command_error}; additionally failed to unmount vault: {unmount_error}"
+                    )));
+                }
+            }
+        }
         VaultCommand::Unmount { name, agent } => {
+            let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
             manager.unmount(&name, "explicit", mounted_by)?;
             emit_stdout_line("unmounted")?;
         }
         VaultCommand::Status => {
+            let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             let status = manager.status()?;
             emit_stdout_line(&serde_json::to_string_pretty(&status)?)?;
         }
         VaultCommand::List => {
+            let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             let entries = manager.list()?;
             emit_stdout_line(&serde_json::to_string_pretty(&entries)?)?;
         }
@@ -109,6 +154,7 @@ pub(crate) fn run_vault_command(
             trusted_agent,
             reason,
         } => {
+            let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             let requester = resolve_agent_id(requester, &defaults.agent_id)?;
             let prompt = manager.ask_file_prompt(
                 &name,
@@ -120,12 +166,41 @@ pub(crate) fn run_vault_command(
             emit_stdout_line(&prompt)?;
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 fn emit_stdout_line(line: &str) -> Result<()> {
     match output::stdout_line(line) {
         Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
         Err(error) => Err(GlovesError::Io(error)),
+    }
+}
+
+fn run_vault_exec_command(command: &[String]) -> Result<i32> {
+    if command.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "vault exec requires a command after '--'".to_owned(),
+        ));
+    }
+
+    let executable = &command[0];
+    let status = ProcessCommand::new(executable)
+        .args(&command[1..])
+        .env_remove(EXTPASS_ROOT_ENV_VAR)
+        .env_remove(EXTPASS_AGENT_ENV_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|error| {
+            GlovesError::InvalidInput(format!(
+                "failed to start vault exec command '{executable}': {error}"
+            ))
+        })?;
+    match status.code() {
+        Some(code) => Ok(code),
+        None => Err(GlovesError::InvalidInput(format!(
+            "vault exec command '{executable}' terminated by signal"
+        ))),
     }
 }

@@ -137,6 +137,11 @@ fn pending_request_roundtrip() {
         signature: vec![1, 2, 3],
         verifying_key: vec![4; 32],
         status: RequestStatus::Pending,
+        pending: true,
+        approved_at: None,
+        approved_by: None,
+        denied_at: None,
+        denied_by: None,
     };
 
     let bytes = serde_json::to_vec(&request).unwrap();
@@ -144,4 +149,7 @@ fn pending_request_roundtrip() {
     assert_eq!(decoded.secret_name.as_str(), request.secret_name.as_str());
     assert_eq!(decoded.requested_by, request.requested_by);
     assert_eq!(decoded.status, RequestStatus::Pending);
+    assert!(decoded.pending);
+    assert!(decoded.approved_at.is_none());
+    assert!(decoded.denied_at.is_none());
 }

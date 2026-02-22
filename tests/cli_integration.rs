@@ -17,6 +17,8 @@ use std::os::unix::fs::PermissionsExt;
 const DAEMON_WAIT_ATTEMPTS: usize = 100;
 const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
 const GET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
+const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
+const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
 const TEST_PIPE_COMMAND: &str = "cat";
 const ACL_TEST_AGENT_MAIN: &str = "agent-main";
 const ACL_TEST_SECRET_GITHUB_TOKEN: &str = "github/token";
@@ -212,6 +214,49 @@ set -euo pipefail
 if [[ "$1" == "show" ]]; then
   printf 'dummy-pass-value'
 fi
+"#,
+    );
+}
+
+#[cfg(unix)]
+fn install_fake_vault_binaries_with_extpass_agent_log(bin_dir: &Path) {
+    install_fake_vault_binaries(bin_dir);
+    write_executable(
+        &bin_dir.join("gocryptfs"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+extpass=""
+previous=""
+for arg in "$@"; do
+  if [[ "$previous" == "-extpass" ]]; then
+    extpass="$arg"
+  fi
+  previous="$arg"
+done
+if [[ -n "$extpass" ]]; then
+  if [[ -n "${GLOVES_TEST_EXTPASS_AGENT_LOG:-}" ]]; then
+    printf '%s\n' "${GLOVES_EXTPASS_AGENT:-}" > "${GLOVES_TEST_EXTPASS_AGENT_LOG}"
+  fi
+  read -r -a extpass_parts <<< "$extpass"
+  if ! "${extpass_parts[@]}" > /dev/null; then
+    :
+  fi
+fi
+if [[ "$1" == "-init" ]]; then
+  cipher=""
+  for arg in "$@"; do
+    cipher="$arg"
+  done
+  /bin/mkdir -p "$cipher"
+  /usr/bin/touch "$cipher/gocryptfs.conf"
+  exit 0
+fi
+mountpoint=""
+for arg in "$@"; do
+  mountpoint="$arg"
+done
+/bin/mkdir -p "$mountpoint"
+/usr/bin/touch "$mountpoint/.mounted"
 "#,
     );
 }
@@ -1721,6 +1766,148 @@ fn cli_get_pipe_to_allowed_command_streams_secret() {
         .stdout(predicates::str::contains("secret"));
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_interpolates_secret_into_arguments() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg prefix:{secret}:suffix",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("prefix:secret-token:suffix"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_requires_secret_placeholder() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg literal-value",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("{secret}"));
+}
+
+#[test]
+fn cli_get_pipe_to_args_rejects_non_utf8_secret_values() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "set", "bin", "--stdin", "--ttl", "1"])
+        .write_stdin(vec![0xff, 0x00, 0x61, 0x80])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root,
+            "get",
+            "bin",
+            "--pipe-to-args",
+            "cat {secret}",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not valid UTF-8"));
+}
+
+#[test]
+fn cli_get_pipe_to_args_rejects_control_characters() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "set", "linebreak", "--stdin", "--ttl", "1"])
+        .write_stdin("line1\nline2")
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root,
+            "get",
+            "linebreak",
+            "--pipe-to-args",
+            "cat {secret}",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("contains control characters"));
+}
+
 #[test]
 fn cli_set_from_stdin() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1943,7 +2130,7 @@ fn cli_approve_request() {
             .unwrap();
     let request_id = pending[0]["id"].as_str().unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -1951,7 +2138,29 @@ fn cli_approve_request() {
             request_id,
         ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["action"], "approved");
+    assert_eq!(payload["secret_name"], "x");
+    assert_eq!(payload["reason"], "test");
+    assert_eq!(payload["status"], "fulfilled");
+    assert_eq!(payload["pending"], false);
+    assert_eq!(payload["approved_by"], "default-agent");
+    assert!(payload["approved_at"].is_string());
+    assert!(payload["denied_by"].is_null());
+    assert!(payload["denied_at"].is_null());
+
+    let pending_after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("pending.json")).unwrap())
+            .unwrap();
+    assert_eq!(pending_after[0]["status"], "fulfilled");
+    assert_eq!(pending_after[0]["pending"], false);
+    assert_eq!(pending_after[0]["approved_by"], "default-agent");
+    assert!(pending_after[0]["approved_at"].is_string());
 }
 
 #[test]
@@ -1988,7 +2197,7 @@ fn cli_deny_request() {
             .unwrap();
     let request_id = pending[0]["id"].as_str().unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -1996,7 +2205,51 @@ fn cli_deny_request() {
             request_id,
         ])
         .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["action"], "denied");
+    assert_eq!(payload["secret_name"], "x");
+    assert_eq!(payload["reason"], "test");
+    assert_eq!(payload["status"], "denied");
+    assert_eq!(payload["pending"], false);
+    assert_eq!(payload["denied_by"], "default-agent");
+    assert!(payload["denied_at"].is_string());
+    assert!(payload["approved_by"].is_null());
+    assert!(payload["approved_at"].is_null());
+
+    let pending_after: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("pending.json")).unwrap())
+            .unwrap();
+    assert_eq!(pending_after[0]["status"], "denied");
+    assert_eq!(pending_after[0]["pending"], false);
+    assert_eq!(pending_after[0]["denied_by"], "default-agent");
+    assert!(pending_after[0]["denied_at"].is_string());
+}
+
+#[test]
+fn cli_approve_rejects_non_pending_request() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "x", "--reason", "test"])
+        .assert()
         .success();
+    let request_id = first_pending_request_id(temp_dir.path());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "approve", &request_id])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "approve", &request_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("request is not pending"));
 }
 
 #[test]
@@ -2007,6 +2260,168 @@ fn cli_list() {
         .assert()
         .success()
         .stdout(predicates::str::contains("["));
+}
+
+#[test]
+fn cli_list_pending_filters_only_pending_requests() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "x", "--reason", "first"])
+        .assert()
+        .success();
+    let first_request_id = first_pending_request_id(temp_dir.path());
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "y", "--reason", "second"])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "approve", &first_request_id])
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "list", "--pending"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let entries: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["kind"], "pending");
+    assert_eq!(entries[0]["status"], "pending");
+    assert_eq!(entries[0]["pending"], true);
+    assert_eq!(entries[0]["secret_name"], "y");
+}
+
+#[test]
+fn cli_request_allowlist_allows_matching_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_ALLOWLIST_ENV_VAR, "deploy/*")
+        .args([
+            "--root",
+            root,
+            "request",
+            "deploy/token",
+            "--reason",
+            "test",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_request_allowlist_rejects_non_matching_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_ALLOWLIST_ENV_VAR, "deploy/*")
+        .args(["--root", root, "request", "infra/token", "--reason", "test"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not allowlisted"));
+}
+
+#[test]
+fn cli_request_blocklist_rejects_blocked_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_ALLOWLIST_ENV_VAR, "*")
+        .env(REQUEST_BLOCKLIST_ENV_VAR, "infra/*")
+        .args(["--root", root, "request", "infra/token", "--reason", "test"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is blocked"));
+}
+
+#[test]
+fn cli_request_allowlist_flag_overrides_env() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_ALLOWLIST_ENV_VAR, "dev/*")
+        .args([
+            "--root",
+            root,
+            "request",
+            "prod/token",
+            "--reason",
+            "test",
+            "--allowlist",
+            "prod/*",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_request_blocklist_flag_rejects_blocked_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "request",
+            "prod/token",
+            "--reason",
+            "test",
+            "--allowlist",
+            "*",
+            "--blocklist",
+            "prod/*",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is blocked"));
+}
+
+#[test]
+fn cli_approve_respects_request_allowlist_policy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "prod/token", "--reason", "test"])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(temp_dir.path());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_ALLOWLIST_ENV_VAR, "dev/*")
+        .args(["--root", root, "approve", &request_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("not allowlisted"));
+}
+
+#[test]
+fn cli_approve_respects_request_blocklist_policy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "prod/token", "--reason", "test"])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(temp_dir.path());
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(REQUEST_BLOCKLIST_ENV_VAR, "prod/*")
+        .args(["--root", root, "approve", &request_id])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("is blocked"));
 }
 
 #[test]
@@ -2321,6 +2736,53 @@ fn cli_vault_mount() {
 
 #[cfg(unix)]
 #[test]
+fn cli_vault_mount_uses_mount_agent_for_extpass_env() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries_with_extpass_agent_log(&fake_bin);
+    let extpass_agent_log = temp_dir.path().join("extpass-agent.log");
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(
+            "GLOVES_TEST_EXTPASS_AGENT_LOG",
+            extpass_agent_log.to_str().unwrap(),
+        )
+        .args([
+            "--root",
+            root,
+            "vault",
+            "mount",
+            "agent_data",
+            "--ttl",
+            "1h",
+            "--agent",
+            "agent-b",
+        ])
+        .assert()
+        .success();
+
+    let logged_agent = std::fs::read_to_string(extpass_agent_log).unwrap();
+    assert_eq!(logged_agent.trim(), "agent-b");
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_vault_mount_missing_mountpoint_binary_is_actionable() {
     let temp_dir = tempfile::tempdir().unwrap();
     let fake_bin = temp_dir.path().join("fake-bin");
@@ -2456,6 +2918,136 @@ fn cli_vault_unmount() {
 
 #[cfg(unix)]
 #[test]
+fn cli_vault_exec_runs_command_and_unmounts_after_success() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+    let mount_marker = temp_dir.path().join("mnt/agent_data/.mounted");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "exec",
+            "agent_data",
+            "--",
+            "test",
+            "-f",
+            mount_marker.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let sessions = std::fs::read_to_string(temp_dir.path().join("vaults/sessions.json")).unwrap();
+    assert_eq!(sessions.trim(), "[]");
+    assert!(!mount_marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_strips_extpass_env_from_wrapped_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    write_executable(
+        &fake_bin.join("print-vault-env"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+output="$1"
+printf '%s\n%s\n' "${GLOVES_EXTPASS_ROOT:-missing}" "${GLOVES_EXTPASS_AGENT:-missing}" > "$output"
+"#,
+    );
+    let root = temp_dir.path().to_str().unwrap();
+    let env_output = temp_dir.path().join("wrapped-command.env");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env("GLOVES_EXTPASS_ROOT", "/tmp/should-not-leak")
+        .env("GLOVES_EXTPASS_AGENT", "agent-should-not-leak")
+        .args([
+            "--root",
+            root,
+            "vault",
+            "exec",
+            "agent_data",
+            "--",
+            "print-vault-env",
+            env_output.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    let wrapped_env = std::fs::read_to_string(env_output).unwrap();
+    assert_eq!(wrapped_env, "missing\nmissing\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_unmounts_when_command_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+    let mount_marker = temp_dir.path().join("mnt/agent_data/.mounted");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root",
+            root,
+            "vault",
+            "init",
+            "agent_data",
+            "--owner",
+            "agent",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "vault", "exec", "agent_data", "--", "false"])
+        .assert()
+        .code(1);
+
+    let sessions = std::fs::read_to_string(temp_dir.path().join("vaults/sessions.json")).unwrap();
+    assert_eq!(sessions.trim(), "[]");
+    assert!(!mount_marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn cli_vault_status() {
     let temp_dir = tempfile::tempdir().unwrap();
     let fake_bin = temp_dir.path().join("fake-bin");
@@ -2549,6 +3141,8 @@ fn cli_vault_ask_file() {
         .args([
             "--root",
             root,
+            "--agent",
+            "agent-b",
             "vault",
             "init",
             "agent_data",

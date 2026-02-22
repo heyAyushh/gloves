@@ -225,7 +225,9 @@ fn get_routes_human() {
             &signing_key,
         )
         .unwrap();
-    manager.approve_request(request.id).unwrap();
+    manager
+        .approve_request(request.id, AgentId::new("reviewer-a").unwrap())
+        .unwrap();
 
     let secret = manager.get(&id, &creator, None).unwrap();
     assert_eq!(secret.expose(|bytes| bytes.to_vec()), b"from-pass");
@@ -701,7 +703,7 @@ fn list_all() {
 fn approve_and_deny_request_wrappers() {
     let (manager, _temp) = build_manager(HumanBackend::new());
     let signing_key = signing_key();
-    let request = manager
+    let approved_request = manager
         .request(
             SecretId::new("human/token").unwrap(),
             AgentId::new("agent-a").unwrap(),
@@ -711,27 +713,57 @@ fn approve_and_deny_request_wrappers() {
         )
         .unwrap();
 
-    manager.approve_request(request.id).unwrap();
-    let status = manager
-        .pending_store
-        .load_all()
-        .unwrap()
-        .into_iter()
-        .find(|entry| entry.id == request.id)
-        .unwrap()
-        .status;
-    assert_eq!(status, RequestStatus::Fulfilled);
+    let approved = manager
+        .approve_request(approved_request.id, AgentId::new("reviewer-a").unwrap())
+        .unwrap();
+    assert_eq!(approved.status, RequestStatus::Fulfilled);
+    assert!(!approved.pending);
+    assert_eq!(
+        approved.approved_by,
+        Some(AgentId::new("reviewer-a").unwrap())
+    );
+    assert!(approved.approved_at.is_some());
 
-    manager.deny_request(request.id).unwrap();
-    let status = manager
+    assert!(matches!(
+        manager.deny_request(approved_request.id, AgentId::new("reviewer-b").unwrap()),
+        Err(GlovesError::InvalidInput(_))
+    ));
+
+    let denied_request = manager
+        .request(
+            SecretId::new("human/token").unwrap(),
+            AgentId::new("agent-a").unwrap(),
+            "need deploy".to_owned(),
+            Duration::minutes(10),
+            &signing_key,
+        )
+        .unwrap();
+    let denied = manager
+        .deny_request(denied_request.id, AgentId::new("reviewer-b").unwrap())
+        .unwrap();
+    assert_eq!(denied.status, RequestStatus::Denied);
+    assert!(!denied.pending);
+    assert_eq!(denied.denied_by, Some(AgentId::new("reviewer-b").unwrap()));
+    assert!(denied.denied_at.is_some());
+
+    let approved_status = manager
         .pending_store
         .load_all()
         .unwrap()
         .into_iter()
-        .find(|entry| entry.id == request.id)
+        .find(|entry| entry.id == approved_request.id)
         .unwrap()
         .status;
-    assert_eq!(status, RequestStatus::Denied);
+    assert_eq!(approved_status, RequestStatus::Fulfilled);
+    let denied_status = manager
+        .pending_store
+        .load_all()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.id == denied_request.id)
+        .unwrap()
+        .status;
+    assert_eq!(denied_status, RequestStatus::Denied);
 }
 
 #[test]

@@ -169,6 +169,7 @@ fn pending_create_persist() {
     let loaded = store.load_all().unwrap();
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].status, RequestStatus::Pending);
+    assert!(loaded[0].pending);
 }
 
 #[test]
@@ -190,6 +191,7 @@ fn pending_auto_expire() {
 
     let loaded = store.load_all().unwrap();
     assert_eq!(loaded[0].status, RequestStatus::Expired);
+    assert!(!loaded[0].pending);
 }
 
 #[test]
@@ -209,9 +211,20 @@ fn pending_deny() {
         )
         .unwrap();
 
-    store.deny(request.id).unwrap();
+    let reviewer = AgentId::new("reviewer-a").unwrap();
+    let denied = store.deny(request.id, reviewer.clone()).unwrap();
+    assert_eq!(denied.status, RequestStatus::Denied);
+    assert!(!denied.pending);
+    assert_eq!(denied.denied_by, Some(reviewer.clone()));
+    assert!(denied.denied_at.is_some());
+    assert!(denied.approved_by.is_none());
+    assert!(denied.approved_at.is_none());
+
     let loaded = store.load_all().unwrap();
     assert_eq!(loaded[0].status, RequestStatus::Denied);
+    assert!(!loaded[0].pending);
+    assert_eq!(loaded[0].denied_by, Some(reviewer));
+    assert!(loaded[0].denied_at.is_some());
     assert!(loaded[0].expires_at > Utc::now() - Duration::hours(1));
 }
 
@@ -231,7 +244,20 @@ fn pending_approve() {
             &signing_key,
         )
         .unwrap();
-    store.approve(request.id).unwrap();
+    let reviewer = AgentId::new("reviewer-a").unwrap();
+    let approved = store.approve(request.id, reviewer.clone()).unwrap();
+    assert_eq!(approved.status, RequestStatus::Fulfilled);
+    assert!(!approved.pending);
+    assert_eq!(approved.approved_by, Some(reviewer.clone()));
+    assert!(approved.approved_at.is_some());
+    assert!(approved.denied_by.is_none());
+    assert!(approved.denied_at.is_none());
+
+    let loaded = store.load_all().unwrap();
+    assert_eq!(loaded[0].status, RequestStatus::Fulfilled);
+    assert!(!loaded[0].pending);
+    assert_eq!(loaded[0].approved_by, Some(reviewer));
+    assert!(loaded[0].approved_at.is_some());
 
     assert!(store
         .is_fulfilled(
@@ -275,7 +301,7 @@ fn pending_approve_not_found() {
     let path = temp_dir.path().join("pending.json");
     let store = PendingRequestStore::new(&path).unwrap();
     assert!(matches!(
-        store.approve(uuid::Uuid::new_v4()),
+        store.approve(uuid::Uuid::new_v4(), AgentId::new("reviewer-a").unwrap()),
         Err(GlovesError::NotFound)
     ));
 }
@@ -286,9 +312,66 @@ fn pending_deny_not_found() {
     let path = temp_dir.path().join("pending.json");
     let store = PendingRequestStore::new(&path).unwrap();
     assert!(matches!(
-        store.deny(uuid::Uuid::new_v4()),
+        store.deny(uuid::Uuid::new_v4(), AgentId::new("reviewer-a").unwrap()),
         Err(GlovesError::NotFound)
     ));
+}
+
+#[test]
+fn pending_request_cannot_be_resolved_twice() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("pending.json");
+    let store = PendingRequestStore::new(&path).unwrap();
+    let signing_key = signing_key();
+
+    let request = store
+        .create(
+            SecretId::new("human/password").unwrap(),
+            AgentId::new("agent-a").unwrap(),
+            "need for deploy".to_owned(),
+            Duration::minutes(1),
+            &signing_key,
+        )
+        .unwrap();
+
+    store
+        .approve(request.id, AgentId::new("reviewer-a").unwrap())
+        .unwrap();
+    assert!(matches!(
+        store.deny(request.id, AgentId::new("reviewer-b").unwrap()),
+        Err(GlovesError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn pending_load_repairs_legacy_pending_flag() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("pending.json");
+    let store = PendingRequestStore::new(&path).unwrap();
+    let signing_key = signing_key();
+
+    let request = store
+        .create(
+            SecretId::new("human/password").unwrap(),
+            AgentId::new("agent-a").unwrap(),
+            "need for deploy".to_owned(),
+            Duration::minutes(1),
+            &signing_key,
+        )
+        .unwrap();
+
+    let mut raw_requests: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    raw_requests[0]["pending"] = serde_json::Value::Bool(false);
+    std::fs::write(&path, serde_json::to_vec_pretty(&raw_requests).unwrap()).unwrap();
+
+    let loaded = store.load_all().unwrap();
+    let restored = loaded
+        .into_iter()
+        .find(|entry| entry.id == request.id)
+        .unwrap();
+    assert_eq!(restored.status, RequestStatus::Pending);
+    assert!(restored.pending);
 }
 
 #[test]

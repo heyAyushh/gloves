@@ -1,5 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
 
+use chrono::{Duration, Utc};
 use gloves::{
     audit::{AuditEvent, AuditLog},
     types::{AgentId, SecretId},
@@ -57,6 +58,25 @@ fn all_events_serialize() {
         AuditEvent::SecretRevoked {
             secret_id: SecretId::new("d").unwrap(),
             by: AgentId::new("agent-c").unwrap(),
+        },
+        AuditEvent::RequestCreated {
+            request_id: uuid::Uuid::new_v4(),
+            secret_id: SecretId::new("human/token").unwrap(),
+            requested_by: AgentId::new("agent-a").unwrap(),
+            reason: "need deploy".to_owned(),
+            expires_at: Utc::now() + Duration::minutes(10),
+        },
+        AuditEvent::RequestApproved {
+            request_id: uuid::Uuid::new_v4(),
+            secret_id: SecretId::new("human/token").unwrap(),
+            requested_by: AgentId::new("agent-a").unwrap(),
+            approved_by: AgentId::new("reviewer-a").unwrap(),
+        },
+        AuditEvent::RequestDenied {
+            request_id: uuid::Uuid::new_v4(),
+            secret_id: SecretId::new("human/token").unwrap(),
+            requested_by: AgentId::new("agent-a").unwrap(),
+            denied_by: AgentId::new("reviewer-b").unwrap(),
         },
         AuditEvent::VaultCreated {
             vault: "agent_data".to_owned(),

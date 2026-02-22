@@ -46,6 +46,11 @@ impl PendingRequestStore {
             signature: Vec::new(),
             verifying_key: signing_key.verifying_key().to_bytes().to_vec(),
             status: RequestStatus::Pending,
+            pending: true,
+            approved_at: None,
+            approved_by: None,
+            denied_at: None,
+            denied_by: None,
         };
         request.signature = sign_request_payload(&request, signing_key)?;
 
@@ -66,7 +71,14 @@ impl PendingRequestStore {
             verify_request_signature(request)?;
             if request.status == RequestStatus::Pending && request.expires_at < now {
                 request.status = RequestStatus::Expired;
+                request.pending = false;
                 changed = true;
+            } else {
+                let expected_pending = request.status == RequestStatus::Pending;
+                if request.pending != expected_pending {
+                    request.pending = expected_pending;
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -75,36 +87,14 @@ impl PendingRequestStore {
         Ok(requests)
     }
 
-    /// Marks request denied.
-    pub fn deny(&self, request_id: Uuid) -> Result<()> {
-        let mut requests = self.load_all()?;
-        let mut found = false;
-        for request in &mut requests {
-            if request.id == request_id {
-                request.status = RequestStatus::Denied;
-                found = true;
-            }
-        }
-        if !found {
-            return Err(GlovesError::NotFound);
-        }
-        self.save_all(&requests)
+    /// Marks request denied and records reviewer details.
+    pub fn deny(&self, request_id: Uuid, reviewed_by: AgentId) -> Result<PendingRequest> {
+        self.resolve_request(request_id, RequestStatus::Denied, reviewed_by)
     }
 
-    /// Marks request approved.
-    pub fn approve(&self, request_id: Uuid) -> Result<()> {
-        let mut requests = self.load_all()?;
-        let mut found = false;
-        for request in &mut requests {
-            if request.id == request_id {
-                request.status = RequestStatus::Fulfilled;
-                found = true;
-            }
-        }
-        if !found {
-            return Err(GlovesError::NotFound);
-        }
-        self.save_all(&requests)
+    /// Marks request approved and records reviewer details.
+    pub fn approve(&self, request_id: Uuid, reviewed_by: AgentId) -> Result<PendingRequest> {
+        self.resolve_request(request_id, RequestStatus::Fulfilled, reviewed_by)
     }
 
     /// Returns true when a matching request is approved and valid.
@@ -120,6 +110,46 @@ impl PendingRequestStore {
     fn save_all(&self, requests: &[PendingRequest]) -> Result<()> {
         write_private_file_atomic(&self.path, &serde_json::to_vec_pretty(requests)?)?;
         Ok(())
+    }
+
+    fn resolve_request(
+        &self,
+        request_id: Uuid,
+        next_status: RequestStatus,
+        reviewed_by: AgentId,
+    ) -> Result<PendingRequest> {
+        let mut requests = self.load_all()?;
+        let now = Utc::now();
+        let mut resolved = None;
+        for request in &mut requests {
+            if request.id != request_id {
+                continue;
+            }
+            if request.status != RequestStatus::Pending {
+                return Err(GlovesError::InvalidInput(
+                    "request is not pending".to_owned(),
+                ));
+            }
+            request.status = next_status.clone();
+            request.pending = false;
+            match next_status {
+                RequestStatus::Fulfilled => {
+                    request.approved_at = Some(now);
+                    request.approved_by = Some(reviewed_by.clone());
+                }
+                RequestStatus::Denied => {
+                    request.denied_at = Some(now);
+                    request.denied_by = Some(reviewed_by.clone());
+                }
+                RequestStatus::Pending | RequestStatus::Expired => {}
+            }
+            resolved = Some(request.clone());
+            break;
+        }
+
+        let resolved = resolved.ok_or(GlovesError::NotFound)?;
+        self.save_all(&requests)?;
+        Ok(resolved)
     }
 }
 

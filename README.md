@@ -133,6 +133,14 @@ gloves --root .openclaw/secrets list
 gloves --root .openclaw/secrets get service/token
 ```
 
+## Multi-Agent VM Operations Guide
+
+For production-style virtual machine deployments with multiple agents and human operators, use:
+
+- [`docs/vm-multi-agent-human-guide.md`](docs/vm-multi-agent-human-guide.md)
+- [`docs/security-hardening.md`](docs/security-hardening.md)
+- [`docs/release-binaries.md`](docs/release-binaries.md)
+
 ## Common Workflows
 
 ### Agent secret lifecycle
@@ -182,6 +190,10 @@ gloves --root .openclaw/secrets vault init personal --owner human
 
 # mount with TTL
 gloves --root .openclaw/secrets vault mount agent_data --ttl 1h
+
+# mount, execute, and unmount automatically
+gloves --root .openclaw/secrets vault exec agent_data -- \
+  sh -c 'ls -la ~/.openclaw/vault/agent_data'
 
 # trusted handoff prompt (request file from trusted mounted agent)
 gloves --root .openclaw/secrets vault ask-file agent_data \
@@ -233,18 +245,19 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
 | `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
-| `get <name>` | Retrieve secret value | `--pipe-to <command>` for non-TTY output; command must be in `GLOVES_GET_PIPE_ALLOWLIST`; warns on TTY |
+| `get <name>` | Retrieve secret value | `--pipe-to <command>` streams bytes to stdin; `--pipe-to-args "<command> {secret}"` interpolates UTF-8 secrets into args; executable must be in `GLOVES_GET_PIPE_ALLOWLIST`; warns on TTY |
 | `env <name> <var>` | Print redacted env export | outputs `export VAR=<REDACTED>` |
-| `request <name> --reason <text>` | Create human access request | reason is required |
-| `approve <request_id>` | Approve pending request | request UUID |
-| `deny <request_id>` | Deny pending request | request UUID |
+| `request <name> --reason <text>` | Create human access request | optional `--allowlist` and `--blocklist` accept `*`, `namespace/*`, exact id |
+| `approve <request_id>` | Approve pending request | request UUID; returns JSON review payload |
+| `deny <request_id>` | Deny pending request | request UUID; returns JSON review payload |
 | `status <name>` | Request status for secret | `pending` / `fulfilled` / `denied` / `expired` |
-| `list` | List metadata and pending requests | JSON output |
+| `list` | List metadata and pending requests | `--pending` filters to pending request entries |
 | `revoke <name>` | Revoke caller-owned secret | removes ciphertext + metadata |
 | `verify` | Reap expired items and verify runtime state | logs expiry events |
 | `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`) |
 | `vault init <name> --owner <agent|human>` | Create encrypted vault metadata + ciphertext dir | `agent` owner auto-generates vault secret |
 | `vault mount <name>` | Mount encrypted vault with TTL session | `--ttl <duration>`, `--mountpoint`, `--agent` |
+| `vault exec <name> -- <command...>` | Mount vault, run command, then unmount | supports `--ttl`, `--mountpoint`, `--agent`; returns wrapped command exit code; strips extpass env vars from wrapped command |
 | `vault unmount <name>` | Unmount vault and clear session | `--agent` |
 | `vault status` | Show mounted/locked status and remaining TTL | JSON output |
 | `vault list` | List configured vaults | JSON output |
@@ -264,7 +277,15 @@ Global flags:
 
 Environment variables:
 
-- `GLOVES_GET_PIPE_ALLOWLIST`: comma-separated executable names allowed by `gloves get --pipe-to`.
+- `GLOVES_GET_PIPE_ALLOWLIST`: comma-separated executable names allowed by `gloves get --pipe-to` and `--pipe-to-args`.
+- `GLOVES_REQUEST_ALLOWLIST`: optional comma-separated request allowlist patterns (`*`, `namespace/*`, exact id).
+- `GLOVES_REQUEST_BLOCKLIST`: optional comma-separated request blocklist patterns (`*`, `namespace/*`, exact id).
+
+Security notes:
+
+- `--pipe-to-args` only accepts UTF-8 secrets without control characters; use `--pipe-to` for raw byte-safe forwarding.
+- `vault exec` removes `GLOVES_EXTPASS_ROOT` and `GLOVES_EXTPASS_AGENT` from wrapped command env.
+- Keep allowlists narrow and prefer stdin-based secret piping when possible.
 
 Secret ACL operations map:
 
