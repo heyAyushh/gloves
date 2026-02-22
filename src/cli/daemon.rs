@@ -12,6 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use chrono::Duration;
 
 use crate::{
+    audit::{AuditEvent, AuditLog},
     error::{GlovesError, Result},
     fs_secure::ensure_private_dir,
     paths::SecretsPaths,
@@ -24,6 +25,8 @@ use super::{
     output::{self, OutputStatus},
     runtime, secret_input, DEFAULT_AGENT_ID, DEFAULT_TTL_DAYS,
 };
+
+const DAEMON_ACTION_INTERFACE: &str = "daemon";
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -266,15 +269,36 @@ fn execute_daemon_request(paths: &SecretsPaths, request: DaemonRequest) -> Daemo
     }
 }
 
+fn log_daemon_command_executed(paths: &SecretsPaths, command: &str, target: Option<String>) {
+    let audit_log = match AuditLog::new(paths.audit_file()) {
+        Ok(log) => log,
+        Err(_) => return,
+    };
+    let actor = match AgentId::new(DEFAULT_AGENT_ID) {
+        Ok(agent_id) => agent_id,
+        Err(_) => return,
+    };
+    let _ = audit_log.log(AuditEvent::CommandExecuted {
+        by: actor,
+        interface: DAEMON_ACTION_INTERFACE.to_owned(),
+        command: command.to_owned(),
+        target,
+    });
+}
+
 fn execute_daemon_request_inner(
     paths: &SecretsPaths,
     request: DaemonRequest,
 ) -> Result<(String, Option<serde_json::Value>)> {
     match request {
-        DaemonRequest::Ping => Ok(("pong".to_owned(), None)),
+        DaemonRequest::Ping => {
+            log_daemon_command_executed(paths, "ping", None);
+            Ok(("pong".to_owned(), None))
+        }
         DaemonRequest::List => {
             let manager = runtime::manager_for_paths(paths)?;
             let entries = manager.list_all()?;
+            log_daemon_command_executed(paths, "list", None);
             Ok(("ok".to_owned(), Some(serde_json::to_value(entries)?)))
         }
         DaemonRequest::Verify => {
@@ -285,6 +309,7 @@ fn execute_daemon_request_inner(
                 &manager.audit_log,
             )?;
             TtlReaper::reap_vault_sessions(&GocryptfsDriver::new(), paths, &manager.audit_log)?;
+            log_daemon_command_executed(paths, "verify", None);
             Ok(("ok".to_owned(), None))
         }
         DaemonRequest::Status { name } => {
@@ -295,6 +320,7 @@ fn execute_daemon_request_inner(
                 .find(|request| request.secret_name.as_str() == name)
                 .map(|request| request.status)
                 .unwrap_or(crate::types::RequestStatus::Fulfilled);
+            log_daemon_command_executed(paths, "status", Some(name));
             Ok(("ok".to_owned(), Some(serde_json::to_value(status)?)))
         }
         DaemonRequest::Get { name } => {
@@ -304,6 +330,7 @@ fn execute_daemon_request_inner(
             let identity_file = runtime::load_or_create_default_identity(paths)?;
             let secret_value = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
             let value = secret_value.expose(|bytes| String::from_utf8_lossy(bytes).to_string());
+            log_daemon_command_executed(paths, "get", Some(name));
             Ok((
                 "ok".to_owned(),
                 Some(serde_json::json!({ "secret": value })),
@@ -336,6 +363,7 @@ fn execute_daemon_request_inner(
                     recipient_keys: vec![recipient],
                 },
             )?;
+            log_daemon_command_executed(paths, "set", Some(secret_id.as_str().to_owned()));
             Ok((
                 "ok".to_owned(),
                 Some(serde_json::json!({ "id": secret_id.as_str() })),
@@ -346,6 +374,7 @@ fn execute_daemon_request_inner(
             let secret_id = SecretId::new(&name)?;
             let caller = AgentId::new(DEFAULT_AGENT_ID)?;
             manager.revoke(&secret_id, &caller)?;
+            log_daemon_command_executed(paths, "revoke", Some(name));
             Ok(("revoked".to_owned(), None))
         }
         DaemonRequest::Request { name, reason } => {
@@ -360,6 +389,7 @@ fn execute_daemon_request_inner(
                 Duration::days(DEFAULT_TTL_DAYS),
                 &signing_key,
             )?;
+            log_daemon_command_executed(paths, "request", Some(name));
             Ok((
                 "pending".to_owned(),
                 Some(serde_json::json!({ "request_id": request.id })),
@@ -370,6 +400,7 @@ fn execute_daemon_request_inner(
             let request_id = runtime::parse_request_uuid(&request_id)?;
             let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
             let request = manager.approve_request(request_id, reviewer)?;
+            log_daemon_command_executed(paths, "approve", Some(request_id.to_string()));
             Ok((
                 "approved".to_owned(),
                 Some(serde_json::json!({
@@ -393,6 +424,7 @@ fn execute_daemon_request_inner(
             let request_id = runtime::parse_request_uuid(&request_id)?;
             let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
             let request = manager.deny_request(request_id, reviewer)?;
+            log_daemon_command_executed(paths, "deny", Some(request_id.to_string()));
             Ok((
                 "denied".to_owned(),
                 Some(serde_json::json!({

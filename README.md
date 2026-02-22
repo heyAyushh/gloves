@@ -245,13 +245,14 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
 | `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
-| `get <name>` | Retrieve secret value | `--pipe-to <command>` streams bytes to stdin; `--pipe-to-args "<command> {secret}"` interpolates UTF-8 secrets into args; executable must be in `GLOVES_GET_PIPE_ALLOWLIST`; warns on TTY |
+| `get <name>` | Retrieve secret value | `--pipe-to <command>` streams bytes to stdin; `--pipe-to-args "<command> {secret}"` interpolates UTF-8 secrets into args; executable must be in `GLOVES_GET_PIPE_ALLOWLIST`; optional `GLOVES_GET_PIPE_ARG_POLICY` (exact templates) and `.gloves.toml [secrets.pipe.commands.<command>]` (URL prefixes) can tighten `--pipe-to-args`; warns on TTY |
 | `env <name> <var>` | Print redacted env export | outputs `export VAR=<REDACTED>` |
 | `request <name> --reason <text>` | Create human access request | optional `--allowlist` and `--blocklist` accept `*`, `namespace/*`, exact id |
 | `approve <request_id>` | Approve pending request | request UUID; returns JSON review payload |
 | `deny <request_id>` | Deny pending request | request UUID; returns JSON review payload |
 | `status <name>` | Request status for secret | `pending` / `fulfilled` / `denied` / `expired` |
 | `list` | List metadata and pending requests | `--pending` filters to pending request entries |
+| `audit` | View audit trail entries | `--limit <n>` (default 50), `--json` for structured output |
 | `revoke <name>` | Revoke caller-owned secret | removes ciphertext + metadata |
 | `verify` | Reap expired items and verify runtime state | logs expiry events |
 | `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`) |
@@ -278,12 +279,36 @@ Global flags:
 Environment variables:
 
 - `GLOVES_GET_PIPE_ALLOWLIST`: comma-separated executable names allowed by `gloves get --pipe-to` and `--pipe-to-args`.
+- `GLOVES_GET_PIPE_ARG_POLICY`: optional JSON map of executable to exact allowed `--pipe-to-args` templates.
+  Example: `{"curl":["curl -u ayush:{secret} http://127.0.0.1:4001/carddav/principal/ayush/"]}`
+- `GLOVES_GET_PIPE_URL_POLICY`: optional JSON map of executable to allowed URL prefixes for `--pipe-to-args` (env fallback when config does not define command URL policy).
+  Example: `{"curl":["https://api.example.com/v1/","http://127.0.0.1:4001/carddav/"]}`
 - `GLOVES_REQUEST_ALLOWLIST`: optional comma-separated request allowlist patterns (`*`, `namespace/*`, exact id).
 - `GLOVES_REQUEST_BLOCKLIST`: optional comma-separated request blocklist patterns (`*`, `namespace/*`, exact id).
+
+Config-managed URL policy for `--pipe-to-args`:
+
+```toml
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/"]
+
+[secrets.pipe.commands.wget]
+require_url = true
+url_prefixes = ["https://downloads.example.com/"]
+```
+
+When a command has a config policy entry:
+
+- URL args in `--pipe-to-args` must match one allowed prefix.
+- `require_url = true` requires at least one URL argument in the template.
+- The rule applies to any configured executable name, not only `curl`/`wget`.
 
 Security notes:
 
 - `--pipe-to-args` only accepts UTF-8 secrets without control characters; use `--pipe-to` for raw byte-safe forwarding.
+- Use `GLOVES_GET_PIPE_ARG_POLICY` for high-risk tools (for example `curl`) so only exact approved argument templates are permitted.
+- Prefer `.gloves.toml [secrets.pipe.commands.<command>]` for URL-scoped policy in shared environments; use `GLOVES_GET_PIPE_URL_POLICY` as a compatibility fallback.
 - `vault exec` removes `GLOVES_EXTPASS_ROOT` and `GLOVES_EXTPASS_AGENT` from wrapped command env.
 - Keep allowlists narrow and prefer stdin-based secret piping when possible.
 

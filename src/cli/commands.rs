@@ -1,7 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env::VarError;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
 use crate::{
-    audit::AuditEvent,
+    audit::{AuditEvent, AuditLog},
     config::{
         discover_config, resolve_config_path, ConfigSource, GlovesConfig, PathOperation,
         SecretAclOperation, VaultMode,
@@ -37,6 +37,8 @@ use super::{
 
 const REQUIRED_VAULT_BINARIES: [&str; 3] = ["gocryptfs", "fusermount", "mountpoint"];
 const SECRET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
+const SECRET_PIPE_ARG_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_ARG_POLICY";
+const SECRET_PIPE_URL_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_URL_POLICY";
 const SECRET_PIPE_ALLOWLIST_SEPARATOR: char = ',';
 const SECRET_PIPE_TEMPLATE_PLACEHOLDER: &str = "{secret}";
 const SECRET_PIPE_TEMPLATE_SOURCE: &str = "--pipe-to-args";
@@ -50,6 +52,7 @@ const GPG_KEY_ALGORITHM: &str = "default";
 const GPG_KEY_USAGE: &str = "default";
 const GPG_KEY_EXPIRY: &str = "never";
 const GPG_AGENT_USER_ID_PREFIX: &str = "gloves-agent-";
+const CLI_ACTION_INTERFACE: &str = "cli";
 
 #[derive(Debug, Clone)]
 struct EffectiveCliState {
@@ -87,6 +90,13 @@ struct GpgFingerprintOutput {
     fingerprint: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AuditRecord {
+    timestamp: DateTime<Utc>,
+    #[serde(flatten)]
+    event: AuditEvent,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct RequestReviewOutput {
     action: String,
@@ -121,10 +131,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
 
     let state = load_effective_state(&cli)?;
     enforce_vault_mode(&state.vault_mode, &cli.command)?;
+    runtime::init_layout(&state.paths)?;
 
     match cli.command {
         Command::Init => {
             runtime::init_layout(&state.paths)?;
+            log_command_executed(&state.paths, &state.default_agent_id, "init", None);
             if let Some(code) = stdout_line_or_exit("initialized")? {
                 return Ok(code);
             }
@@ -158,6 +170,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                     recipient_keys: vec![recipient],
                 },
             )?;
+            log_command_executed(&state.paths, &state.default_agent_id, "set", Some(name));
             if let Some(code) = stdout_line_or_exit("ok")? {
                 return Ok(code);
             }
@@ -178,7 +191,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             if force_raw_stdout_warning {
                 let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
             }
-            let output_target = resolve_secret_output_target(pipe_to, pipe_to_args, stdout_is_tty)?;
+            let output_target = resolve_secret_output_target(
+                pipe_to,
+                pipe_to_args,
+                stdout_is_tty,
+                state.loaded_config.as_ref(),
+            )?;
             if matches!(&output_target, SecretOutputTarget::Stdout)
                 && stdout_is_tty
                 && !force_raw_stdout_warning
@@ -202,7 +220,14 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                         }
                     };
                     secret_bytes.zeroize();
-                    if let Some(code) = output_result? {
+                    let output_code = output_result?;
+                    log_command_executed(
+                        &state.paths,
+                        &state.default_agent_id,
+                        "get",
+                        Some(secret_id.as_str().to_owned()),
+                    );
+                    if let Some(code) = output_code {
                         return Ok(code);
                     }
                 }
@@ -213,7 +238,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             }
         }
         Command::Env { name, var } => {
-            let _ = name;
+            log_command_executed(&state.paths, &state.default_agent_id, "env", Some(name));
             if let Some(code) = stdout_line_or_exit(&format!("export {var}=<REDACTED>"))? {
                 return Ok(code);
             }
@@ -239,6 +264,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 Duration::days(state.default_secret_ttl_days),
                 &signing_key,
             )?;
+            log_command_executed(&state.paths, &state.default_agent_id, "request", Some(name));
             if let Some(code) = stdout_line_or_exit("pending")? {
                 return Ok(code);
             }
@@ -256,6 +282,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             ensure_request_policy_allows(&pending_request.secret_name, &request_policy, "approve")?;
             let approved = manager.approve_request(request_id, state.default_agent_id.clone())?;
             let payload = request_review_output("approved", &approved);
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "approve",
+                Some(request_id.to_string()),
+            );
             if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
                 return Ok(code);
             }
@@ -271,6 +303,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             )?;
             let denied = manager.deny_request(request_id, state.default_agent_id.clone())?;
             let payload = request_review_output("denied", &denied);
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "deny",
+                Some(request_id.to_string()),
+            );
             if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
                 return Ok(code);
             }
@@ -287,6 +325,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                     )
                 });
             }
+            let list_target = if pending {
+                Some("pending".to_owned())
+            } else {
+                None
+            };
+            log_command_executed(&state.paths, &state.default_agent_id, "list", list_target);
             if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&entries)?)? {
                 return Ok(code);
             }
@@ -297,6 +341,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             ensure_secret_acl_allowed(&state, SecretAclOperation::Revoke, Some(&secret_id))?;
             let caller = state.default_agent_id.clone();
             manager.revoke(&secret_id, &caller)?;
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "revoke",
+                Some(secret_id.as_str().to_owned()),
+            );
             if let Some(code) = stdout_line_or_exit("revoked")? {
                 return Ok(code);
             }
@@ -311,8 +361,36 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 .find(|request| request.secret_name.as_str() == secret_id.as_str())
                 .map(|request| request.status)
                 .unwrap_or(crate::types::RequestStatus::Fulfilled);
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "status",
+                Some(secret_id.as_str().to_owned()),
+            );
             if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
                 return Ok(code);
+            }
+        }
+        Command::Audit { limit, json } => {
+            let records = load_audit_records(&state.paths.audit_file())?;
+            let sliced_records = latest_audit_records(records, limit);
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "audit",
+                Some(format!("limit={limit}")),
+            );
+            if json {
+                let payload = serde_json::to_string_pretty(&sliced_records)?;
+                if let Some(code) = stdout_line_or_exit(&payload)? {
+                    return Ok(code);
+                }
+            } else {
+                for record in sliced_records {
+                    if let Some(code) = stdout_line_or_exit(&format_audit_record_line(&record))? {
+                        return Ok(code);
+                    }
+                }
             }
         }
         Command::Verify => {
@@ -327,6 +405,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 &state.paths,
                 &manager.audit_log,
             )?;
+            log_command_executed(&state.paths, &state.default_agent_id, "verify", None);
             if let Some(code) = stdout_line_or_exit("ok")? {
                 return Ok(code);
             }
@@ -337,6 +416,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             max_requests,
         } => {
             let bind = bind.unwrap_or_else(|| state.daemon_bind.clone());
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "daemon",
+                Some(bind.clone()),
+            );
             daemon::run_daemon(
                 &state.paths,
                 &bind,
@@ -349,6 +434,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             )?;
         }
         Command::Vault { command } => {
+            let (action, target) = vault_command_descriptor(&command);
             if let Some(code) = vault_cmd::run_vault_command(
                 &state.paths,
                 command,
@@ -359,14 +445,27 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                     vault_secret_length_bytes: state.default_vault_secret_length_bytes,
                 },
             )? {
+                log_command_executed(
+                    &state.paths,
+                    &state.default_agent_id,
+                    action,
+                    target.clone(),
+                );
                 return Ok(code);
             }
+            log_command_executed(&state.paths, &state.default_agent_id, action, target);
         }
         Command::Config { command } => match command {
             ConfigCommand::Validate => {
                 if matches!(state.vault_mode, VaultMode::Required) {
                     ensure_vault_dependencies()?;
                 }
+                log_command_executed(
+                    &state.paths,
+                    &state.default_agent_id,
+                    "config-validate",
+                    None,
+                );
                 if let Some(code) = stdout_line_or_exit("ok")? {
                     return Ok(code);
                 }
@@ -382,6 +481,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 })?;
                 let agent_id = AgentId::new(&agent)?;
                 let entries = config.agent_paths(&agent_id)?;
+                log_command_executed(
+                    &state.paths,
+                    &state.default_agent_id,
+                    "access-paths",
+                    Some(agent_id.as_str().to_owned()),
+                );
                 if json {
                     let payload = serde_json::json!({
                         "agent": agent_id.as_str(),
@@ -413,9 +518,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             }
         },
         Command::Gpg { command } => {
+            let (action, target) = gpg_command_descriptor(&state.default_agent_id, &command);
             if let Some(code) = run_gpg_command(&state, command)? {
+                log_command_executed(&state.paths, &state.default_agent_id, action, target);
                 return Ok(code);
             }
+            log_command_executed(&state.paths, &state.default_agent_id, action, target);
         }
         Command::ExtpassGet { .. } => {}
     }
@@ -442,6 +550,194 @@ fn stderr_line_ignore_broken_pipe(line: &str) -> std::io::Result<()> {
     match output::stderr_line(line) {
         Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn log_command_executed(
+    paths: &SecretsPaths,
+    actor: &AgentId,
+    command: &str,
+    target: Option<String>,
+) {
+    let audit_log = match AuditLog::new(paths.audit_file()) {
+        Ok(log) => log,
+        Err(_) => return,
+    };
+    let _ = audit_log.log(AuditEvent::CommandExecuted {
+        by: actor.clone(),
+        interface: CLI_ACTION_INTERFACE.to_owned(),
+        command: command.to_owned(),
+        target,
+    });
+}
+
+fn load_audit_records(audit_path: &Path) -> Result<Vec<AuditRecord>> {
+    if !audit_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = fs::File::open(audit_path)?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for (line_index, line) in reader.lines().enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let record = serde_json::from_str::<AuditRecord>(&line).map_err(|error| {
+            GlovesError::InvalidInput(format!(
+                "invalid audit entry at line {}: {error}",
+                line_index + 1
+            ))
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
+fn latest_audit_records(records: Vec<AuditRecord>, limit: usize) -> Vec<AuditRecord> {
+    if limit == 0 || records.len() <= limit {
+        return records;
+    }
+    let start_index = records.len() - limit;
+    records.into_iter().skip(start_index).collect()
+}
+
+fn format_audit_record_line(record: &AuditRecord) -> String {
+    let timestamp = record.timestamp.to_rfc3339();
+    let event_name = audit_event_name(&record.event);
+    let summary = audit_event_summary(&record.event);
+    format!("{timestamp}\t{event_name}\t{summary}")
+}
+
+fn audit_event_name(event: &AuditEvent) -> &'static str {
+    match event {
+        AuditEvent::SecretAccessed { .. } => "secret_accessed",
+        AuditEvent::SecretExpired { .. } => "secret_expired",
+        AuditEvent::SecretCreated { .. } => "secret_created",
+        AuditEvent::SecretRevoked { .. } => "secret_revoked",
+        AuditEvent::RequestCreated { .. } => "request_created",
+        AuditEvent::RequestApproved { .. } => "request_approved",
+        AuditEvent::RequestDenied { .. } => "request_denied",
+        AuditEvent::VaultCreated { .. } => "vault_created",
+        AuditEvent::VaultMounted { .. } => "vault_mounted",
+        AuditEvent::VaultUnmounted { .. } => "vault_unmounted",
+        AuditEvent::VaultSessionExpired { .. } => "vault_session_expired",
+        AuditEvent::VaultHandoffPromptIssued { .. } => "vault_handoff_prompt_issued",
+        AuditEvent::GpgKeyCreated { .. } => "gpg_key_created",
+        AuditEvent::CommandExecuted { .. } => "command_executed",
+    }
+}
+
+fn audit_event_summary(event: &AuditEvent) -> String {
+    match event {
+        AuditEvent::SecretAccessed { secret_id, by } => {
+            format!("secret={} by={}", secret_id.as_str(), by.as_str())
+        }
+        AuditEvent::SecretExpired { secret_id } => format!("secret={}", secret_id.as_str()),
+        AuditEvent::SecretCreated { secret_id, by } => {
+            format!("secret={} by={}", secret_id.as_str(), by.as_str())
+        }
+        AuditEvent::SecretRevoked { secret_id, by } => {
+            format!("secret={} by={}", secret_id.as_str(), by.as_str())
+        }
+        AuditEvent::RequestCreated {
+            request_id,
+            secret_id,
+            requested_by,
+            expires_at,
+            ..
+        } => format!(
+            "request_id={request_id} secret={} requested_by={} expires_at={}",
+            secret_id.as_str(),
+            requested_by.as_str(),
+            expires_at.to_rfc3339()
+        ),
+        AuditEvent::RequestApproved {
+            request_id,
+            secret_id,
+            requested_by,
+            approved_by,
+        } => format!(
+            "request_id={request_id} secret={} requested_by={} approved_by={}",
+            secret_id.as_str(),
+            requested_by.as_str(),
+            approved_by.as_str()
+        ),
+        AuditEvent::RequestDenied {
+            request_id,
+            secret_id,
+            requested_by,
+            denied_by,
+        } => format!(
+            "request_id={request_id} secret={} requested_by={} denied_by={}",
+            secret_id.as_str(),
+            requested_by.as_str(),
+            denied_by.as_str()
+        ),
+        AuditEvent::VaultCreated { vault, owner } => format!("vault={vault} owner={owner:?}"),
+        AuditEvent::VaultMounted {
+            vault,
+            agent,
+            ttl_minutes,
+        } => format!(
+            "vault={vault} agent={} ttl_minutes={ttl_minutes}",
+            agent.as_str()
+        ),
+        AuditEvent::VaultUnmounted {
+            vault,
+            reason,
+            agent,
+        } => format!("vault={vault} reason={reason} agent={}", agent.as_str()),
+        AuditEvent::VaultSessionExpired { vault } => format!("vault={vault}"),
+        AuditEvent::VaultHandoffPromptIssued {
+            vault,
+            requester,
+            trusted_agent,
+            requested_file,
+        } => format!(
+            "vault={vault} requester={} trusted_agent={} file={requested_file}",
+            requester.as_str(),
+            trusted_agent.as_str()
+        ),
+        AuditEvent::GpgKeyCreated { agent, fingerprint } => {
+            format!("agent={} fingerprint={fingerprint}", agent.as_str())
+        }
+        AuditEvent::CommandExecuted {
+            by,
+            interface,
+            command,
+            target,
+        } => match target {
+            Some(target) => format!(
+                "by={} interface={interface} command={command} target={target}",
+                by.as_str()
+            ),
+            None => format!("by={} interface={interface} command={command}", by.as_str()),
+        },
+    }
+}
+
+fn vault_command_descriptor(command: &super::VaultCommand) -> (&'static str, Option<String>) {
+    match command {
+        super::VaultCommand::Init { name, .. } => ("vault-init", Some(name.clone())),
+        super::VaultCommand::Mount { name, .. } => ("vault-mount", Some(name.clone())),
+        super::VaultCommand::Exec { name, .. } => ("vault-exec", Some(name.clone())),
+        super::VaultCommand::Unmount { name, .. } => ("vault-unmount", Some(name.clone())),
+        super::VaultCommand::Status => ("vault-status", None),
+        super::VaultCommand::List => ("vault-list", None),
+        super::VaultCommand::AskFile { name, .. } => ("vault-ask-file", Some(name.clone())),
+    }
+}
+
+fn gpg_command_descriptor(
+    default_agent_id: &AgentId,
+    command: &GpgCommand,
+) -> (&'static str, Option<String>) {
+    let target = Some(default_agent_id.as_str().to_owned());
+    match command {
+        GpgCommand::Create => ("gpg-create", target),
+        GpgCommand::Fingerprint => ("gpg-fingerprint", target),
     }
 }
 
@@ -908,6 +1204,7 @@ fn resolve_secret_output_target(
     pipe_to: Option<String>,
     pipe_to_args: Option<String>,
     stdout_is_tty: bool,
+    loaded_config: Option<&GlovesConfig>,
 ) -> Result<SecretOutputTarget> {
     if pipe_to.is_some() && pipe_to_args.is_some() {
         return Err(GlovesError::InvalidInput(
@@ -926,6 +1223,7 @@ fn resolve_secret_output_target(
         let executable =
             pipe_command_executable_from_template(&command_template, "--pipe-to-args")?;
         ensure_pipe_command_allowed(&executable)?;
+        ensure_pipe_command_template_allowed(&command_template, &executable, loaded_config)?;
         return Ok(SecretOutputTarget::PipeCommandArgs(command_template));
     }
 
@@ -957,6 +1255,166 @@ fn ensure_pipe_command_allowed(command: &str) -> Result<()> {
     )))
 }
 
+fn ensure_pipe_command_template_allowed(
+    command_template: &str,
+    executable: &str,
+    loaded_config: Option<&GlovesConfig>,
+) -> Result<()> {
+    let normalized_template =
+        parse_pipe_command_template(command_template, SECRET_PIPE_TEMPLATE_SOURCE)?;
+    ensure_pipe_command_template_matches_arg_policy(&normalized_template, executable)?;
+    ensure_pipe_command_template_matches_url_policy(
+        &normalized_template,
+        executable,
+        loaded_config,
+    )?;
+    Ok(())
+}
+
+fn ensure_pipe_command_template_matches_arg_policy(
+    normalized_template: &[String],
+    executable: &str,
+) -> Result<()> {
+    let Some(policy) = read_secret_pipe_arg_policy()? else {
+        return Ok(());
+    };
+
+    let allowed_templates = policy.get(executable).ok_or_else(|| {
+        GlovesError::InvalidInput(format!(
+            "pipe command '{executable}' is not allowed by {SECRET_PIPE_ARG_POLICY_ENV_VAR}; add an explicit template rule"
+        ))
+    })?;
+    if allowed_templates
+        .iter()
+        .any(|template_parts| template_parts == normalized_template)
+    {
+        return Ok(());
+    }
+
+    let allowed = allowed_templates
+        .iter()
+        .map(|template_parts| template_parts.join(" "))
+        .collect::<Vec<_>>();
+    Err(GlovesError::InvalidInput(format!(
+        "pipe command template for '{executable}' is not allowlisted by {SECRET_PIPE_ARG_POLICY_ENV_VAR}; allowed templates: {}",
+        allowed.join(" | ")
+    )))
+}
+
+fn ensure_pipe_command_template_matches_url_policy(
+    normalized_template: &[String],
+    executable: &str,
+    loaded_config: Option<&GlovesConfig>,
+) -> Result<()> {
+    if let Some(policy) =
+        loaded_config.and_then(|config| config.secret_pipe_command_policy(executable))
+    {
+        return ensure_pipe_command_template_matches_resolved_url_policy(
+            normalized_template,
+            executable,
+            policy.require_url,
+            &policy.url_prefixes,
+            URL_POLICY_SOURCE_CONFIG,
+        );
+    }
+
+    let Some(policy) = read_secret_pipe_url_policy()? else {
+        return Ok(());
+    };
+    let Some(allowed_url_prefixes) = policy.get(executable) else {
+        return Ok(());
+    };
+
+    ensure_pipe_command_template_matches_resolved_url_policy(
+        normalized_template,
+        executable,
+        true,
+        allowed_url_prefixes,
+        URL_POLICY_SOURCE_ENV,
+    )
+}
+
+const URL_POLICY_SOURCE_ENV: &str = "env";
+const URL_POLICY_SOURCE_CONFIG: &str = "config";
+
+fn ensure_pipe_command_template_matches_resolved_url_policy(
+    normalized_template: &[String],
+    executable: &str,
+    require_url: bool,
+    allowed_url_prefixes: &[String],
+    source: &str,
+) -> Result<()> {
+    if allowed_url_prefixes.is_empty() && !require_url {
+        return Ok(());
+    }
+
+    let requested_urls = normalized_template
+        .iter()
+        .skip(1)
+        .filter(|argument| is_http_url_argument(argument))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if requested_urls.is_empty() && require_url {
+        return Err(url_policy_requires_url_error(executable, source));
+    }
+    if requested_urls.is_empty() {
+        return Ok(());
+    }
+
+    let disallowed_urls = requested_urls
+        .iter()
+        .filter(|url| {
+            !allowed_url_prefixes
+                .iter()
+                .any(|prefix| url.starts_with(prefix))
+        })
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if disallowed_urls.is_empty() {
+        return Ok(());
+    }
+
+    Err(url_policy_disallowed_urls_error(
+        executable,
+        source,
+        &disallowed_urls,
+        allowed_url_prefixes,
+    ))
+}
+
+fn url_policy_requires_url_error(executable: &str, source: &str) -> GlovesError {
+    let message = match source {
+        URL_POLICY_SOURCE_CONFIG => format!(
+            "pipe command template for '{executable}' must include at least one http(s) URL argument when .gloves.toml [secrets.pipe.commands.{executable}] sets require_url = true"
+        ),
+        _ => format!(
+            "pipe command template for '{executable}' must include at least one http(s) URL argument when {SECRET_PIPE_URL_POLICY_ENV_VAR} defines rules for this command"
+        ),
+    };
+    GlovesError::InvalidInput(message)
+}
+
+fn url_policy_disallowed_urls_error(
+    executable: &str,
+    source: &str,
+    disallowed_urls: &[String],
+    allowed_url_prefixes: &[String],
+) -> GlovesError {
+    let message = match source {
+        URL_POLICY_SOURCE_CONFIG => format!(
+            "pipe command template for '{executable}' has URL arguments not allowlisted by .gloves.toml [secrets.pipe.commands.{executable}]: {}; allowed URL prefixes: {}",
+            disallowed_urls.join(", "),
+            allowed_url_prefixes.join(" | ")
+        ),
+        _ => format!(
+            "pipe command template for '{executable}' has URL arguments not allowlisted by {SECRET_PIPE_URL_POLICY_ENV_VAR}: {}; allowed URL prefixes: {}",
+            disallowed_urls.join(", "),
+            allowed_url_prefixes.join(" | ")
+        ),
+    };
+    GlovesError::InvalidInput(message)
+}
+
 fn read_secret_pipe_allowlist() -> Result<HashSet<String>> {
     match std::env::var(SECRET_PIPE_ALLOWLIST_ENV_VAR) {
         Ok(raw) => parse_secret_pipe_allowlist(&raw),
@@ -965,6 +1423,90 @@ fn read_secret_pipe_allowlist() -> Result<HashSet<String>> {
             "{SECRET_PIPE_ALLOWLIST_ENV_VAR} must be valid UTF-8"
         ))),
     }
+}
+
+fn read_secret_pipe_arg_policy() -> Result<Option<HashMap<String, Vec<Vec<String>>>>> {
+    match std::env::var(SECRET_PIPE_ARG_POLICY_ENV_VAR) {
+        Ok(raw) => parse_secret_pipe_arg_policy(&raw).map(Some),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_ARG_POLICY_ENV_VAR} must be valid UTF-8"
+        ))),
+    }
+}
+
+fn read_secret_pipe_url_policy() -> Result<Option<HashMap<String, Vec<String>>>> {
+    match std::env::var(SECRET_PIPE_URL_POLICY_ENV_VAR) {
+        Ok(raw) => parse_secret_pipe_url_policy(&raw).map(Some),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} must be valid UTF-8"
+        ))),
+    }
+}
+
+fn parse_secret_pipe_arg_policy(raw: &str) -> Result<HashMap<String, Vec<Vec<String>>>> {
+    let parsed: HashMap<String, Vec<String>> = serde_json::from_str(raw).map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_ARG_POLICY_ENV_VAR} must be valid JSON: {error}"
+        ))
+    })?;
+
+    let mut normalized_policy = HashMap::new();
+    for (command, templates) in parsed {
+        validate_pipe_command_name(&command, SECRET_PIPE_ARG_POLICY_ENV_VAR)?;
+        if templates.is_empty() {
+            return Err(GlovesError::InvalidInput(format!(
+                "{SECRET_PIPE_ARG_POLICY_ENV_VAR} command '{command}' must include at least one template"
+            )));
+        }
+
+        let mut normalized_templates = Vec::with_capacity(templates.len());
+        for template in templates {
+            validate_pipe_command_template(&template, SECRET_PIPE_ARG_POLICY_ENV_VAR)?;
+            let parsed_template =
+                parse_pipe_command_template(&template, SECRET_PIPE_ARG_POLICY_ENV_VAR)?;
+            if parsed_template[0] != command {
+                return Err(GlovesError::InvalidInput(format!(
+                    "{SECRET_PIPE_ARG_POLICY_ENV_VAR} template '{template}' must start with command '{command}'"
+                )));
+            }
+            normalized_templates.push(parsed_template);
+        }
+        normalized_policy.insert(command, normalized_templates);
+    }
+    Ok(normalized_policy)
+}
+
+fn parse_secret_pipe_url_policy(raw: &str) -> Result<HashMap<String, Vec<String>>> {
+    let parsed: HashMap<String, Vec<String>> = serde_json::from_str(raw).map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} must be valid JSON: {error}"
+        ))
+    })?;
+    if parsed.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} must include at least one command entry"
+        )));
+    }
+
+    let mut normalized_policy = HashMap::new();
+    for (command, url_prefixes) in parsed {
+        validate_pipe_command_name(&command, SECRET_PIPE_URL_POLICY_ENV_VAR)?;
+        if url_prefixes.is_empty() {
+            return Err(GlovesError::InvalidInput(format!(
+                "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' must include at least one URL prefix"
+            )));
+        }
+
+        let mut normalized_prefixes = Vec::with_capacity(url_prefixes.len());
+        for url_prefix in url_prefixes {
+            validate_pipe_url_prefix(&command, &url_prefix)?;
+            normalized_prefixes.push(url_prefix);
+        }
+        normalized_policy.insert(command, normalized_prefixes);
+    }
+    Ok(normalized_policy)
 }
 
 fn parse_secret_pipe_allowlist(raw: &str) -> Result<HashSet<String>> {
@@ -993,6 +1535,29 @@ fn validate_pipe_command_name(command: &str, source: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn validate_pipe_url_prefix(command: &str, url_prefix: &str) -> Result<()> {
+    if url_prefix.trim().is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' contains an empty URL prefix"
+        )));
+    }
+    if url_prefix.chars().any(char::is_whitespace) {
+        return Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' URL prefix '{url_prefix}' must not contain whitespace"
+        )));
+    }
+    if !is_http_url_argument(url_prefix) {
+        return Err(GlovesError::InvalidInput(format!(
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' URL prefix '{url_prefix}' must start with http:// or https://"
+        )));
+    }
+    Ok(())
+}
+
+fn is_http_url_argument(argument: &str) -> bool {
+    argument.starts_with("http://") || argument.starts_with("https://")
 }
 
 fn validate_pipe_command_template(command_template: &str, source: &str) -> Result<()> {

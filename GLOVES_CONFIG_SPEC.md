@@ -15,9 +15,10 @@ Implemented now:
 - Agent path visibility resolver API (`GlovesConfig::agent_paths`)
 - Integration test suite: `tests/config_parser.rs`
 - CLI flags: `--config`, `--no-config`, `--vault-mode`
-- CLI commands: `gloves config validate`, `gloves access paths`
+- CLI commands: `gloves config validate`, `gloves access paths`, `gloves audit`
 - Runtime wiring for effective root/defaults (`set`, `request`, `daemon`, `vault`)
 - Vault mode enforcement (`auto` / `required` / `disabled`) with dependency checks
+- Config-driven secret pipe URL policies under `[secrets.pipe.commands.<command>]`
 - CLI integration coverage for bootstrap/config/access/vault mode paths
 
 Pending from this spec:
@@ -151,6 +152,16 @@ operations = ["read", "write", "list", "request", "status"]
 [secrets.acl.agent-workflows]
 paths = ["workflows/*", "shared/webhooks/*"]
 operations = ["read", "write", "list", "request", "status", "approve", "deny"]
+
+# Optional per-command URL policy for `get --pipe-to-args`.
+# - require_url=true enforces that the template contains at least one URL argument.
+# - url_prefixes restrict URL args to approved prefixes.
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = [
+  "https://api.example.com/v1/",
+  "http://127.0.0.1:4001/carddav/"
+]
 ```
 
 Secret ACL operation mapping:
@@ -163,6 +174,13 @@ Secret ACL operation mapping:
 - `status`: `gloves status`
 - `approve`: `gloves approve`
 - `deny`: `gloves deny`
+
+Secret pipe URL policy mapping:
+
+- `[secrets.pipe.commands.<command>]`: policy entry keyed by executable name
+- `require_url`: when `true`, `--pipe-to-args` templates must include at least one `http://` or `https://` URL argument
+- `url_prefixes`: allowed URL prefixes for URL arguments in that template
+- Behavior applies to `get --pipe-to-args` only
 
 ## 7. Validation Rules
 
@@ -209,6 +227,19 @@ On non-Unix:
 - `disabled`:
   - vault commands are blocked with explicit error.
   - non-vault commands remain available.
+
+### 7.5 Secret pipe URL policy checks
+
+- Command keys under `[secrets.pipe.commands]` must be bare executable names (`[a-zA-Z0-9._+-]`).
+- Each command policy must either:
+  - set `require_url = true`, or
+  - define at least one `url_prefixes` entry.
+- `url_prefixes` entries:
+  - must be non-empty
+  - must not contain whitespace
+  - must start with `http://` or `https://`
+  - must not contain duplicates
+- At runtime, if config defines a policy for a command, that policy is applied before env URL policy fallback.
 
 ## 8. Effective Config and Overrides
 

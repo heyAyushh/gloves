@@ -178,6 +178,9 @@ pub struct SecretsConfigFile {
     /// Per-agent ACL rules for secret operations.
     #[serde(default)]
     pub acl: BTreeMap<String, SecretAccessFile>,
+    /// Per-command pipe safety policies.
+    #[serde(default)]
+    pub pipe: SecretPipePoliciesFile,
 }
 
 /// Raw per-agent secret ACL from TOML.
@@ -190,6 +193,27 @@ pub struct SecretAccessFile {
     /// Allowed secret operations.
     #[serde(default)]
     pub operations: Vec<SecretAclOperation>,
+}
+
+/// Raw per-command pipe policy set from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretPipePoliciesFile {
+    /// Command policy entries keyed by executable name.
+    #[serde(default)]
+    pub commands: BTreeMap<String, SecretPipeCommandPolicyFile>,
+}
+
+/// Raw pipe policy for one command from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SecretPipeCommandPolicyFile {
+    /// Require at least one URL argument and enforce allowed URL prefixes.
+    #[serde(default)]
+    pub require_url: bool,
+    /// Allowed URL prefixes for this command.
+    #[serde(default)]
+    pub url_prefixes: Vec<String>,
 }
 
 /// Raw per-agent access policy from TOML.
@@ -253,6 +277,15 @@ pub struct SecretAccessPolicy {
     pub operations: Vec<SecretAclOperation>,
 }
 
+/// Effective pipe policy for one command.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecretPipeCommandPolicy {
+    /// Require URL enforcement for this command.
+    pub require_url: bool,
+    /// Allowed URL prefixes.
+    pub url_prefixes: Vec<String>,
+}
+
 /// Effective and validated `.gloves.toml` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlovesConfig {
@@ -272,6 +305,8 @@ pub struct GlovesConfig {
     pub agents: BTreeMap<String, AgentAccessPolicy>,
     /// Agent secret ACL policies.
     pub secret_access: BTreeMap<String, SecretAccessPolicy>,
+    /// Per-command secret pipe policies.
+    pub secret_pipe_commands: BTreeMap<String, SecretPipeCommandPolicy>,
 }
 
 /// Resolved path visibility entry for one agent.
@@ -344,6 +379,11 @@ impl GlovesConfig {
     /// Returns secret ACL policy for one agent.
     pub fn secret_access_policy(&self, agent: &AgentId) -> Option<&SecretAccessPolicy> {
         self.secret_access.get(agent.as_str())
+    }
+
+    /// Returns secret pipe policy for one executable command.
+    pub fn secret_pipe_command_policy(&self, command: &str) -> Option<&SecretPipeCommandPolicy> {
+        self.secret_pipe_commands.get(command)
     }
 }
 
@@ -483,6 +523,18 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         );
     }
 
+    let mut secret_pipe_commands = BTreeMap::new();
+    for (command, policy) in &raw.secrets.pipe.commands {
+        validate_secret_pipe_command_policy(command, policy)?;
+        secret_pipe_commands.insert(
+            command.clone(),
+            SecretPipeCommandPolicy {
+                require_url: policy.require_url,
+                url_prefixes: policy.url_prefixes.clone(),
+            },
+        );
+    }
+
     Ok(GlovesConfig {
         source_path,
         root,
@@ -492,6 +544,7 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         defaults,
         agents,
         secret_access,
+        secret_pipe_commands,
     })
 }
 
@@ -519,6 +572,9 @@ fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
     for (agent_name, policy) in &config.secrets.acl {
         AgentId::new(agent_name)?;
         validate_secret_access_policy(agent_name, policy)?;
+    }
+    for (command, policy) in &config.secrets.pipe.commands {
+        validate_secret_pipe_command_policy(command, policy)?;
     }
 
     Ok(())
@@ -697,6 +753,72 @@ fn validate_secret_access_policy(agent_name: &str, policy: &SecretAccessFile) ->
     }
 
     Ok(())
+}
+
+fn validate_secret_pipe_command_policy(
+    command: &str,
+    policy: &SecretPipeCommandPolicyFile,
+) -> Result<()> {
+    validate_pipe_command_name(command)?;
+
+    if !policy.require_url && policy.url_prefixes.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} must set require_url = true or include at least one url_prefix"
+        )));
+    }
+    if policy.require_url && policy.url_prefixes.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} requires at least one url_prefix"
+        )));
+    }
+
+    let mut unique_prefixes = BTreeSet::new();
+    for url_prefix in &policy.url_prefixes {
+        validate_pipe_url_prefix(command, url_prefix)?;
+        if !unique_prefixes.insert(url_prefix.as_str()) {
+            return Err(GlovesError::InvalidInput(format!(
+                "secrets.pipe.commands.{command} contains duplicate url_prefix '{url_prefix}'"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_pipe_command_name(command: &str) -> Result<()> {
+    if command.is_empty()
+        || !command
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._+-".contains(character))
+    {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} must be a bare executable name"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_pipe_url_prefix(command: &str, url_prefix: &str) -> Result<()> {
+    if url_prefix.trim().is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} contains an empty url_prefix"
+        )));
+    }
+    if url_prefix.chars().any(char::is_whitespace) {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} url_prefix '{url_prefix}' must not contain whitespace"
+        )));
+    }
+    if !is_http_url_prefix(url_prefix) {
+        return Err(GlovesError::InvalidInput(format!(
+            "secrets.pipe.commands.{command} url_prefix '{url_prefix}' must start with http:// or https://"
+        )));
+    }
+    Ok(())
+}
+
+fn is_http_url_prefix(url_prefix: &str) -> bool {
+    url_prefix.starts_with("http://") || url_prefix.starts_with("https://")
 }
 
 fn validate_secret_pattern(pattern: &str) -> Result<()> {

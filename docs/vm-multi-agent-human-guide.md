@@ -118,6 +118,13 @@ operations = ["read", "write", "list", "revoke", "request", "status", "approve",
 [secrets.acl.human-security]
 paths = ["*"]
 operations = ["read", "write", "list", "revoke", "request", "status", "approve", "deny"]
+
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = [
+  "https://api.example.com/v1/",
+  "http://internal.example.local/health"
+]
 ```
 
 Validate:
@@ -323,9 +330,48 @@ gloves --config /etc/gloves/prod.gloves.toml \
 Security guards for `--pipe-to-args`:
 
 - Command executable must be allowlisted in `GLOVES_GET_PIPE_ALLOWLIST`.
+- Optional `GLOVES_GET_PIPE_ARG_POLICY` can lock commands to exact approved templates.
+- Optional config URL policy under `[secrets.pipe.commands.<command>]` can lock commands to approved URL prefixes while allowing payload variation.
+- Optional `GLOVES_GET_PIPE_URL_POLICY` remains available as env fallback when config has no command policy.
 - Template must include `{secret}` placeholder and may not place it in the executable position.
 - Secret must be UTF-8 and must not contain control characters (use `--pipe-to` for raw byte-safe flows).
 - Interpolated argument buffers are zeroized in-process after command execution.
+
+Example sub-allowlist policy for `curl`:
+
+```bash
+export GLOVES_GET_PIPE_ARG_POLICY='{
+  "curl": [
+    "curl -u ayush:{secret} http://internal.example.local/health"
+  ]
+}'
+```
+
+With this set, a `curl` invocation using different flags/URL is blocked even if `curl` is in `GLOVES_GET_PIPE_ALLOWLIST`.
+
+Example URL-prefix policy for dynamic payloads in config (recommended):
+
+```toml
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = [
+  "https://api.example.com/v1/",
+  "http://internal.example.local/health"
+]
+```
+
+Env fallback (same behavior) is still available:
+
+```bash
+export GLOVES_GET_PIPE_URL_POLICY='{
+  "curl": [
+    "https://api.example.com/v1/",
+    "http://internal.example.local/health"
+  ]
+}'
+```
+
+With this set, same-URL requests with different payload arguments are allowed, but off-policy URLs are denied.
 
 ### Use case 5: Sidecar daemon for orchestrated runtimes
 
@@ -359,6 +405,7 @@ Best practice:
 - Prefer `set --stdin` or `set --generate`; avoid secrets in shell history.
 - Prefer `get --pipe-to` with vetted wrappers for non-TTY automation.
 - Use `get --pipe-to-args` only when target tools cannot read stdin and keep allowlists narrow.
+- For tools like `curl`, use `GLOVES_GET_PIPE_ARG_POLICY` for exact templates or `[secrets.pipe.commands.<command>]` for URL scoping with flexible payloads.
 - Do not persist raw `gloves get` output in logs, tickets, or agent memory summaries.
 
 ### Vault handling
@@ -377,6 +424,7 @@ Best practice:
 ### Audit and ops
 
 - Review `audit.jsonl` during incident response and change windows.
+- Use `gloves audit --limit 100` for a readable event stream, or `gloves audit --json` for automation.
 - Treat `approve`/`deny` as change-controlled operations for high-impact secrets.
 - Require reason strings in request workflows with ticket/change IDs.
 

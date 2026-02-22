@@ -19,17 +19,79 @@ Security controls:
 
 - The executable must be a bare command name (no path separators).
 - The executable must be allowlisted in `GLOVES_GET_PIPE_ALLOWLIST`.
+- Optional sub-policy `GLOVES_GET_PIPE_ARG_POLICY` can enforce exact approved `--pipe-to-args` templates per executable.
+- Optional config policy `[secrets.pipe.commands.<command>]` can enforce approved URL prefixes per executable.
+- Optional env fallback `GLOVES_GET_PIPE_URL_POLICY` can enforce approved URL prefixes when config has no command entry.
 - `--pipe-to` and `--pipe-to-args` are mutually exclusive.
 - `--pipe-to-args` template must include `{secret}` and cannot place `{secret}` as the executable.
 - `--pipe-to-args` only accepts UTF-8 secrets.
 - `--pipe-to-args` rejects control characters in secrets. Use `--pipe-to` for raw byte-safe forwarding.
 - Secret bytes and interpolated argument buffers are zeroized in-process after use.
 
+`GLOVES_GET_PIPE_ARG_POLICY` format:
+
+```json
+{
+  "curl": [
+    "curl -u ayush:{secret} http://127.0.0.1:4001/carddav/principal/ayush/"
+  ],
+  "print-arg": [
+    "print-arg prefix:{secret}:suffix"
+  ]
+}
+```
+
+Policy behavior:
+
+- Applies to `--pipe-to-args` only.
+- Requires an exact template match after shell-style parsing/normalization.
+- If policy is set and a command has no entry, execution is denied.
+
+Config URL policy format (`.gloves.toml`):
+
+```toml
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/"]
+
+[secrets.pipe.commands.applecli]
+require_url = true
+url_prefixes = ["https://internal.example.local/"]
+```
+
+Config URL policy behavior:
+
+- Applies to `--pipe-to-args` only.
+- Works for any configured executable name.
+- Enforces URL arguments (http/https) to start with an approved prefix.
+- `require_url = true` denies templates that do not include any URL argument.
+- For commands with config entries, config policy takes precedence over env URL policy.
+
+`GLOVES_GET_PIPE_URL_POLICY` format (env fallback):
+
+```json
+{
+  "curl": [
+    "https://api.example.com/v1/",
+    "http://127.0.0.1:4001/carddav/"
+  ]
+}
+```
+
+URL policy behavior:
+
+- Applies to `--pipe-to-args` only.
+- Enforces URL arguments (http/https) to start with an approved prefix.
+- Allows payload/flag variation while keeping URL scope restricted.
+- If a command has URL policy entries, templates without URL arguments are denied.
+
 Operational guidance:
 
 - Prefer `--pipe-to` for highest safety.
 - Use `--pipe-to-args` only when downstream tools cannot read from stdin.
 - Keep `GLOVES_GET_PIPE_ALLOWLIST` minimal and explicit.
+- For networked binaries (for example `curl`), set `GLOVES_GET_PIPE_ARG_POLICY` or config URL policy under `[secrets.pipe.commands.<command>]` instead of relying on executable-only allowlists.
+- Prefer `GLOVES_GET_PIPE_ARG_POLICY` for maximal control; use URL-prefix policy when exact-template policy is too strict for dynamic payloads.
 
 ## 2) Vault execution controls (`vault exec`)
 
@@ -74,6 +136,8 @@ Policy behavior:
 
 - Keep daemon on loopback only (`127.0.0.1`).
 - Do not log raw secret values or persist them in memory summaries.
+- CLI and daemon actions emit `command_executed` audit events (actor, interface, action, optional target).
+- Use `gloves audit --limit <n>` for readable output and `gloves audit --json` for automation/reporting.
 - Keep secrets root permissions private to the service account.
 - Run `gloves verify` on a schedule.
 

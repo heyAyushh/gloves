@@ -4,7 +4,17 @@
 
 ### Minor Changes
 
-- No unreleased changes yet.
+- Added config-managed URL policy for `gloves get --pipe-to-args` under `[secrets.pipe.commands.<command>]`, including `require_url` enforcement and per-command URL prefixes.
+- Added `gloves audit` command (`--limit`, `--json`) for direct audit log inspection.
+- Added `command_executed` audit events for both CLI and daemon actions, including interface and optional target metadata.
+
+### Patch Changes
+
+- Added strict validation for `[secrets.pipe.commands.*]` config entries (bare command names, valid URL prefixes, duplicate checks, and non-empty policy requirements).
+- Kept `GLOVES_GET_PIPE_URL_POLICY` as compatibility fallback when config does not define a command URL policy.
+- Expanded regression coverage for config URL policy behavior across arbitrary commands, URL mismatch rejection, and require-URL enforcement.
+- Expanded audit regression coverage for command event serialization and CLI/daemon logging paths.
+- Updated operator docs (`README`, security hardening guide, VM multi-agent guide, config spec) with the new URL policy model and audit usage.
 
 ## 0.5.0
 

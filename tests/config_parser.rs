@@ -560,6 +560,77 @@ operations = ["read", "read"]
     assert!(matches!(error, GlovesError::InvalidInput(_)));
 }
 
+#[test]
+fn config_secret_pipe_command_policy_parses() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/", "http://127.0.0.1:4001/carddav/"]
+"#;
+
+    let config = GlovesConfig::parse_from_str(raw, &source).unwrap();
+    let policy = config.secret_pipe_command_policy("curl").unwrap();
+    assert!(policy.require_url);
+    assert_eq!(
+        policy.url_prefixes,
+        vec![
+            "https://api.example.com/v1/".to_owned(),
+            "http://127.0.0.1:4001/carddav/".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn config_secret_pipe_command_policy_rejects_missing_prefixes_with_require_url() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.pipe.commands.curl]
+require_url = true
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
+#[test]
+fn config_secret_pipe_command_policy_rejects_invalid_command_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.pipe.commands."curl/bin"]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
+#[test]
+fn config_secret_pipe_command_policy_rejects_invalid_url_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["ftp://api.example.com/v1/"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
 #[cfg(unix)]
 #[test]
 fn config_load_rejects_symlink() {

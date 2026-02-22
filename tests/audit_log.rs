@@ -105,6 +105,12 @@ fn all_events_serialize() {
             agent: AgentId::new("agent-c").unwrap(),
             fingerprint: "ABCDEF0123456789".to_owned(),
         },
+        AuditEvent::CommandExecuted {
+            by: AgentId::new("agent-z").unwrap(),
+            interface: "cli".to_owned(),
+            command: "list".to_owned(),
+            target: Some("pending".to_owned()),
+        },
     ];
 
     for event in events {

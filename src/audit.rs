@@ -126,6 +126,17 @@ pub enum AuditEvent {
         /// Primary key fingerprint.
         fingerprint: String,
     },
+    /// One CLI or daemon action completed.
+    CommandExecuted {
+        /// Agent that executed the command.
+        by: AgentId,
+        /// Invocation surface (for example: `cli`, `daemon`).
+        interface: String,
+        /// Logical action name.
+        command: String,
+        /// Optional action target (for example secret id).
+        target: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

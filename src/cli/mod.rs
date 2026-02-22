@@ -129,6 +129,15 @@ pub enum Command {
         /// Secret name.
         name: String,
     },
+    /// Views audit events.
+    Audit {
+        /// Show only the latest N events.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print JSON output instead of table lines.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verifies registry and expiry state.
     Verify,
     /// Runs local sidecar daemon.
