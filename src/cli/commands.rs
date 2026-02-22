@@ -42,6 +42,9 @@ const SECRET_PIPE_URL_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_URL_POLICY";
 const SECRET_PIPE_ALLOWLIST_SEPARATOR: char = ',';
 const SECRET_PIPE_TEMPLATE_PLACEHOLDER: &str = "{secret}";
 const SECRET_PIPE_TEMPLATE_SOURCE: &str = "--pipe-to-args";
+const SECRET_PIPE_URL_SAMPLE_TOKEN: &str = "gloves-secret";
+const URL_SCHEME_HTTP_PREFIX: &str = "http://";
+const URL_SCHEME_HTTPS_PREFIX: &str = "https://";
 const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
 const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
 const SECRET_PATTERN_SEPARATOR: char = ',';
@@ -1361,12 +1364,25 @@ fn ensure_pipe_command_template_matches_resolved_url_policy(
         return Ok(());
     }
 
+    let parsed_prefixes = allowed_url_prefixes
+        .iter()
+        .map(|prefix| parse_policy_url_prefix(prefix))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|reason| {
+            GlovesError::InvalidInput(format!(
+                "configured URL prefix for '{executable}' is invalid: {reason}"
+            ))
+        })?;
+
     let disallowed_urls = requested_urls
         .iter()
         .filter(|url| {
-            !allowed_url_prefixes
+            let Ok(parsed_url) = parse_policy_url_argument(url) else {
+                return true;
+            };
+            !parsed_prefixes
                 .iter()
-                .any(|prefix| url.starts_with(prefix))
+                .any(|prefix| policy_url_matches_prefix(&parsed_url, prefix))
         })
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
@@ -1413,6 +1429,96 @@ fn url_policy_disallowed_urls_error(
         ),
     };
     GlovesError::InvalidInput(message)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedPolicyUrl {
+    scheme: String,
+    authority: String,
+    path: String,
+}
+
+fn parse_policy_url_prefix(url_prefix: &str) -> std::result::Result<ParsedPolicyUrl, String> {
+    parse_policy_url(url_prefix, false)
+}
+
+fn parse_policy_url_argument(argument: &str) -> std::result::Result<ParsedPolicyUrl, String> {
+    let normalized_argument = argument.replace(
+        SECRET_PIPE_TEMPLATE_PLACEHOLDER,
+        SECRET_PIPE_URL_SAMPLE_TOKEN,
+    );
+    parse_policy_url(&normalized_argument, true)
+}
+
+fn parse_policy_url(
+    url_literal: &str,
+    allow_query_or_fragment: bool,
+) -> std::result::Result<ParsedPolicyUrl, String> {
+    let (scheme, remainder) = if let Some(rest) = url_literal.strip_prefix(URL_SCHEME_HTTP_PREFIX) {
+        ("http", rest)
+    } else if let Some(rest) = url_literal.strip_prefix(URL_SCHEME_HTTPS_PREFIX) {
+        ("https", rest)
+    } else {
+        return Err("must start with http:// or https://".to_owned());
+    };
+
+    if remainder.is_empty() {
+        return Err("must include an authority after scheme".to_owned());
+    }
+
+    let delimiter_index = remainder
+        .find(|character: char| ['/', '?', '#'].contains(&character))
+        .unwrap_or(remainder.len());
+    let authority = &remainder[..delimiter_index];
+    if authority.is_empty() {
+        return Err("must include an authority after scheme".to_owned());
+    }
+    if authority.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace in authority".to_owned());
+    }
+
+    let suffix = &remainder[delimiter_index..];
+    if !allow_query_or_fragment
+        && suffix
+            .chars()
+            .any(|character| character == '?' || character == '#')
+    {
+        return Err("must not include query or fragment components".to_owned());
+    }
+
+    let path = if suffix.is_empty() {
+        "/".to_owned()
+    } else if suffix.starts_with('/') {
+        let path_end = suffix
+            .find(|character: char| ['?', '#'].contains(&character))
+            .unwrap_or(suffix.len());
+        suffix[..path_end].to_owned()
+    } else {
+        "/".to_owned()
+    };
+
+    Ok(ParsedPolicyUrl {
+        scheme: scheme.to_owned(),
+        authority: authority.to_ascii_lowercase(),
+        path,
+    })
+}
+
+fn policy_url_matches_prefix(url: &ParsedPolicyUrl, prefix: &ParsedPolicyUrl) -> bool {
+    if url.scheme != prefix.scheme || url.authority != prefix.authority {
+        return false;
+    }
+    policy_path_matches_prefix(&url.path, &prefix.path)
+}
+
+fn policy_path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if path == prefix {
+        return true;
+    }
+    if prefix.ends_with('/') {
+        return path.starts_with(prefix);
+    }
+    path.starts_with(prefix) && path.as_bytes().get(prefix.len()) == Some(&b'/')
 }
 
 fn read_secret_pipe_allowlist() -> Result<HashSet<String>> {
@@ -1543,21 +1649,16 @@ fn validate_pipe_url_prefix(command: &str, url_prefix: &str) -> Result<()> {
             "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' contains an empty URL prefix"
         )));
     }
-    if url_prefix.chars().any(char::is_whitespace) {
+    if let Err(reason) = parse_policy_url_prefix(url_prefix) {
         return Err(GlovesError::InvalidInput(format!(
-            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' URL prefix '{url_prefix}' must not contain whitespace"
-        )));
-    }
-    if !is_http_url_argument(url_prefix) {
-        return Err(GlovesError::InvalidInput(format!(
-            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' URL prefix '{url_prefix}' must start with http:// or https://"
+            "{SECRET_PIPE_URL_POLICY_ENV_VAR} command '{command}' URL prefix '{url_prefix}' {reason}"
         )));
     }
     Ok(())
 }
 
 fn is_http_url_argument(argument: &str) -> bool {
-    argument.starts_with("http://") || argument.starts_with("https://")
+    argument.starts_with(URL_SCHEME_HTTP_PREFIX) || argument.starts_with(URL_SCHEME_HTTPS_PREFIX)
 }
 
 fn validate_pipe_command_template(command_template: &str, source: &str) -> Result<()> {

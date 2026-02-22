@@ -631,6 +631,22 @@ url_prefixes = ["ftp://api.example.com/v1/"]
     assert!(matches!(error, GlovesError::InvalidInput(_)));
 }
 
+#[test]
+fn config_secret_pipe_command_policy_rejects_query_or_fragment_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 1
+
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/?token=abc"]
+"#;
+
+    let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
+    assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
 #[cfg(unix)]
 #[test]
 fn config_load_rejects_symlink() {

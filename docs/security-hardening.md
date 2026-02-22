@@ -63,7 +63,10 @@ Config URL policy behavior:
 
 - Applies to `--pipe-to-args` only.
 - Works for any configured executable name.
-- Enforces URL arguments (http/https) to start with an approved prefix.
+- Enforces URL arguments (http/https) with strict scheme + authority + path-segment prefix checks.
+- Prevents host-boundary bypasses (for example `https://api.example.com.evil/...` does not match `https://api.example.com`).
+- Prevents path-prefix confusion (`/v1` does not match `/v10`).
+- URL prefixes must not include query (`?`) or fragment (`#`) components.
 - `require_url = true` denies templates that do not include any URL argument.
 - For commands with config entries, config policy takes precedence over env URL policy.
 
@@ -81,8 +84,9 @@ Config URL policy behavior:
 URL policy behavior:
 
 - Applies to `--pipe-to-args` only.
-- Enforces URL arguments (http/https) to start with an approved prefix.
+- Enforces URL arguments with strict scheme + authority + path-segment prefix checks.
 - Allows payload/flag variation while keeping URL scope restricted.
+- URL prefixes with query/fragment components are rejected.
 - If a command has URL policy entries, templates without URL arguments are denied.
 
 Operational guidance:

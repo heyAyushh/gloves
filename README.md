@@ -303,6 +303,8 @@ When a command has a config policy entry:
 - URL args in `--pipe-to-args` must match one allowed prefix.
 - `require_url = true` requires at least one URL argument in the template.
 - The rule applies to any configured executable name, not only `curl`/`wget`.
+- Prefix matching is strict by scheme + authority + path-segment boundary (for example `/v1` does not match `/v10`).
+- Prefixes must not include query (`?`) or fragment (`#`) components.
 
 Security notes:
 

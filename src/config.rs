@@ -24,6 +24,8 @@ const DEFAULT_SECRET_TTL_DAYS: i64 = 1;
 const DEFAULT_VAULT_MOUNT_TTL: &str = "1h";
 const DEFAULT_VAULT_SECRET_TTL_DAYS: i64 = 365;
 const DEFAULT_VAULT_SECRET_LENGTH_BYTES: usize = 64;
+const URL_SCHEME_HTTP_PREFIX: &str = "http://";
+const URL_SCHEME_HTTPS_PREFIX: &str = "https://";
 
 /// Default bootstrap config file name.
 pub const CONFIG_FILE_NAME: &str = ".gloves.toml";
@@ -804,21 +806,45 @@ fn validate_pipe_url_prefix(command: &str, url_prefix: &str) -> Result<()> {
             "secrets.pipe.commands.{command} contains an empty url_prefix"
         )));
     }
-    if url_prefix.chars().any(char::is_whitespace) {
+    if let Err(reason) = parse_policy_url_prefix(url_prefix) {
         return Err(GlovesError::InvalidInput(format!(
-            "secrets.pipe.commands.{command} url_prefix '{url_prefix}' must not contain whitespace"
-        )));
-    }
-    if !is_http_url_prefix(url_prefix) {
-        return Err(GlovesError::InvalidInput(format!(
-            "secrets.pipe.commands.{command} url_prefix '{url_prefix}' must start with http:// or https://"
+            "secrets.pipe.commands.{command} url_prefix '{url_prefix}' {reason}"
         )));
     }
     Ok(())
 }
 
-fn is_http_url_prefix(url_prefix: &str) -> bool {
-    url_prefix.starts_with("http://") || url_prefix.starts_with("https://")
+fn parse_policy_url_prefix(url_prefix: &str) -> std::result::Result<(), String> {
+    let remainder = if let Some(rest) = url_prefix.strip_prefix(URL_SCHEME_HTTP_PREFIX) {
+        rest
+    } else if let Some(rest) = url_prefix.strip_prefix(URL_SCHEME_HTTPS_PREFIX) {
+        rest
+    } else {
+        return Err("must start with http:// or https://".to_owned());
+    };
+    if remainder.is_empty() {
+        return Err("must include an authority after scheme".to_owned());
+    }
+
+    let delimiter_index = remainder
+        .find(|character: char| ['/', '?', '#'].contains(&character))
+        .unwrap_or(remainder.len());
+    let authority = &remainder[..delimiter_index];
+    if authority.is_empty() {
+        return Err("must include an authority after scheme".to_owned());
+    }
+    if authority.chars().any(char::is_whitespace) {
+        return Err("must not contain whitespace in authority".to_owned());
+    }
+
+    let suffix = &remainder[delimiter_index..];
+    if suffix
+        .chars()
+        .any(|character| character == '?' || character == '#')
+    {
+        return Err("must not include query or fragment components".to_owned());
+    }
+    Ok(())
 }
 
 fn validate_secret_pattern(pattern: &str) -> Result<()> {

@@ -236,10 +236,14 @@ On non-Unix:
   - define at least one `url_prefixes` entry.
 - `url_prefixes` entries:
   - must be non-empty
-  - must not contain whitespace
+  - must include an authority and must not contain whitespace in authority
   - must start with `http://` or `https://`
+  - must not include query (`?`) or fragment (`#`) components
   - must not contain duplicates
 - At runtime, if config defines a policy for a command, that policy is applied before env URL policy fallback.
+- Runtime matching is strict by scheme + authority + path-segment prefix.
+  - `https://api.example.com` does not match `https://api.example.com.evil/...`
+  - `/v1` does not match `/v10`
 
 ## 8. Effective Config and Overrides
 

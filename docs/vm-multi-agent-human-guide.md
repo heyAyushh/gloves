@@ -373,6 +373,13 @@ export GLOVES_GET_PIPE_URL_POLICY='{
 
 With this set, same-URL requests with different payload arguments are allowed, but off-policy URLs are denied.
 
+Matching details:
+
+- URL policy matches on scheme + authority + path-segment boundary.
+- `https://api.example.com` does not match `https://api.example.com.evil/...`.
+- `https://api.example.com/v1` does not match `/v10/...`.
+- URL prefixes containing `?` or `#` are rejected.
+
 ### Use case 5: Sidecar daemon for orchestrated runtimes
 
 Preflight:
