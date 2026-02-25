@@ -29,6 +29,8 @@ const URL_SCHEME_HTTPS_PREFIX: &str = "https://";
 
 /// Default bootstrap config file name.
 pub const CONFIG_FILE_NAME: &str = ".gloves.toml";
+/// Supported bootstrap config schema version.
+pub const CONFIG_SCHEMA_VERSION: u32 = CONFIG_VERSION_V1;
 
 /// Source used to select the effective config file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

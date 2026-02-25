@@ -30,6 +30,12 @@ fn secrets_paths_layout() {
         .default_identity_file()
         .ends_with("default-agent.agekey"));
     assert!(paths
+        .identity_file_for_agent("agent-main")
+        .ends_with("agent-main.agekey"));
+    assert!(paths
         .default_signing_key_file()
         .ends_with("default-agent.signing.key"));
+    assert!(paths
+        .signing_key_file_for_agent("agent-main")
+        .ends_with("agent-main.signing.key"));
 }

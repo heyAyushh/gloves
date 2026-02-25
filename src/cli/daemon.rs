@@ -27,6 +27,7 @@ use super::{
 };
 
 const DAEMON_ACTION_INTERFACE: &str = "daemon";
+const DAEMON_TOKEN_ENV_VAR: &str = "GLOVES_DAEMON_TOKEN";
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -60,6 +61,13 @@ enum DaemonRequest {
     Deny {
         request_id: String,
     },
+}
+
+#[derive(Debug)]
+struct DaemonEnvelope {
+    agent: Option<String>,
+    token: Option<String>,
+    request: DaemonRequest,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -216,11 +224,11 @@ where
     S: Read + Write,
 {
     let request = read_daemon_request(stream, request_limit_bytes)?;
-    let response = execute_daemon_request(paths, request);
+    let response = execute_daemon_envelope_request(paths, request);
     write_daemon_response(stream, &response)
 }
 
-fn read_daemon_request<R>(stream: &mut R, request_limit_bytes: usize) -> Result<DaemonRequest>
+fn read_daemon_request<R>(stream: &mut R, request_limit_bytes: usize) -> Result<DaemonEnvelope>
 where
     R: Read,
 {
@@ -245,8 +253,34 @@ where
         return Err(GlovesError::InvalidInput("empty daemon request".to_owned()));
     }
 
-    serde_json::from_slice::<DaemonRequest>(&bytes)
-        .map_err(|error| GlovesError::InvalidInput(format!("invalid daemon request: {error}")))
+    let mut payload = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|error| GlovesError::InvalidInput(format!("invalid daemon request: {error}")))?;
+    let object = payload.as_object_mut().ok_or_else(|| {
+        GlovesError::InvalidInput("invalid daemon request: expected JSON object".to_owned())
+    })?;
+
+    let agent = parse_daemon_optional_string_field(object.remove("agent"), "agent")?;
+    let token = parse_daemon_optional_string_field(object.remove("token"), "token")?;
+    let request = serde_json::from_value::<DaemonRequest>(payload)
+        .map_err(|error| GlovesError::InvalidInput(format!("invalid daemon request: {error}")))?;
+    Ok(DaemonEnvelope {
+        agent,
+        token,
+        request,
+    })
+}
+
+fn parse_daemon_optional_string_field(
+    value: Option<serde_json::Value>,
+    field_name: &str,
+) -> Result<Option<String>> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(GlovesError::InvalidInput(format!(
+            "invalid daemon request: `{field_name}` must be a string"
+        ))),
+    }
 }
 
 fn write_daemon_response<W>(stream: &mut W, response: &DaemonResponse) -> Result<()>
@@ -260,8 +294,21 @@ where
     Ok(())
 }
 
+#[cfg(test)]
 fn execute_daemon_request(paths: &SecretsPaths, request: DaemonRequest) -> DaemonResponse {
-    match execute_daemon_request_inner(paths, request) {
+    let envelope = DaemonEnvelope {
+        agent: None,
+        token: None,
+        request,
+    };
+    execute_daemon_envelope_request(paths, envelope)
+}
+
+fn execute_daemon_envelope_request(
+    paths: &SecretsPaths,
+    request: DaemonEnvelope,
+) -> DaemonResponse {
+    match execute_daemon_envelope_inner(paths, request) {
         Ok((message, data)) => DaemonResponse::Ok { message, data },
         Err(error) => DaemonResponse::Error {
             error: error.to_string(),
@@ -269,36 +316,93 @@ fn execute_daemon_request(paths: &SecretsPaths, request: DaemonRequest) -> Daemo
     }
 }
 
-fn log_daemon_command_executed(paths: &SecretsPaths, command: &str, target: Option<String>) {
+fn log_daemon_command_executed(
+    paths: &SecretsPaths,
+    actor: &AgentId,
+    command: &str,
+    target: Option<String>,
+) {
     let audit_log = match AuditLog::new(paths.audit_file()) {
         Ok(log) => log,
         Err(_) => return,
     };
-    let actor = match AgentId::new(DEFAULT_AGENT_ID) {
-        Ok(agent_id) => agent_id,
-        Err(_) => return,
-    };
     let _ = audit_log.log(AuditEvent::CommandExecuted {
-        by: actor,
+        by: actor.clone(),
         interface: DAEMON_ACTION_INTERFACE.to_owned(),
         command: command.to_owned(),
         target,
     });
 }
 
+fn required_daemon_token_from_env() -> Result<Option<String>> {
+    match std::env::var(DAEMON_TOKEN_ENV_VAR) {
+        Ok(token) if token.trim().is_empty() => Err(GlovesError::InvalidInput(format!(
+            "{DAEMON_TOKEN_ENV_VAR} must not be empty when set"
+        ))),
+        Ok(token) => Ok(Some(token)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(GlovesError::InvalidInput(format!(
+            "{DAEMON_TOKEN_ENV_VAR} must be valid UTF-8"
+        ))),
+    }
+}
+
+fn resolve_daemon_actor(requested_agent: Option<&str>) -> Result<AgentId> {
+    match requested_agent {
+        Some(agent) if agent.trim().is_empty() => Err(GlovesError::InvalidInput(
+            "daemon agent must not be empty".to_owned(),
+        )),
+        Some(agent) => Ok(AgentId::new(agent.trim())?),
+        None => Ok(AgentId::new(DEFAULT_AGENT_ID)?),
+    }
+}
+
+fn validate_daemon_token(requested_token: Option<&str>) -> Result<()> {
+    let required_token = required_daemon_token_from_env()?;
+    if let Some(required_token) = required_token {
+        if requested_token != Some(required_token.as_str()) {
+            return Err(GlovesError::InvalidInput("invalid daemon token".to_owned()));
+        }
+    }
+    Ok(())
+}
+
+fn execute_daemon_envelope_inner(
+    paths: &SecretsPaths,
+    envelope: DaemonEnvelope,
+) -> Result<(String, Option<serde_json::Value>)> {
+    validate_daemon_token(envelope.token.as_deref())?;
+    let actor = resolve_daemon_actor(envelope.agent.as_deref())?;
+    execute_daemon_request_with_actor(paths, envelope.request, &actor)
+}
+
+#[cfg(test)]
 fn execute_daemon_request_inner(
     paths: &SecretsPaths,
     request: DaemonRequest,
 ) -> Result<(String, Option<serde_json::Value>)> {
+    let envelope = DaemonEnvelope {
+        agent: None,
+        token: None,
+        request,
+    };
+    execute_daemon_envelope_inner(paths, envelope)
+}
+
+fn execute_daemon_request_with_actor(
+    paths: &SecretsPaths,
+    request: DaemonRequest,
+    actor: &AgentId,
+) -> Result<(String, Option<serde_json::Value>)> {
     match request {
         DaemonRequest::Ping => {
-            log_daemon_command_executed(paths, "ping", None);
+            log_daemon_command_executed(paths, actor, "ping", None);
             Ok(("pong".to_owned(), None))
         }
         DaemonRequest::List => {
             let manager = runtime::manager_for_paths(paths)?;
             let entries = manager.list_all()?;
-            log_daemon_command_executed(paths, "list", None);
+            log_daemon_command_executed(paths, actor, "list", None);
             Ok(("ok".to_owned(), Some(serde_json::to_value(entries)?)))
         }
         DaemonRequest::Verify => {
@@ -309,7 +413,7 @@ fn execute_daemon_request_inner(
                 &manager.audit_log,
             )?;
             TtlReaper::reap_vault_sessions(&GocryptfsDriver::new(), paths, &manager.audit_log)?;
-            log_daemon_command_executed(paths, "verify", None);
+            log_daemon_command_executed(paths, actor, "verify", None);
             Ok(("ok".to_owned(), None))
         }
         DaemonRequest::Status { name } => {
@@ -320,17 +424,17 @@ fn execute_daemon_request_inner(
                 .find(|request| request.secret_name.as_str() == name)
                 .map(|request| request.status)
                 .unwrap_or(crate::types::RequestStatus::Fulfilled);
-            log_daemon_command_executed(paths, "status", Some(name));
+            log_daemon_command_executed(paths, actor, "status", Some(name));
             Ok(("ok".to_owned(), Some(serde_json::to_value(status)?)))
         }
         DaemonRequest::Get { name } => {
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
-            let caller = AgentId::new(DEFAULT_AGENT_ID)?;
-            let identity_file = runtime::load_or_create_default_identity(paths)?;
+            let caller = actor.clone();
+            let identity_file = runtime::load_or_create_identity_for_agent(paths, &caller)?;
             let secret_value = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
             let value = secret_value.expose(|bytes| String::from_utf8_lossy(bytes).to_string());
-            log_daemon_command_executed(paths, "get", Some(name));
+            log_daemon_command_executed(paths, actor, "get", Some(name));
             Ok((
                 "ok".to_owned(),
                 Some(serde_json::json!({ "secret": value })),
@@ -344,8 +448,8 @@ fn execute_daemon_request_inner(
         } => {
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
-            let creator = AgentId::new(DEFAULT_AGENT_ID)?;
-            let recipient = runtime::load_or_create_default_recipient(paths)?;
+            let creator = actor.clone();
+            let recipient = runtime::load_or_create_recipient_for_agent(paths, &creator)?;
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
             let ttl_days =
@@ -363,7 +467,7 @@ fn execute_daemon_request_inner(
                     recipient_keys: vec![recipient],
                 },
             )?;
-            log_daemon_command_executed(paths, "set", Some(secret_id.as_str().to_owned()));
+            log_daemon_command_executed(paths, actor, "set", Some(secret_id.as_str().to_owned()));
             Ok((
                 "ok".to_owned(),
                 Some(serde_json::json!({ "id": secret_id.as_str() })),
@@ -372,16 +476,16 @@ fn execute_daemon_request_inner(
         DaemonRequest::Revoke { name } => {
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
-            let caller = AgentId::new(DEFAULT_AGENT_ID)?;
+            let caller = actor.clone();
             manager.revoke(&secret_id, &caller)?;
-            log_daemon_command_executed(paths, "revoke", Some(name));
+            log_daemon_command_executed(paths, actor, "revoke", Some(name));
             Ok(("revoked".to_owned(), None))
         }
         DaemonRequest::Request { name, reason } => {
             let manager = runtime::manager_for_paths(paths)?;
             let secret_id = SecretId::new(&name)?;
-            let requester = AgentId::new(DEFAULT_AGENT_ID)?;
-            let signing_key = runtime::load_or_create_default_signing_key(paths)?;
+            let requester = actor.clone();
+            let signing_key = runtime::load_or_create_signing_key_for_agent(paths, &requester)?;
             let request = manager.request(
                 secret_id,
                 requester,
@@ -389,7 +493,7 @@ fn execute_daemon_request_inner(
                 Duration::days(DEFAULT_TTL_DAYS),
                 &signing_key,
             )?;
-            log_daemon_command_executed(paths, "request", Some(name));
+            log_daemon_command_executed(paths, actor, "request", Some(name));
             Ok((
                 "pending".to_owned(),
                 Some(serde_json::json!({ "request_id": request.id })),
@@ -398,9 +502,9 @@ fn execute_daemon_request_inner(
         DaemonRequest::Approve { request_id } => {
             let manager = runtime::manager_for_paths(paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
+            let reviewer = actor.clone();
             let request = manager.approve_request(request_id, reviewer)?;
-            log_daemon_command_executed(paths, "approve", Some(request_id.to_string()));
+            log_daemon_command_executed(paths, actor, "approve", Some(request_id.to_string()));
             Ok((
                 "approved".to_owned(),
                 Some(serde_json::json!({
@@ -422,9 +526,9 @@ fn execute_daemon_request_inner(
         DaemonRequest::Deny { request_id } => {
             let manager = runtime::manager_for_paths(paths)?;
             let request_id = runtime::parse_request_uuid(&request_id)?;
-            let reviewer = AgentId::new(DEFAULT_AGENT_ID)?;
+            let reviewer = actor.clone();
             let request = manager.deny_request(request_id, reviewer)?;
-            log_daemon_command_executed(paths, "deny", Some(request_id.to_string()));
+            log_daemon_command_executed(paths, actor, "deny", Some(request_id.to_string()));
             Ok((
                 "denied".to_owned(),
                 Some(serde_json::json!({
@@ -509,7 +613,18 @@ mod tests {
 
         let mut valid: &[u8] = br#"{"action":"ping"}"#;
         let request = read_daemon_request(&mut valid, 64).expect("request");
-        assert!(matches!(request, DaemonRequest::Ping));
+        assert!(matches!(request.request, DaemonRequest::Ping));
+        assert!(request.agent.is_none());
+        assert!(request.token.is_none());
+    }
+
+    #[test]
+    fn read_daemon_request_accepts_agent_and_token_fields() {
+        let mut valid: &[u8] = br#"{"action":"ping","agent":"agent-a","token":"abc"}"#;
+        let request = read_daemon_request(&mut valid, 128).expect("request");
+        assert!(matches!(request.request, DaemonRequest::Ping));
+        assert_eq!(request.agent.as_deref(), Some("agent-a"));
+        assert_eq!(request.token.as_deref(), Some("abc"));
     }
 
     #[test]
@@ -672,9 +787,55 @@ mod tests {
 
         match response {
             DaemonResponse::Error { error } => {
-                assert!(error.contains("invalid character"));
+                assert!(error.contains("invalid request id `not-a-uuid`"));
+                assert!(error.contains("gloves list --pending"));
             }
             DaemonResponse::Ok { .. } => panic!("expected error response"),
         }
+    }
+
+    #[test]
+    fn execute_daemon_request_inner_honors_actor_override() {
+        let (_temp_dir, paths) = setup_paths();
+        let actor_main = AgentId::new("agent-main").expect("actor");
+        let actor_other = AgentId::new("agent-other").expect("actor");
+
+        let (message, data) = execute_daemon_request_with_actor(
+            &paths,
+            DaemonRequest::Set {
+                name: "alpha".to_owned(),
+                generate: false,
+                value: Some("secret-value".to_owned()),
+                ttl_days: None,
+            },
+            &actor_main,
+        )
+        .expect("set");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data)["id"], "alpha");
+
+        let error = execute_daemon_request_with_actor(
+            &paths,
+            DaemonRequest::Get {
+                name: "alpha".to_owned(),
+            },
+            &actor_other,
+        )
+        .expect_err("other agent should not decrypt");
+        assert!(matches!(
+            error,
+            GlovesError::Unauthorized | GlovesError::Crypto(_)
+        ));
+
+        let (message, data) = execute_daemon_request_with_actor(
+            &paths,
+            DaemonRequest::Get {
+                name: "alpha".to_owned(),
+            },
+            &actor_main,
+        )
+        .expect("main get");
+        assert_eq!(message, "ok");
+        assert_eq!(expect_data(data)["secret"], "secret-value");
     }
 }

@@ -16,11 +16,13 @@ use std::os::unix::fs::PermissionsExt;
 
 const DAEMON_WAIT_ATTEMPTS: usize = 100;
 const DAEMON_WAIT_STEP_MILLIS: u64 = 20;
+const GRANT_MATRIX_PASS_COUNT: usize = 10;
 const GET_PIPE_ALLOWLIST_ENV_VAR: &str = "GLOVES_GET_PIPE_ALLOWLIST";
 const GET_PIPE_ARG_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_ARG_POLICY";
 const GET_PIPE_URL_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_URL_POLICY";
 const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
 const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
+const SUGGEST_AUTORUN_ENV_VAR: &str = "GLOVES_SUGGEST_AUTORUN";
 const TEST_PIPE_COMMAND: &str = "cat";
 const ACL_TEST_AGENT_MAIN: &str = "agent-main";
 const ACL_TEST_SECRET_GITHUB_TOKEN: &str = "github/token";
@@ -54,22 +56,34 @@ fn reserve_loopback_port() -> u16 {
 }
 
 fn spawn_daemon_with_retry(root: &Path, max_requests: usize) -> (std::process::Child, String) {
+    spawn_daemon_with_retry_and_env(root, max_requests, &[])
+}
+
+fn spawn_daemon_with_retry_and_env(
+    root: &Path,
+    max_requests: usize,
+    env_pairs: &[(&str, &str)],
+) -> (std::process::Child, String) {
     let binary = assert_cmd::cargo::cargo_bin!("gloves");
     let root = root.to_str().unwrap();
     let mut last_bind_error = String::new();
 
     for _ in 0..DAEMON_WAIT_ATTEMPTS {
         let bind = format!("127.0.0.1:{}", reserve_loopback_port());
-        let mut child = std::process::Command::new(binary)
-            .args([
-                "--root",
-                root,
-                "daemon",
-                "--bind",
-                &bind,
-                "--max-requests",
-                &max_requests.to_string(),
-            ])
+        let mut command = std::process::Command::new(binary);
+        command.args([
+            "--root",
+            root,
+            "daemon",
+            "--bind",
+            &bind,
+            "--max-requests",
+            &max_requests.to_string(),
+        ]);
+        for (key, value) in env_pairs {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -371,6 +385,148 @@ fn cli_init() {
 
     assert!(temp_dir.path().join("store").exists());
     assert!(temp_dir.path().join("meta").exists());
+}
+
+#[test]
+fn cli_version_flag_prints_installed_version() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .arg("--version")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.trim().starts_with("gloves "));
+    assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn cli_help_lists_tui_and_error_format_option() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("tui"));
+    assert!(stdout.contains("--error-format"));
+}
+
+#[test]
+fn cli_version_command_prints_helpful_metadata() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .arg("version")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains(&format!("gloves {}", env!("CARGO_PKG_VERSION"))));
+    assert!(stdout.contains("config schema version:"));
+    assert!(stdout.contains("default root:"));
+    assert!(stdout.contains("default agent:"));
+    assert!(stdout.contains("help: gloves --help"));
+}
+
+#[test]
+fn cli_help_tui_includes_controls() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["help", "tui"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Controls:"));
+    assert!(stdout.contains("r or F5"));
+    assert!(stdout.contains("/ : filter"));
+    assert!(stdout.contains("collapse/expand command groups"));
+    assert!(stdout.contains("? : run `gloves help`"));
+    assert!(stdout.contains("Ctrl+C: cancel active run"));
+    assert!(stdout.contains("Home or g"));
+    assert!(stdout.contains("End or G"));
+    assert!(stdout.contains("live streaming output"));
+}
+
+#[test]
+fn cli_help_grant_includes_usage_examples() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["help", "grant"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("gloves grant service/token --to agent-b"));
+    assert!(stdout.contains("original creator of the secret"));
+}
+
+#[test]
+fn cli_error_format_json_reports_runtime_error_shape() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--error-format",
+            "json",
+            "approve",
+            "requests",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(payload["kind"], "runtime_error");
+    assert_eq!(payload["code"], "E102");
+    assert!(payload["message"].as_str().unwrap().contains("label"));
+    assert_eq!(payload["explain"], "gloves explain E102");
+}
+
+#[test]
+fn cli_error_format_json_reports_parse_error_shape() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--error-format", "json", "aproov"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(payload["kind"], "parse_error");
+    assert_eq!(payload["code"], "E001");
+    assert_eq!(payload["suggestion"]["unknown"], "aproov");
+    assert_eq!(payload["suggestion"]["suggested"], "approve");
+}
+
+#[test]
+fn cli_autorun_suggestion_executes_safe_command_when_enabled() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(SUGGEST_AUTORUN_ENV_VAR, "1")
+        .args(["versoin"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stdout.contains(&format!("gloves {}", env!("CARGO_PKG_VERSION"))));
+    assert!(stderr.contains("auto-run: executing corrected command"));
+}
+
+#[test]
+fn cli_autorun_suggestion_blocks_risky_command_by_default() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(SUGGEST_AUTORUN_ENV_VAR, "1")
+        .args(["sett"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("blocked because the command can mutate state"));
+}
+
+#[test]
+fn cli_version_command_json_is_machine_readable() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["version", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["name"], "gloves");
+    assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(payload["default_root"], ".openclaw/secrets");
+    assert_eq!(payload["default_agent"], "default-agent");
+    assert!(payload["config_schema_version"].is_u64());
 }
 
 #[test]
@@ -688,12 +844,14 @@ fn cli_gpg_create_requires_gpg_binary() {
     let empty_path = temp_dir.path().join("empty-path");
     fs::create_dir_all(&empty_path).unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", empty_path.to_str().unwrap())
         .args(["--root", root.to_str().unwrap(), "gpg", "create"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("required binary not found: gpg"));
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("required binary not found: gpg"));
+    assert!(stderr.contains("install the missing runtime binary"));
 }
 
 #[cfg(unix)]
@@ -704,7 +862,7 @@ fn cli_gpg_fingerprint_returns_not_found_when_key_is_missing() {
     let fake_bin = temp_dir.path().join("fake-bin");
     install_fake_gpg_binary(&fake_bin);
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", with_fake_path(&fake_bin))
         .args([
             "--root",
@@ -715,8 +873,10 @@ fn cli_gpg_fingerprint_returns_not_found_when_key_is_missing() {
             "fingerprint",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("not found"));
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("no GPG key found for agent `agent-main`"));
+    assert!(stderr.contains("gloves --agent agent-main gpg create"));
 }
 
 #[cfg(unix)]
@@ -830,7 +990,7 @@ fn cli_secret_acl_blocks_non_matching_set() {
         ),
     );
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--config",
             config_path.to_str().unwrap(),
@@ -844,8 +1004,10 @@ fn cli_secret_acl_blocks_non_matching_set() {
             "1",
         ])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("forbidden"));
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("forbidden"));
+    assert!(stderr.contains("gloves access paths --agent <id> --json"));
 }
 
 #[test]
@@ -1617,6 +1779,354 @@ fn cli_set_then_get_roundtrip() {
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
+}
+
+#[test]
+fn cli_grant_allows_granted_agent_to_get_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "set",
+            "x",
+            "--value",
+            "placeholder-secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-b",
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .failure();
+
+    let grant_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "grant",
+            "x",
+            "--to",
+            "agent-b",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let grant_payload: serde_json::Value = serde_json::from_slice(&grant_output).unwrap();
+    assert_eq!(grant_payload["action"], "granted");
+    assert_eq!(grant_payload["secret_name"], "x");
+    assert_eq!(grant_payload["granted_to"], "agent-b");
+    assert_eq!(grant_payload["granted_by"], "agent-main");
+    assert_eq!(grant_payload["changed"], true);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-b",
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("placeholder-secret"));
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("meta/x.json")).unwrap())
+            .unwrap();
+    let recipients = metadata["recipients"].as_array().unwrap();
+    assert!(recipients.iter().any(|value| value == "agent-main"));
+    assert!(recipients.iter().any(|value| value == "agent-b"));
+}
+
+#[test]
+fn cli_grant_requires_secret_creator_identity() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "set",
+            "x",
+            "--value",
+            "placeholder-secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root", root, "--agent", "agent-b", "grant", "x", "--to", "agent-c",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("can only be granted by its creator"));
+    assert!(stderr.contains("agent-main"));
+}
+
+#[test]
+fn cli_grant_is_idempotent_for_existing_recipient() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "set",
+            "x",
+            "--value",
+            "placeholder-secret",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "grant",
+            "x",
+            "--to",
+            "agent-b",
+        ])
+        .assert()
+        .success();
+
+    let grant_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "--agent",
+            "agent-main",
+            "grant",
+            "x",
+            "--to",
+            "agent-b",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let grant_payload: serde_json::Value = serde_json::from_slice(&grant_output).unwrap();
+    assert_eq!(grant_payload["action"], "already_granted");
+    assert_eq!(grant_payload["changed"], false);
+    assert_eq!(grant_payload["secret_name"], "x");
+    assert_eq!(grant_payload["granted_to"], "agent-b");
+
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(temp_dir.path().join("meta/x.json")).unwrap())
+            .unwrap();
+    let recipients = metadata["recipients"].as_array().unwrap();
+    assert_eq!(recipients.len(), 2);
+    assert!(recipients.iter().any(|value| value == "agent-main"));
+    assert!(recipients.iter().any(|value| value == "agent-b"));
+}
+
+#[test]
+fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
+    for pass in 0..GRANT_MATRIX_PASS_COUNT {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path().to_str().unwrap();
+        let secret_name = format!("matrix-secret-{pass}");
+        let secret_value = format!("placeholder-secret-{pass}");
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-main",
+                "set",
+                &secret_name,
+                "--value",
+                &secret_value,
+                "--ttl",
+                "1",
+            ])
+            .assert()
+            .success();
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-main",
+                "get",
+                &secret_name,
+                "--pipe-to",
+                TEST_PIPE_COMMAND,
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(&secret_value));
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-b",
+                "get",
+                &secret_name,
+                "--pipe-to",
+                TEST_PIPE_COMMAND,
+            ])
+            .assert()
+            .failure();
+
+        let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-b",
+                "grant",
+                &secret_name,
+                "--to",
+                "agent-c",
+            ])
+            .assert()
+            .failure();
+        let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+        assert!(stderr.contains("can only be granted by its creator"));
+        assert!(stderr.contains("agent-main"));
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-main",
+                "grant",
+                &secret_name,
+                "--to",
+                "agent-b",
+            ])
+            .assert()
+            .success();
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-b",
+                "get",
+                &secret_name,
+                "--pipe-to",
+                TEST_PIPE_COMMAND,
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(&secret_value));
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-main",
+                "grant",
+                &secret_name,
+                "--to",
+                "agent-c",
+            ])
+            .assert()
+            .success();
+
+        Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+            .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+            .args([
+                "--root",
+                root,
+                "--agent",
+                "agent-c",
+                "get",
+                &secret_name,
+                "--pipe-to",
+                TEST_PIPE_COMMAND,
+            ])
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(&secret_value));
+
+        assert!(temp_dir.path().join("agent-main.agekey").exists());
+        assert!(temp_dir.path().join("agent-b.agekey").exists());
+        assert!(temp_dir.path().join("agent-c.agekey").exists());
+        assert!(!temp_dir.path().join("default-agent.agekey").exists());
+
+        let metadata_path = temp_dir.path().join(format!("meta/{secret_name}.json"));
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
+        let recipients = metadata["recipients"].as_array().unwrap();
+        assert_eq!(recipients.len(), 3);
+        assert!(recipients.iter().any(|value| value == "agent-main"));
+        assert!(recipients.iter().any(|value| value == "agent-b"));
+        assert!(recipients.iter().any(|value| value == "agent-c"));
+        assert!(recipients.iter().all(|value| value != "default-agent"));
+    }
+}
+
+#[test]
+fn cli_get_missing_secret_suggests_recovery() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "get",
+            "missing",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("secret `missing` was not found"));
+    assert!(stderr.contains("gloves list"));
+    assert!(stderr.contains("gloves get <secret-name>"));
 }
 
 #[test]
@@ -2962,12 +3472,16 @@ fn cli_set_rejects_non_positive_ttl() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root = temp_dir.path().to_str().unwrap();
 
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root", root, "set", "ttl_zero", "--value", "x", "--ttl", "0",
         ])
         .assert()
         .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("--ttl must be greater than zero"));
+    assert!(stderr.contains("use a positive day count"));
+    assert!(stderr.contains("--ttl 1"));
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
@@ -2981,6 +3495,27 @@ fn cli_set_rejects_non_positive_ttl() {
         ])
         .assert()
         .failure();
+}
+
+#[test]
+fn cli_set_invalid_secret_name_includes_name_rules_hint() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "set",
+            "db pass!",
+            "--value",
+            "x",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("invalid character in name"));
+    assert!(stderr.contains("[A-Za-z0-9._/-]"));
 }
 
 #[test]
@@ -3002,9 +3537,24 @@ fn cli_get_redacted() {
 #[test]
 fn cli_get_raw_tty_warning() {
     let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "set",
+            "x",
+            "--value",
+            "placeholder",
+            "--ttl",
+            "1",
+        ])
+        .assert()
+        .success();
+
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("GLOVES_FORCE_TTY_WARNING", "1")
-        .args(["--root", temp_dir.path().to_str().unwrap(), "get", "x"])
+        .args(["--root", root, "get", "x"])
         .assert()
         .stderr(predicates::str::contains("warning"));
 }
@@ -3118,7 +3668,7 @@ fn cli_approve_request() {
 #[test]
 fn cli_approve_invalid_uuid_fails() {
     let temp_dir = tempfile::tempdir().unwrap();
-    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
@@ -3127,6 +3677,125 @@ fn cli_approve_invalid_uuid_fails() {
         ])
         .assert()
         .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("invalid request id `not-a-uuid`"));
+    assert!(stderr.contains("gloves list --pending"));
+    assert!(stderr.contains("gloves approve <request-id>"));
+}
+
+#[test]
+fn cli_approve_requests_label_explains_expected_id() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "approve",
+            "requests",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("`requests` is a label, not a request id"));
+    assert!(stderr.contains("gloves list --pending"));
+}
+
+#[test]
+fn cli_error_output_includes_error_code_and_explain_command() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "approve",
+            "requests",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("error[E102]:"));
+    assert!(stderr.contains("gloves explain E102"));
+}
+
+#[test]
+fn cli_explain_known_error_code_prints_guidance() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["explain", "E102"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("E102 invalid request identifier"));
+    assert!(stdout.contains("gloves list --pending"));
+    assert!(stdout.contains("gloves approve <request-id>"));
+}
+
+#[test]
+fn cli_explain_unknown_error_code_lists_known_codes() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["explain", "E1234"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("unknown error code `E1234`"));
+    assert!(stderr.contains("Known codes:"));
+    assert!(stderr.contains("E102"));
+}
+
+#[test]
+fn cli_requests_group_list_and_approve_flow() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "x", "--reason", "test"])
+        .assert()
+        .success();
+
+    let list_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "requests", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list_payload: serde_json::Value = serde_json::from_slice(&list_output).unwrap();
+    assert!(list_payload.is_array());
+    assert_eq!(list_payload[0]["status"], "pending");
+
+    let request_id = list_payload[0]["id"].as_str().unwrap();
+    let approve_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "requests", "approve", request_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let approve_payload: serde_json::Value = serde_json::from_slice(&approve_output).unwrap();
+    assert_eq!(approve_payload["action"], "approved");
+    assert_eq!(approve_payload["status"], "fulfilled");
+}
+
+#[test]
+fn cli_req_alias_routes_to_requests_deny() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "request", "x", "--reason", "test"])
+        .assert()
+        .success();
+    let request_id = first_pending_request_id(temp_dir.path());
+
+    let deny_output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "req", "deny", &request_id])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let deny_payload: serde_json::Value = serde_json::from_slice(&deny_output).unwrap();
+    assert_eq!(deny_payload["action"], "denied");
+    assert_eq!(deny_payload["status"], "denied");
 }
 
 #[test]
@@ -3449,6 +4118,24 @@ fn cli_revoke() {
         .success();
 
     assert!(!temp_dir.path().join("store/x.age").exists());
+}
+
+#[test]
+fn cli_revoke_missing_secret_suggests_recovery() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "revoke",
+            "missing",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("secret `missing` was not found"));
+    assert!(stderr.contains("gloves list"));
+    assert!(stderr.contains("gloves revoke <secret-name>"));
 }
 
 #[test]
@@ -4347,6 +5034,91 @@ fn cli_daemon_ping_roundtrip_over_tcp() {
     assert!(audit.contains("\"event\":\"command_executed\""));
     assert!(audit.contains("\"interface\":\"daemon\""));
     assert!(audit.contains("\"command\":\"ping\""));
+}
+
+#[test]
+fn cli_daemon_agent_override_isolated_per_agent() {
+    let _guard = daemon_test_guard();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 3);
+
+    let mut set_stream = connect_with_retry(&bind);
+    set_stream
+        .write_all(
+            br#"{"action":"set","agent":"agent-main","name":"alpha","value":"secret-value"}"#,
+        )
+        .unwrap();
+    set_stream.write_all(b"\n").unwrap();
+    let mut set_response = String::new();
+    let mut set_reader = BufReader::new(set_stream);
+    set_reader.read_line(&mut set_response).unwrap();
+    assert!(set_response.contains("\"status\":\"ok\""));
+    assert!(set_response.contains("\"id\":\"alpha\""));
+
+    let mut denied_stream = connect_with_retry(&bind);
+    denied_stream
+        .write_all(br#"{"action":"get","agent":"agent-other","name":"alpha"}"#)
+        .unwrap();
+    denied_stream.write_all(b"\n").unwrap();
+    let mut denied_response = String::new();
+    let mut denied_reader = BufReader::new(denied_stream);
+    denied_reader.read_line(&mut denied_response).unwrap();
+    assert!(denied_response.contains("\"status\":\"error\""));
+    assert!(denied_response.contains("unauthorized"));
+
+    let mut get_stream = connect_with_retry(&bind);
+    get_stream
+        .write_all(br#"{"action":"get","agent":"agent-main","name":"alpha"}"#)
+        .unwrap();
+    get_stream.write_all(b"\n").unwrap();
+    let mut get_response = String::new();
+    let mut get_reader = BufReader::new(get_stream);
+    get_reader.read_line(&mut get_response).unwrap();
+    assert!(get_response.contains("\"status\":\"ok\""));
+    assert!(get_response.contains("\"secret\":\"secret-value\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn cli_daemon_token_rejects_missing_and_accepts_valid_token() {
+    let _guard = daemon_test_guard();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (mut child, bind) = spawn_daemon_with_retry_and_env(
+        temp_dir.path(),
+        2,
+        &[("GLOVES_DAEMON_TOKEN", "test-token")],
+    );
+
+    let mut unauthorized_stream = connect_with_retry(&bind);
+    unauthorized_stream
+        .write_all(br#"{"action":"ping"}"#)
+        .unwrap();
+    unauthorized_stream.write_all(b"\n").unwrap();
+    let mut unauthorized_response = String::new();
+    let mut unauthorized_reader = BufReader::new(unauthorized_stream);
+    unauthorized_reader
+        .read_line(&mut unauthorized_response)
+        .unwrap();
+    assert!(unauthorized_response.contains("\"status\":\"error\""));
+    assert!(unauthorized_response.contains("invalid daemon token"));
+
+    let mut authorized_stream = connect_with_retry(&bind);
+    authorized_stream
+        .write_all(br#"{"action":"ping","token":"test-token"}"#)
+        .unwrap();
+    authorized_stream.write_all(b"\n").unwrap();
+    let mut authorized_response = String::new();
+    let mut authorized_reader = BufReader::new(authorized_stream);
+    authorized_reader
+        .read_line(&mut authorized_response)
+        .unwrap();
+    assert!(authorized_response.contains("\"status\":\"ok\""));
+    assert!(authorized_response.contains("\"message\":\"pong\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
 }
 
 #[test]

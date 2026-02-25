@@ -13,9 +13,9 @@ use crate::{
     audit::{AuditEvent, AuditLog},
     config::{
         discover_config, resolve_config_path, ConfigSource, GlovesConfig, PathOperation,
-        SecretAclOperation, VaultMode,
+        SecretAclOperation, VaultMode, CONFIG_SCHEMA_VERSION,
     },
-    error::{GlovesError, Result},
+    error::{explain_error_code, known_error_codes, normalize_error_code, GlovesError, Result},
     fs_secure::ensure_private_dir,
     manager::ListItem,
     paths::SecretsPaths,
@@ -25,13 +25,13 @@ use crate::{
 };
 
 use super::{
-    daemon,
+    daemon, navigator,
     output::{self, OutputStatus},
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
-    AccessCommand, Cli, Command, ConfigCommand, GpgCommand, DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND,
-    DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR,
-    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
+    AccessCommand, Cli, Command, ConfigCommand, GpgCommand, RequestsCommand, DEFAULT_AGENT_ID,
+    DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES,
+    DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
     DEFAULT_VAULT_SECRET_TTL_DAYS,
 };
 
@@ -56,6 +56,10 @@ const GPG_KEY_USAGE: &str = "default";
 const GPG_KEY_EXPIRY: &str = "never";
 const GPG_AGENT_USER_ID_PREFIX: &str = "gloves-agent-";
 const CLI_ACTION_INTERFACE: &str = "cli";
+const CLI_HELP_HINT: &str = "gloves --help";
+const CLI_COMMAND_HELP_HINT: &str = "gloves help <command>";
+const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves list --pending";
+const SECRET_LOOKUP_COMMAND: &str = "gloves list";
 
 #[derive(Debug, Clone)]
 struct EffectiveCliState {
@@ -117,6 +121,24 @@ struct RequestReviewOutput {
     denied_by: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct GrantOutput {
+    action: &'static str,
+    secret_name: String,
+    granted_to: String,
+    granted_by: String,
+    changed: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct VersionOutput {
+    name: &'static str,
+    version: &'static str,
+    config_schema_version: u32,
+    default_root: &'static str,
+    default_agent: &'static str,
+}
+
 struct GpgHomedir {
     path: PathBuf,
 }
@@ -144,6 +166,28 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
+        Command::Version { json } => {
+            log_command_executed(&state.paths, &state.default_agent_id, "version", None);
+            if let Some(code) = run_version_command(json)? {
+                return Ok(code);
+            }
+        }
+        Command::Explain { code } => {
+            let normalized_code = normalize_error_code(&code);
+            if let Some(exit_code) = run_explain_command(&code)? {
+                return Ok(exit_code);
+            }
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "explain",
+                Some(normalized_code),
+            );
+        }
+        Command::Tui => {
+            navigator::run_command_navigator()?;
+            log_command_executed(&state.paths, &state.default_agent_id, "tui", None);
+        }
         Command::Set {
             name,
             generate,
@@ -155,7 +199,7 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let secret_id = SecretId::new(&name)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::Write, Some(&secret_id))?;
             let creator = state.default_agent_id.clone();
-            let recipient = runtime::load_or_create_default_recipient(&state.paths)?;
+            let recipient = runtime::load_or_create_recipient_for_agent(&state.paths, &creator)?;
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
             let ttl_days =
@@ -185,6 +229,10 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         } => {
             let secret_id = SecretId::new(&name)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::Read, Some(&secret_id))?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
+            if !manager.metadata_store.path_for(&secret_id).exists() {
+                return Err(secret_not_found_error(secret_id.as_str(), "get"));
+            }
             let force_tty_warning = std::env::var("GLOVES_FORCE_TTY_WARNING")
                 .map(|value| value == "1")
                 .unwrap_or(false);
@@ -206,9 +254,8 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             {
                 let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
             }
-            let manager = runtime::manager_for_paths(&state.paths)?;
             let caller = state.default_agent_id.clone();
-            let identity_file = runtime::load_or_create_default_identity(&state.paths)?;
+            let identity_file = runtime::load_or_create_identity_for_agent(&state.paths, &caller)?;
             let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
             match value {
                 Ok(secret) => {
@@ -234,9 +281,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                         return Ok(code);
                     }
                 }
+                Err(GlovesError::NotFound) => {
+                    return Err(secret_not_found_error(secret_id.as_str(), "get"));
+                }
                 Err(error) => {
-                    let _ = stderr_line_ignore_broken_pipe(&format!("error: {error}"));
-                    return Ok(1);
+                    return Err(error);
                 }
             }
         }
@@ -259,7 +308,8 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 resolve_request_policy(allowlist.as_deref(), blocklist.as_deref())?;
             ensure_request_policy_allows(&secret_id, &request_policy, "request")?;
             let requester = state.default_agent_id.clone();
-            let signing_key = runtime::load_or_create_default_signing_key(&state.paths)?;
+            let signing_key =
+                runtime::load_or_create_signing_key_for_agent(&state.paths, &requester)?;
             manager.request(
                 secret_id,
                 requester,
@@ -272,69 +322,43 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
+        Command::Requests { command } => match command {
+            RequestsCommand::List => {
+                if let Some(code) = run_list_command(&state, true, "requests-list")? {
+                    return Ok(code);
+                }
+            }
+            RequestsCommand::Approve { request_id } => {
+                if let Some(code) =
+                    run_request_approve_command(&state, &request_id, "requests-approve")?
+                {
+                    return Ok(code);
+                }
+            }
+            RequestsCommand::Deny { request_id } => {
+                if let Some(code) = run_request_deny_command(&state, &request_id, "requests-deny")?
+                {
+                    return Ok(code);
+                }
+            }
+        },
         Command::Approve { request_id } => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            let request_id = runtime::parse_request_uuid(&request_id)?;
-            let pending_request = pending_request_for_id(&manager, request_id)?;
-            ensure_secret_acl_allowed(
-                &state,
-                SecretAclOperation::Approve,
-                Some(&pending_request.secret_name),
-            )?;
-            let request_policy = resolve_request_policy(None, None)?;
-            ensure_request_policy_allows(&pending_request.secret_name, &request_policy, "approve")?;
-            let approved = manager.approve_request(request_id, state.default_agent_id.clone())?;
-            let payload = request_review_output("approved", &approved);
-            log_command_executed(
-                &state.paths,
-                &state.default_agent_id,
-                "approve",
-                Some(request_id.to_string()),
-            );
-            if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
+            if let Some(code) = run_request_approve_command(&state, &request_id, "approve")? {
                 return Ok(code);
             }
         }
         Command::Deny { request_id } => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            let request_id = runtime::parse_request_uuid(&request_id)?;
-            let pending_request = pending_request_for_id(&manager, request_id)?;
-            ensure_secret_acl_allowed(
-                &state,
-                SecretAclOperation::Deny,
-                Some(&pending_request.secret_name),
-            )?;
-            let denied = manager.deny_request(request_id, state.default_agent_id.clone())?;
-            let payload = request_review_output("denied", &denied);
-            log_command_executed(
-                &state.paths,
-                &state.default_agent_id,
-                "deny",
-                Some(request_id.to_string()),
-            );
-            if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)? {
+            if let Some(code) = run_request_deny_command(&state, &request_id, "deny")? {
                 return Ok(code);
             }
         }
         Command::List { pending } => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::List, None)?;
-            let mut entries = filter_list_items_for_secret_acl(&state, manager.list_all()?)?;
-            if pending {
-                entries.retain(|entry| {
-                    matches!(
-                        entry,
-                        ListItem::Pending(request) if request.status == crate::types::RequestStatus::Pending
-                    )
-                });
+            if let Some(code) = run_list_command(&state, pending, "list")? {
+                return Ok(code);
             }
-            let list_target = if pending {
-                Some("pending".to_owned())
-            } else {
-                None
-            };
-            log_command_executed(&state.paths, &state.default_agent_id, "list", list_target);
-            if let Some(code) = stdout_line_or_exit(&serde_json::to_string_pretty(&entries)?)? {
+        }
+        Command::Grant { name, to } => {
+            if let Some(code) = run_grant_command(&state, &name, &to)? {
                 return Ok(code);
             }
         }
@@ -342,8 +366,17 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             let manager = runtime::manager_for_paths(&state.paths)?;
             let secret_id = SecretId::new(&name)?;
             ensure_secret_acl_allowed(&state, SecretAclOperation::Revoke, Some(&secret_id))?;
+            if !manager.metadata_store.path_for(&secret_id).exists() {
+                return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
+            }
             let caller = state.default_agent_id.clone();
-            manager.revoke(&secret_id, &caller)?;
+            match manager.revoke(&secret_id, &caller) {
+                Ok(()) => {}
+                Err(GlovesError::NotFound) => {
+                    return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
+                }
+                Err(error) => return Err(error),
+            }
             log_command_executed(
                 &state.paths,
                 &state.default_agent_id,
@@ -795,10 +828,11 @@ fn run_gpg_fingerprint(state: &EffectiveCliState) -> Result<Option<i32>> {
     let agent = state.default_agent_id.clone();
     let gpg_home_actual = state.paths.gpg_home(agent.as_str());
     if !gpg_home_actual.exists() {
-        return Err(GlovesError::NotFound);
+        return Err(gpg_key_not_found_error(&agent));
     }
     let gpg_home = resolve_gpg_homedir(&gpg_home_actual)?;
-    let fingerprint = read_gpg_fingerprint(gpg_home.path())?.ok_or(GlovesError::NotFound)?;
+    let fingerprint =
+        read_gpg_fingerprint(gpg_home.path())?.ok_or_else(|| gpg_key_not_found_error(&agent))?;
     let payload = GpgFingerprintOutput {
         agent: agent.as_str().to_owned(),
         fingerprint,
@@ -1046,13 +1080,233 @@ fn filter_list_items_for_secret_acl(
 fn pending_request_for_id(
     manager: &crate::manager::SecretsManager,
     request_id: uuid::Uuid,
+    action: &str,
 ) -> Result<crate::types::PendingRequest> {
     manager
         .pending_store
         .load_all()?
         .into_iter()
         .find(|request| request.id == request_id)
-        .ok_or(GlovesError::NotFound)
+        .ok_or_else(|| {
+            GlovesError::InvalidInput(format!(
+                "request id `{request_id}` was not found in pending requests\nRun `{PENDING_REQUEST_LOOKUP_COMMAND}` and retry with `gloves {action} <request-id>`"
+            ))
+        })
+}
+
+fn secret_not_found_error(secret_name: &str, action: &str) -> GlovesError {
+    GlovesError::InvalidInput(format!(
+        "secret `{secret_name}` was not found\nRun `{SECRET_LOOKUP_COMMAND}` to inspect available secrets, then retry `gloves {action} <secret-name>`"
+    ))
+}
+
+fn gpg_key_not_found_error(agent: &AgentId) -> GlovesError {
+    let agent_name = agent.as_str();
+    GlovesError::InvalidInput(format!(
+        "no GPG key found for agent `{agent_name}`\nRun `gloves --agent {agent_name} gpg create` and retry `gloves --agent {agent_name} gpg fingerprint`"
+    ))
+}
+
+fn run_list_command(
+    state: &EffectiveCliState,
+    pending_only: bool,
+    command_name: &str,
+) -> Result<Option<i32>> {
+    let manager = runtime::manager_for_paths(&state.paths)?;
+    ensure_secret_acl_allowed(state, SecretAclOperation::List, None)?;
+    let mut entries = filter_list_items_for_secret_acl(state, manager.list_all()?)?;
+    if pending_only {
+        entries.retain(|entry| {
+            matches!(
+                entry,
+                ListItem::Pending(request) if request.status == crate::types::RequestStatus::Pending
+            )
+        });
+    }
+    let list_target = if pending_only {
+        Some("pending".to_owned())
+    } else {
+        None
+    };
+    log_command_executed(
+        &state.paths,
+        &state.default_agent_id,
+        command_name,
+        list_target,
+    );
+    stdout_line_or_exit(&serde_json::to_string_pretty(&entries)?)
+}
+
+fn run_grant_command(
+    state: &EffectiveCliState,
+    secret_name: &str,
+    recipient_agent: &str,
+) -> Result<Option<i32>> {
+    let manager = runtime::manager_for_paths(&state.paths)?;
+    let secret_id = SecretId::new(secret_name)?;
+    ensure_secret_acl_allowed(state, SecretAclOperation::Write, Some(&secret_id))?;
+    if !manager.metadata_store.path_for(&secret_id).exists() {
+        return Err(secret_not_found_error(secret_id.as_str(), "grant"));
+    }
+
+    let granter = state.default_agent_id.clone();
+    let metadata = manager.metadata_store.load(&secret_id)?;
+    if metadata.owner != Owner::Agent {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret `{}` is not agent-owned and cannot be granted",
+            secret_id.as_str()
+        )));
+    }
+    if metadata.created_by != granter {
+        return Err(GlovesError::InvalidInput(format!(
+            "secret `{}` can only be granted by its creator `{}`\nRetry with `gloves --agent {} grant {} --to {}`",
+            secret_id.as_str(),
+            metadata.created_by.as_str(),
+            metadata.created_by.as_str(),
+            secret_id.as_str(),
+            recipient_agent
+        )));
+    }
+
+    let new_recipient = AgentId::new(recipient_agent)?;
+    if metadata.recipients.contains(&new_recipient) {
+        let payload = GrantOutput {
+            action: "already_granted",
+            secret_name: secret_id.as_str().to_owned(),
+            granted_to: new_recipient.as_str().to_owned(),
+            granted_by: granter.as_str().to_owned(),
+            changed: false,
+        };
+        return stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?);
+    }
+
+    let mut all_recipients = metadata.recipients;
+    all_recipients.insert(new_recipient.clone());
+    let recipient_keys = recipient_keys_for_agents(&state.paths, all_recipients)?;
+    let granter_identity_file = runtime::load_or_create_identity_for_agent(&state.paths, &granter)?;
+    manager.grant(
+        &secret_id,
+        &granter,
+        granter_identity_file.as_path(),
+        new_recipient.clone(),
+        &recipient_keys,
+    )?;
+
+    log_command_executed(
+        &state.paths,
+        &state.default_agent_id,
+        "grant",
+        Some(format!(
+            "{}->{}",
+            secret_id.as_str(),
+            new_recipient.as_str()
+        )),
+    );
+    let payload = GrantOutput {
+        action: "granted",
+        secret_name: secret_id.as_str().to_owned(),
+        granted_to: new_recipient.as_str().to_owned(),
+        granted_by: granter.as_str().to_owned(),
+        changed: true,
+    };
+    stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)
+}
+
+fn recipient_keys_for_agents(
+    paths: &SecretsPaths,
+    recipients: HashSet<AgentId>,
+) -> Result<Vec<String>> {
+    let mut sorted_recipients = recipients.into_iter().collect::<Vec<_>>();
+    sorted_recipients.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    sorted_recipients
+        .into_iter()
+        .map(|recipient| runtime::load_or_create_recipient_for_agent(paths, &recipient))
+        .collect()
+}
+
+fn run_request_approve_command(
+    state: &EffectiveCliState,
+    request_id_literal: &str,
+    command_name: &str,
+) -> Result<Option<i32>> {
+    let manager = runtime::manager_for_paths(&state.paths)?;
+    let request_id = runtime::parse_request_uuid(request_id_literal)?;
+    let pending_request = pending_request_for_id(&manager, request_id, "approve")?;
+    ensure_secret_acl_allowed(
+        state,
+        SecretAclOperation::Approve,
+        Some(&pending_request.secret_name),
+    )?;
+    let request_policy = resolve_request_policy(None, None)?;
+    ensure_request_policy_allows(&pending_request.secret_name, &request_policy, "approve")?;
+    let approved = manager.approve_request(request_id, state.default_agent_id.clone())?;
+    let payload = request_review_output("approved", &approved);
+    log_command_executed(
+        &state.paths,
+        &state.default_agent_id,
+        command_name,
+        Some(request_id.to_string()),
+    );
+    stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)
+}
+
+fn run_request_deny_command(
+    state: &EffectiveCliState,
+    request_id_literal: &str,
+    command_name: &str,
+) -> Result<Option<i32>> {
+    let manager = runtime::manager_for_paths(&state.paths)?;
+    let request_id = runtime::parse_request_uuid(request_id_literal)?;
+    let pending_request = pending_request_for_id(&manager, request_id, "deny")?;
+    ensure_secret_acl_allowed(
+        state,
+        SecretAclOperation::Deny,
+        Some(&pending_request.secret_name),
+    )?;
+    let denied = manager.deny_request(request_id, state.default_agent_id.clone())?;
+    let payload = request_review_output("denied", &denied);
+    log_command_executed(
+        &state.paths,
+        &state.default_agent_id,
+        command_name,
+        Some(request_id.to_string()),
+    );
+    stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)
+}
+
+fn run_explain_command(code: &str) -> Result<Option<i32>> {
+    if let Some(explanation) = explain_error_code(code) {
+        return stdout_line_or_exit(explanation);
+    }
+    let normalized_code = normalize_error_code(code);
+    Err(GlovesError::InvalidInput(format!(
+        "unknown error code `{normalized_code}`\nKnown codes: {}\nUse `gloves help explain` for usage",
+        known_error_codes().join(", ")
+    )))
+}
+
+fn run_version_command(json: bool) -> Result<Option<i32>> {
+    let version_output = VersionOutput {
+        name: env!("CARGO_PKG_NAME"),
+        version: env!("CARGO_PKG_VERSION"),
+        config_schema_version: CONFIG_SCHEMA_VERSION,
+        default_root: DEFAULT_ROOT_DIR,
+        default_agent: DEFAULT_AGENT_ID,
+    };
+    if json {
+        return stdout_line_or_exit(&serde_json::to_string_pretty(&version_output)?);
+    }
+    let rendered = format!(
+        "{} {}\nconfig schema version: {}\ndefault root: {}\ndefault agent: {}\nhelp: {}\ncommand help: {}",
+        version_output.name,
+        version_output.version,
+        version_output.config_schema_version,
+        version_output.default_root,
+        version_output.default_agent,
+        CLI_HELP_HINT,
+        CLI_COMMAND_HELP_HINT,
+    );
+    stdout_line_or_exit(&rendered)
 }
 
 fn request_review_output(
@@ -1829,7 +2083,7 @@ fn run_extpass_get(secret_name: &str) -> Result<i32> {
     let manager = runtime::manager_for_paths(&paths)?;
     let secret_id = SecretId::new(secret_name)?;
     let caller = AgentId::new(&agent)?;
-    let identity_file = runtime::load_or_create_default_identity(&paths)?;
+    let identity_file = runtime::load_or_create_identity_for_agent(&paths, &caller)?;
     let secret = manager.get(&secret_id, &caller, Some(identity_file.as_path()))?;
     let mut secret_bytes = secret.expose(ToOwned::to_owned);
     if let Some(code) = stdout_bytes_or_exit(&secret_bytes)? {

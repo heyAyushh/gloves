@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+const DEFAULT_AGENT_ID: &str = "default-agent";
+
 /// Canonical path layout for secrets runtime files.
 #[derive(Debug, Clone)]
 pub struct SecretsPaths {
@@ -41,12 +43,22 @@ impl SecretsPaths {
 
     /// Default age identity file for CLI agent.
     pub fn default_identity_file(&self) -> PathBuf {
-        self.root.join("default-agent.agekey")
+        self.identity_file_for_agent(DEFAULT_AGENT_ID)
+    }
+
+    /// Age identity file for one agent id.
+    pub fn identity_file_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.root.join(format!("{agent_id}.agekey"))
     }
 
     /// Default Ed25519 signing key file for CLI agent.
     pub fn default_signing_key_file(&self) -> PathBuf {
-        self.root.join("default-agent.signing.key")
+        self.signing_key_file_for_agent(DEFAULT_AGENT_ID)
+    }
+
+    /// Ed25519 signing key file for one agent id.
+    pub fn signing_key_file_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.root.join(format!("{agent_id}.signing.key"))
     }
 
     /// Vault configuration directory.
