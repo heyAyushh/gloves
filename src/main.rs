@@ -8,7 +8,7 @@ use gloves::{
 };
 
 const CLI_GLOBAL_HELP_HINT: &str =
-    "help: run `gloves --help` for global usage or `gloves help <command>` for command details";
+    "help: run `gloves --help` for global usage or `gloves help [topic...]` for command details";
 const CLI_TTL_HINT: &str = "hint: use a positive day count, for example `--ttl 1`";
 const CLI_FORBIDDEN_HINT: &str = "hint: this action is blocked by policy. check ACLs with `gloves access paths --agent <id> --json` and review `.gloves.toml`";
 const CLI_NOT_FOUND_HINT: &str =

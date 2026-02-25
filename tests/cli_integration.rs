@@ -453,6 +453,42 @@ fn cli_help_grant_includes_usage_examples() {
 }
 
 #[test]
+fn cli_help_recursive_topic_path_renders_leaf_help() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["help", "requests", "approve"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
+    assert!(stdout.contains("Request UUID from `gloves list --pending`"));
+}
+
+#[test]
+fn cli_subcommand_help_renders_nested_leaf_help() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["requests", "help", "approve"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
+    assert!(stdout.contains("Request UUID from `gloves list --pending`"));
+}
+
+#[test]
+fn cli_help_output_uses_structured_headings() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["help"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("COMMANDS:"));
+    assert!(!stdout.contains("Usage:"));
+}
+
+#[test]
 fn cli_error_format_json_reports_runtime_error_shape() {
     let temp_dir = tempfile::tempdir().unwrap();
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))

@@ -36,6 +36,8 @@ const CLI_AFTER_HELP: &str = r#"Examples:
   gloves --root .openclaw/secrets request prod/db --reason "run migration"
   gloves --root .openclaw/secrets requests list
   gloves --root .openclaw/secrets grant service/token --to agent-b
+  gloves help requests approve
+  gloves requests help approve
   gloves explain E102
   gloves --error-format json approve 123e4567-e89b-12d3-a456-426614174000
 
@@ -44,7 +46,8 @@ Version:
   gloves version --json
 
 More help:
-  gloves help <command>
+  gloves help [topic...]
+  gloves requests help [topic...]
   gloves help vault
 "#;
 const SET_COMMAND_AFTER_HELP: &str = r#"Examples:
@@ -116,6 +119,17 @@ const VERSION_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves version
   gloves version --json
 "#;
+const HELP_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves help
+  gloves help set
+  gloves help requests approve
+  gloves requests help approve
+  gloves vault help mount
+
+Tips:
+  - Use command paths to drill down recursively.
+  - `help` works both at the top level and inside command groups.
+"#;
 const EXPLAIN_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves explain E102
   gloves explain e200
@@ -168,6 +182,7 @@ Recovery:
     about = "Secure secrets control plane for OpenClaw and multi-agent runtimes.",
     after_help = CLI_AFTER_HELP,
     infer_subcommands = true,
+    disable_help_subcommand = true,
     arg_required_else_help = true,
     next_line_help = true
 )]
@@ -219,6 +234,13 @@ pub enum Command {
     /// Opens an interactive command navigator.
     #[command(visible_alias = "ui", after_help = TUI_COMMAND_AFTER_HELP)]
     Tui,
+    /// Shows recursively helpful command documentation.
+    #[command(after_help = HELP_COMMAND_AFTER_HELP)]
+    Help {
+        /// Command path segments (for example: `requests approve`).
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Sets an agent secret.
     #[command(after_help = SET_COMMAND_AFTER_HELP)]
     Set {
@@ -427,7 +449,14 @@ impl From<VaultModeArg> for VaultMode {
 
 /// Supported vault subcommands.
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum VaultCommand {
+    /// Shows help for vault workflows.
+    Help {
+        /// Optional nested topic (for example: `mount`).
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Initializes a new vault.
     Init {
         /// Vault name.
@@ -500,14 +529,28 @@ pub enum VaultCommand {
 
 /// Supported config subcommands.
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum ConfigCommand {
+    /// Shows help for config workflows.
+    Help {
+        /// Optional nested topic.
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Validates the effective config and runtime policy checks.
     Validate,
 }
 
 /// Supported access subcommands.
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum AccessCommand {
+    /// Shows help for access workflows.
+    Help {
+        /// Optional nested topic.
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Shows one agent's configured private path visibility.
     Paths {
         /// Agent identifier.
@@ -521,16 +564,26 @@ pub enum AccessCommand {
 
 /// Supported request-group subcommands.
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum RequestsCommand {
+    /// Shows help for request workflows.
+    Help {
+        /// Optional nested topic (for example: `approve`).
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Lists only pending request entries.
+    #[command(after_help = LIST_COMMAND_AFTER_HELP)]
     List,
     /// Approves a pending request by id.
+    #[command(after_help = APPROVE_COMMAND_AFTER_HELP)]
     Approve {
         /// Request UUID.
         #[arg(help = REQUEST_ID_ARG_HELP)]
         request_id: String,
     },
     /// Denies a pending request by id.
+    #[command(after_help = DENY_COMMAND_AFTER_HELP)]
     Deny {
         /// Request UUID.
         #[arg(help = REQUEST_ID_ARG_HELP)]
@@ -549,7 +602,14 @@ pub enum ErrorFormatArg {
 
 /// Supported GPG subcommands.
 #[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum GpgCommand {
+    /// Shows help for GPG workflows.
+    Help {
+        /// Optional nested topic.
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
     /// Creates a GPG key for the selected agent if one does not exist.
     #[command(after_help = GPG_CREATE_COMMAND_AFTER_HELP)]
     Create,
@@ -718,7 +778,7 @@ mod unit_tests {
         assert!(help.contains("Examples:"));
         assert!(help.contains("gloves --version"));
         assert!(help.contains("gloves version --json"));
-        assert!(help.contains("gloves help <command>"));
+        assert!(help.contains("gloves help [topic...]"));
         assert!(!help.contains("gloves --error-format json approve requests"));
     }
 
@@ -736,20 +796,20 @@ mod unit_tests {
 
     #[test]
     fn cli_approve_help_includes_request_lookup_example() {
-        let error = Cli::try_parse_from(["gloves", "help", "approve"]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        let help = error.to_string();
-        assert!(help.contains("gloves list --pending"));
-        assert!(help.contains("gloves approve <request-id>"));
+        let cli = Cli::try_parse_from(["gloves", "help", "approve"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Help { topic } if topic == vec!["approve".to_owned()]
+        ));
     }
 
     #[test]
     fn cli_set_help_includes_input_examples() {
-        let error = Cli::try_parse_from(["gloves", "help", "set"]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        let help = error.to_string();
-        assert!(help.contains("gloves set service/token --generate --ttl 1"));
-        assert!(help.contains("--ttl 1"));
+        let cli = Cli::try_parse_from(["gloves", "help", "set"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Help { topic } if topic == vec!["set".to_owned()]
+        ));
     }
 
     #[test]
@@ -787,11 +847,32 @@ mod unit_tests {
 
     #[test]
     fn cli_explain_help_mentions_error_codes() {
-        let error = Cli::try_parse_from(["gloves", "help", "explain"]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::DisplayHelp);
-        let help = error.to_string();
-        assert!(help.contains("gloves explain E102"));
-        assert!(help.contains("error[E102]"));
+        let cli = Cli::try_parse_from(["gloves", "help", "explain"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Help { topic } if topic == vec!["explain".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn cli_help_parses_recursive_topic_path() {
+        let cli = Cli::try_parse_from(["gloves", "help", "requests", "approve"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Help { topic }
+                if topic == vec!["requests".to_owned(), "approve".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn cli_requests_help_subcommand_parses_nested_topic() {
+        let cli = Cli::try_parse_from(["gloves", "requests", "help", "approve"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Requests {
+                command: RequestsCommand::Help { topic }
+            } if topic == vec!["approve".to_owned()]
+        ));
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use chrono::{DateTime, Duration, Utc};
+use clap::{error::ErrorKind, Parser};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -57,7 +58,7 @@ const GPG_KEY_EXPIRY: &str = "never";
 const GPG_AGENT_USER_ID_PREFIX: &str = "gloves-agent-";
 const CLI_ACTION_INTERFACE: &str = "cli";
 const CLI_HELP_HINT: &str = "gloves --help";
-const CLI_COMMAND_HELP_HINT: &str = "gloves help <command>";
+const CLI_COMMAND_HELP_HINT: &str = "gloves help [topic...]";
 const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves list --pending";
 const SECRET_LOOKUP_COMMAND: &str = "gloves list";
 
@@ -187,6 +188,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         Command::Tui => {
             navigator::run_command_navigator()?;
             log_command_executed(&state.paths, &state.default_agent_id, "tui", None);
+        }
+        Command::Help { topic } => {
+            if let Some(code) = run_help_command(&topic)? {
+                return Ok(code);
+            }
         }
         Command::Set {
             name,
@@ -323,6 +329,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             }
         }
         Command::Requests { command } => match command {
+            RequestsCommand::Help { topic } => {
+                if let Some(code) = run_help_command_with_prefix(&["requests"], &topic)? {
+                    return Ok(code);
+                }
+            }
             RequestsCommand::List => {
                 if let Some(code) = run_list_command(&state, true, "requests-list")? {
                     return Ok(code);
@@ -471,6 +482,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         }
         Command::Vault { command } => {
             let (action, target) = vault_command_descriptor(&command);
+            if let super::VaultCommand::Help { topic } = &command {
+                if let Some(code) = run_help_command_with_prefix(&["vault"], topic)? {
+                    return Ok(code);
+                }
+                return Ok(0);
+            }
             if let Some(code) = vault_cmd::run_vault_command(
                 &state.paths,
                 command,
@@ -492,6 +509,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             log_command_executed(&state.paths, &state.default_agent_id, action, target);
         }
         Command::Config { command } => match command {
+            ConfigCommand::Help { topic } => {
+                if let Some(code) = run_help_command_with_prefix(&["config"], &topic)? {
+                    return Ok(code);
+                }
+            }
             ConfigCommand::Validate => {
                 if matches!(state.vault_mode, VaultMode::Required) {
                     ensure_vault_dependencies()?;
@@ -508,6 +530,11 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             }
         },
         Command::Access { command } => match command {
+            AccessCommand::Help { topic } => {
+                if let Some(code) = run_help_command_with_prefix(&["access"], &topic)? {
+                    return Ok(code);
+                }
+            }
             AccessCommand::Paths { agent, json } => {
                 let config = state.loaded_config.as_ref().ok_or_else(|| {
                     GlovesError::InvalidInput(
@@ -554,6 +581,12 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
             }
         },
         Command::Gpg { command } => {
+            if let GpgCommand::Help { topic } = &command {
+                if let Some(code) = run_help_command_with_prefix(&["gpg"], topic)? {
+                    return Ok(code);
+                }
+                return Ok(0);
+            }
             let (action, target) = gpg_command_descriptor(&state.default_agent_id, &command);
             if let Some(code) = run_gpg_command(&state, command)? {
                 log_command_executed(&state.paths, &state.default_agent_id, action, target);
@@ -756,6 +789,7 @@ fn audit_event_summary(event: &AuditEvent) -> String {
 
 fn vault_command_descriptor(command: &super::VaultCommand) -> (&'static str, Option<String>) {
     match command {
+        super::VaultCommand::Help { .. } => ("vault-help", None),
         super::VaultCommand::Init { name, .. } => ("vault-init", Some(name.clone())),
         super::VaultCommand::Mount { name, .. } => ("vault-mount", Some(name.clone())),
         super::VaultCommand::Exec { name, .. } => ("vault-exec", Some(name.clone())),
@@ -772,6 +806,7 @@ fn gpg_command_descriptor(
 ) -> (&'static str, Option<String>) {
     let target = Some(default_agent_id.as_str().to_owned());
     match command {
+        GpgCommand::Help { .. } => ("gpg-help", None),
         GpgCommand::Create => ("gpg-create", target),
         GpgCommand::Fingerprint => ("gpg-fingerprint", target),
     }
@@ -779,6 +814,7 @@ fn gpg_command_descriptor(
 
 fn run_gpg_command(state: &EffectiveCliState, command: GpgCommand) -> Result<Option<i32>> {
     match command {
+        GpgCommand::Help { .. } => Ok(None),
         GpgCommand::Create => run_gpg_create(state),
         GpgCommand::Fingerprint => run_gpg_fingerprint(state),
     }
@@ -1283,6 +1319,80 @@ fn run_explain_command(code: &str) -> Result<Option<i32>> {
         "unknown error code `{normalized_code}`\nKnown codes: {}\nUse `gloves help explain` for usage",
         known_error_codes().join(", ")
     )))
+}
+
+fn run_help_command(topic: &[String]) -> Result<Option<i32>> {
+    run_help_command_with_prefix(&[], topic)
+}
+
+fn run_help_command_with_prefix(prefix: &[&str], topic: &[String]) -> Result<Option<i32>> {
+    let mut args = Vec::with_capacity(2 + prefix.len() + topic.len());
+    args.push("gloves".to_owned());
+    args.extend(prefix.iter().map(|segment| (*segment).to_owned()));
+    args.extend(topic.iter().cloned());
+    args.push("--help".to_owned());
+
+    match Cli::try_parse_from(args) {
+        Err(help_error)
+            if matches!(
+                help_error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            let rendered = format_help_output(&help_error.to_string());
+            stdout_line_or_exit(&rendered)
+        }
+        Err(parse_error) => {
+            let joined_topic = if topic.is_empty() {
+                prefix.join(" ")
+            } else {
+                let mut joined = prefix.join(" ");
+                if !joined.is_empty() {
+                    joined.push(' ');
+                }
+                joined.push_str(&topic.join(" "));
+                joined
+            };
+            Err(GlovesError::InvalidInput(format!(
+                "unknown help topic `{joined_topic}`\n{parse_error}\nTry `gloves help` for command index"
+            )))
+        }
+        Ok(_) => Ok(None),
+    }
+}
+
+fn format_help_output(raw_help: &str) -> String {
+    let mut lines = Vec::new();
+    for raw_line in raw_help.lines() {
+        let line = raw_line.trim_end();
+        if let Some(usage) = line.strip_prefix("Usage:") {
+            if !lines.is_empty() && !lines.last().is_some_and(String::is_empty) {
+                lines.push(String::new());
+            }
+            lines.push("USAGE:".to_owned());
+            lines.push(format!("  {}", usage.trim()));
+            continue;
+        }
+        let heading = match line {
+            "Commands:" => Some("COMMANDS:"),
+            "Subcommands:" => Some("SUBCOMMANDS:"),
+            "Arguments:" => Some("ARGS:"),
+            "Options:" => Some("OPTIONS:"),
+            _ => None,
+        };
+        if let Some(heading) = heading {
+            if !lines.is_empty() && !lines.last().is_some_and(String::is_empty) {
+                lines.push(String::new());
+            }
+            lines.push(heading.to_owned());
+            continue;
+        }
+        lines.push(line.to_owned());
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    format!("{}\n", lines.join("\n"))
 }
 
 fn run_version_command(json: bool) -> Result<Option<i32>> {

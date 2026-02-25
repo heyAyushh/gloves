@@ -78,6 +78,7 @@ pub(crate) fn run_vault_command(
     defaults: &VaultCommandDefaults,
 ) -> Result<Option<i32>> {
     match command {
+        VaultCommand::Help { .. } => {}
         VaultCommand::Init { name, owner } => {
             let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             manager.init(&name, owner.into())?;
