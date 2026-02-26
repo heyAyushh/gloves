@@ -31,10 +31,23 @@ const UI_HEADER_HEIGHT: u16 = 3;
 const UI_FOOTER_HEIGHT: u16 = 3;
 const OUTPUT_SCROLL_STEP: u16 = 1;
 const OUTPUT_SCROLL_PAGE_STEP: u16 = 8;
+const HORIZONTAL_SCROLL_STEP: u16 = 4;
+const OUTPUT_TAB_EXPANSION: &str = "    ";
 const SET_INPUT_MODE_GENERATE_INDEX: usize = 0;
 const SET_INPUT_MODE_VALUE_INDEX: usize = 1;
 const SET_INPUT_MODE_STDIN_INDEX: usize = 2;
 const EMPTY_FILTER_PLACEHOLDER: &str = "<no matching commands>";
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NavigatorLaunchOptions {
+    pub(crate) root: Option<String>,
+    pub(crate) agent: Option<String>,
+    pub(crate) config: Option<String>,
+    pub(crate) no_config: bool,
+    pub(crate) vault_mode: Option<String>,
+    pub(crate) error_format: Option<String>,
+    pub(crate) command_args: Vec<String>,
+}
 
 #[derive(Debug, Clone, Copy)]
 enum FieldKind {
@@ -119,6 +132,7 @@ struct TuiApp {
     input_mode: InputMode,
     editing_target: Option<EditingTarget>,
     editing_buffer: String,
+    editing_original_buffer: String,
     global_fields: Vec<FieldState>,
     command_fields: Vec<FieldState>,
     run_history: Vec<RunRecord>,
@@ -126,9 +140,15 @@ struct TuiApp {
     active_run: Option<ActiveRun>,
     output_scroll: u16,
     output_viewport_height: u16,
+    command_horizontal_scroll: u16,
+    globals_horizontal_scroll: u16,
+    fields_horizontal_scroll: u16,
+    output_horizontal_scroll: u16,
     follow_tail: bool,
+    fullscreen_enabled: bool,
     status_line: String,
     pending_risky_signature: Option<String>,
+    startup_command_pending: bool,
     should_quit: bool,
 }
 
@@ -842,16 +862,16 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "set",
-        title: "set",
+        title: "secrets set",
         summary: "Store an agent secret",
-        path: &["set"],
+        path: &["secrets", "set"],
         fields: SET_FIELDS,
     },
     CommandSpec {
         id: "get",
-        title: "get",
+        title: "secrets get",
         summary: "Read a secret",
-        path: &["get"],
+        path: &["secrets", "get"],
         fields: GET_FIELDS,
     },
     CommandSpec {
@@ -890,20 +910,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         fields: REQUEST_ID_FIELD,
     },
     CommandSpec {
-        id: "approve",
-        title: "approve",
-        summary: "Approve pending request",
-        path: &["approve"],
-        fields: REQUEST_ID_FIELD,
-    },
-    CommandSpec {
-        id: "deny",
-        title: "deny",
-        summary: "Deny pending request",
-        path: &["deny"],
-        fields: REQUEST_ID_FIELD,
-    },
-    CommandSpec {
         id: "list",
         title: "list",
         summary: "List all entries",
@@ -912,23 +918,23 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "grant",
-        title: "grant",
+        title: "secrets grant",
         summary: "Grant secret access to an agent",
-        path: &["grant"],
+        path: &["secrets", "grant"],
         fields: GRANT_FIELDS,
     },
     CommandSpec {
         id: "revoke",
-        title: "revoke",
+        title: "secrets revoke",
         summary: "Revoke a secret",
-        path: &["revoke"],
+        path: &["secrets", "revoke"],
         fields: SECRET_NAME_FIELD,
     },
     CommandSpec {
         id: "status",
-        title: "status",
+        title: "secrets status",
         summary: "Show request status",
-        path: &["status"],
+        path: &["secrets", "status"],
         fields: SECRET_NAME_FIELD,
     },
     CommandSpec {
@@ -1046,21 +1052,23 @@ const SAFE_COMMAND_IDS: &[&str] = &[
     "access_paths",
     "gpg_fingerprint",
 ];
-const TREE_HIDDEN_COMMAND_IDS: &[&str] = &["approve", "deny"];
 const ENTRIES_LIST_TREE_PATH: &[&str] = &["entries", "list"];
-
-fn is_tree_hidden_command(command_id: &str) -> bool {
-    TREE_HIDDEN_COMMAND_IDS.contains(&command_id)
-}
+const SECRETS_SET_TREE_PATH: &[&str] = &["secrets", "set"];
+const SECRETS_GET_TREE_PATH: &[&str] = &["secrets", "get"];
+const SECRETS_GRANT_TREE_PATH: &[&str] = &["secrets", "grant"];
+const SECRETS_REVOKE_TREE_PATH: &[&str] = &["secrets", "revoke"];
+const SECRETS_STATUS_TREE_PATH: &[&str] = &["secrets", "status"];
 
 fn command_tree_path(command_spec: &CommandSpec) -> Option<&'static [&'static str]> {
-    if is_tree_hidden_command(command_spec.id) {
-        return None;
+    match command_spec.id {
+        "list" => Some(ENTRIES_LIST_TREE_PATH),
+        "set" => Some(SECRETS_SET_TREE_PATH),
+        "get" => Some(SECRETS_GET_TREE_PATH),
+        "grant" => Some(SECRETS_GRANT_TREE_PATH),
+        "revoke" => Some(SECRETS_REVOKE_TREE_PATH),
+        "status" => Some(SECRETS_STATUS_TREE_PATH),
+        _ => Some(command_spec.path),
     }
-    if command_spec.id == "list" {
-        return Some(ENTRIES_LIST_TREE_PATH);
-    }
-    Some(command_spec.path)
 }
 
 fn visible_tree_leaf_count() -> usize {
@@ -1084,6 +1092,70 @@ fn command_spec_matches_query(spec: &CommandSpec, query: &str) -> bool {
             path.iter()
                 .any(|segment| segment.to_ascii_lowercase().contains(query))
         })
+}
+
+fn normalize_launch_command_args(args: &[String]) -> Vec<String> {
+    if args.is_empty() {
+        return Vec::new();
+    }
+
+    let mut normalized = args.to_vec();
+    match normalized[0].as_str() {
+        "req" => {
+            normalized[0] = "requests".to_owned();
+        }
+        "ls" => {
+            normalized[0] = "list".to_owned();
+        }
+        "ver" => {
+            normalized[0] = "version".to_owned();
+        }
+        "approve" => {
+            normalized[0] = "requests".to_owned();
+            normalized.insert(1, "approve".to_owned());
+        }
+        "deny" => {
+            normalized[0] = "requests".to_owned();
+            normalized.insert(1, "deny".to_owned());
+        }
+        "set" | "get" | "grant" | "revoke" | "status" => {
+            normalized.insert(0, "secrets".to_owned());
+        }
+        _ => {}
+    }
+    normalized
+}
+
+fn resolve_launch_command_spec(args: &[String]) -> Option<(usize, usize)> {
+    let mut best_match: Option<(usize, usize)> = None;
+    for (command_index, command_spec) in COMMAND_SPECS.iter().enumerate() {
+        if args.len() < command_spec.path.len() {
+            continue;
+        }
+        let matches_path = command_spec
+            .path
+            .iter()
+            .zip(args.iter())
+            .all(|(path_segment, argument)| *path_segment == argument.as_str());
+        if !matches_path {
+            continue;
+        }
+        match best_match {
+            Some((_, matched_segments)) if matched_segments >= command_spec.path.len() => {}
+            _ => {
+                best_match = Some((command_index, command_spec.path.len()));
+            }
+        }
+    }
+    best_match
+}
+
+fn split_long_option_token(token: &str) -> (&str, Option<&str>) {
+    if let Some((flag, value)) = token.split_once('=') {
+        (flag, Some(value))
+    } else {
+        (token, None)
+    }
 }
 
 fn child_node_mut<'a>(
@@ -1195,7 +1267,7 @@ fn append_tree_rows(
     }
 }
 
-pub(crate) fn run_command_navigator() -> Result<()> {
+pub(crate) fn run_command_navigator(launch_options: NavigatorLaunchOptions) -> Result<()> {
     if !atty::is(atty::Stream::Stdin) || !atty::is(atty::Stream::Stdout) {
         return Err(GlovesError::InvalidInput(
             "`gloves tui` requires an interactive terminal".to_owned(),
@@ -1203,7 +1275,7 @@ pub(crate) fn run_command_navigator() -> Result<()> {
     }
 
     let mut terminal = init_terminal()?;
-    let run_result = run_event_loop(&mut terminal);
+    let run_result = run_event_loop(&mut terminal, launch_options);
     let restore_result = restore_terminal(&mut terminal);
     restore_result?;
     run_result
@@ -1225,8 +1297,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) 
     Ok(())
 }
 
-fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
-    let mut app = TuiApp::new();
+fn run_event_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    launch_options: NavigatorLaunchOptions,
+) -> Result<()> {
+    let mut app = TuiApp::new(launch_options);
+    app.execute_startup_command_if_needed()?;
     while !app.should_quit {
         app.poll_active_run();
         terminal.draw(|frame| app.render(frame))?;
@@ -1242,7 +1318,7 @@ fn run_event_loop(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) ->
 }
 
 impl TuiApp {
-    fn new() -> Self {
+    fn new(launch_options: NavigatorLaunchOptions) -> Self {
         let selected_command_index = 0;
         let command_fields = field_states_for_spec(&COMMAND_SPECS[selected_command_index]);
         let mut app = Self {
@@ -1256,6 +1332,7 @@ impl TuiApp {
             input_mode: InputMode::Navigate,
             editing_target: None,
             editing_buffer: String::new(),
+            editing_original_buffer: String::new(),
             global_fields: GLOBAL_FIELDS.iter().map(initial_field_state).collect(),
             command_fields,
             run_history: Vec::new(),
@@ -1263,13 +1340,407 @@ impl TuiApp {
             active_run: None,
             output_scroll: 0,
             output_viewport_height: 0,
+            command_horizontal_scroll: 0,
+            globals_horizontal_scroll: 0,
+            fields_horizontal_scroll: 0,
+            output_horizontal_scroll: 0,
             follow_tail: true,
+            fullscreen_enabled: false,
             status_line: "Ready".to_owned(),
             pending_risky_signature: None,
+            startup_command_pending: false,
             should_quit: false,
         };
         app.select_first_visible_leaf();
+        app.apply_launch_options(launch_options);
         app
+    }
+
+    fn apply_launch_options(&mut self, launch_options: NavigatorLaunchOptions) {
+        if let Some(root) = launch_options.root {
+            self.set_global_text("root", root);
+        }
+        if let Some(agent) = launch_options.agent {
+            self.set_global_text("agent", agent);
+        }
+        if let Some(config) = launch_options.config {
+            self.set_global_text("config", config);
+        }
+        if launch_options.no_config {
+            self.set_global_bool("no_config", true);
+        }
+        if let Some(vault_mode) = launch_options.vault_mode {
+            self.set_global_choice_by_value("vault_mode", &vault_mode);
+        }
+        if let Some(error_format) = launch_options.error_format {
+            self.set_global_choice_by_value("error_format", &error_format);
+        }
+        self.startup_command_pending = !launch_options.command_args.is_empty()
+            && self.apply_launch_command_args(&launch_options.command_args);
+    }
+
+    fn set_global_text(&mut self, field_id: &str, value: String) {
+        if let Some(field) = self
+            .global_fields
+            .iter_mut()
+            .find(|field| field.spec.id == field_id)
+        {
+            if let FieldValue::Text(current) = &mut field.value {
+                *current = value;
+            }
+        }
+    }
+
+    fn set_global_bool(&mut self, field_id: &str, value: bool) {
+        if let Some(field) = self
+            .global_fields
+            .iter_mut()
+            .find(|field| field.spec.id == field_id)
+        {
+            if let FieldValue::Bool(current) = &mut field.value {
+                *current = value;
+            }
+        }
+    }
+
+    fn set_global_choice_by_value(&mut self, field_id: &str, value: &str) {
+        if let Some(field) = self
+            .global_fields
+            .iter_mut()
+            .find(|field| field.spec.id == field_id)
+        {
+            if let (FieldKind::Choice(choices), FieldValue::Choice(choice_index)) =
+                (field.spec.kind, &mut field.value)
+            {
+                if let Some(index) = choices.iter().position(|choice| *choice == value) {
+                    *choice_index = index;
+                }
+            }
+        }
+    }
+
+    fn set_command_text(&mut self, field_id: &str, value: String) {
+        if let Some(field) = self
+            .command_fields
+            .iter_mut()
+            .find(|field| field.spec.id == field_id)
+        {
+            if let FieldValue::Text(current) = &mut field.value {
+                *current = value;
+            }
+        }
+    }
+
+    fn set_command_choice_by_value(&mut self, field_id: &str, value: &str) {
+        if let Some(field) = self
+            .command_fields
+            .iter_mut()
+            .find(|field| field.spec.id == field_id)
+        {
+            if let (FieldKind::Choice(choices), FieldValue::Choice(choice_index)) =
+                (field.spec.kind, &mut field.value)
+            {
+                if let Some(index) = choices.iter().position(|choice| *choice == value) {
+                    *choice_index = index;
+                }
+            }
+        }
+    }
+
+    fn apply_launch_command_args(&mut self, args: &[String]) -> bool {
+        let normalized_args = normalize_launch_command_args(args);
+        let Some((command_index, consumed_path_segments)) =
+            resolve_launch_command_spec(&normalized_args)
+        else {
+            self.status_line = format!(
+                "TUI startup command not found: {}",
+                format_invocation_args(&normalized_args)
+            );
+            return false;
+        };
+
+        self.select_command_by_index(command_index);
+        self.align_tree_selection_to_command(command_index);
+
+        let command_args = &normalized_args[consumed_path_segments..];
+        match self.populate_selected_command_fields_from_args(command_args) {
+            Ok(()) => {
+                if command_args.is_empty() {
+                    self.status_line = format!(
+                        "Loaded `{}` from TUI startup arguments",
+                        self.selected_command_spec().title
+                    );
+                } else {
+                    self.status_line = format!(
+                        "Loaded `{}` with startup values",
+                        self.selected_command_spec().title
+                    );
+                }
+                true
+            }
+            Err(error_message) => {
+                self.status_line = format!(
+                    "Loaded `{}` (startup parse note: {error_message})",
+                    self.selected_command_spec().title
+                );
+                false
+            }
+        }
+    }
+
+    fn execute_startup_command_if_needed(&mut self) -> Result<()> {
+        if !self.startup_command_pending {
+            return Ok(());
+        }
+        self.startup_command_pending = false;
+        self.focus = FocusPane::Output;
+        self.fullscreen_enabled = true;
+        self.follow_tail = true;
+        self.sync_output_scroll();
+        self.execute_selected_command_with_policy(true)
+    }
+
+    fn align_tree_selection_to_command(&mut self, command_index: usize) {
+        let rows = self.command_tree_rows();
+        if let Some(row_index) = rows
+            .iter()
+            .position(|row| row.command_index == Some(command_index))
+        {
+            self.selected_command_tree_row = row_index;
+            self.reconcile_tree_selection();
+        }
+    }
+
+    fn populate_selected_command_fields_from_args(
+        &mut self,
+        args: &[String],
+    ) -> std::result::Result<(), String> {
+        match self.selected_command_spec().id {
+            "set" => self.populate_set_fields_from_args(args),
+            "vault_exec" => self.populate_vault_exec_fields_from_args(args),
+            _ => self.populate_generic_fields_from_args(args),
+        }
+    }
+
+    fn populate_set_fields_from_args(
+        &mut self,
+        args: &[String],
+    ) -> std::result::Result<(), String> {
+        if args.is_empty() {
+            return Ok(());
+        }
+        if args[0].starts_with("--") {
+            return Err("missing secret name".to_owned());
+        }
+        self.set_command_text("name", args[0].clone());
+
+        let mut index = 1;
+        while index < args.len() {
+            let token = &args[index];
+            if token == "--" {
+                return Err("unexpected `--` for secrets set".to_owned());
+            }
+            if !token.starts_with("--") {
+                return Err(format!("unexpected argument `{token}`"));
+            }
+            let (flag, inline_value) = split_long_option_token(token);
+            match flag {
+                "--generate" => {
+                    if inline_value.is_some() {
+                        return Err("`--generate` does not take a value".to_owned());
+                    }
+                    self.set_command_choice_by_value("input_mode", "generate");
+                }
+                "--stdin" => {
+                    if inline_value.is_some() {
+                        return Err("`--stdin` does not take a value".to_owned());
+                    }
+                    self.set_command_choice_by_value("input_mode", "stdin");
+                }
+                "--value" => {
+                    let value = if let Some(value) = inline_value {
+                        value.to_owned()
+                    } else {
+                        let Some(next_value) = args.get(index + 1) else {
+                            return Err("`--value` requires a value".to_owned());
+                        };
+                        index += 1;
+                        next_value.to_owned()
+                    };
+                    self.set_command_choice_by_value("input_mode", "value");
+                    self.set_command_text("value", value);
+                }
+                "--ttl" => {
+                    let value = if let Some(value) = inline_value {
+                        value.to_owned()
+                    } else {
+                        let Some(next_value) = args.get(index + 1) else {
+                            return Err("`--ttl` requires a value".to_owned());
+                        };
+                        index += 1;
+                        next_value.to_owned()
+                    };
+                    self.set_command_text("ttl", value);
+                }
+                _ => {
+                    return Err(format!("unknown option `{flag}`"));
+                }
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn populate_vault_exec_fields_from_args(
+        &mut self,
+        args: &[String],
+    ) -> std::result::Result<(), String> {
+        let mut index = 0;
+        let mut command_start_index = None;
+        let mut name_set = false;
+
+        while index < args.len() {
+            let token = &args[index];
+            if token == "--" {
+                command_start_index = Some(index + 1);
+                break;
+            }
+            if token.starts_with("--") {
+                let (flag, inline_value) = split_long_option_token(token);
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(format!("`{flag}` requires a value"));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                match flag {
+                    "--ttl" => self.set_command_text("ttl", value),
+                    "--mountpoint" => self.set_command_text("mountpoint", value),
+                    "--agent" => self.set_command_text("agent", value),
+                    _ => return Err(format!("unknown option `{flag}`")),
+                }
+            } else if !name_set {
+                self.set_command_text("name", token.clone());
+                name_set = true;
+            } else {
+                return Err(format!(
+                    "unexpected argument `{token}` (expected `--` before command)"
+                ));
+            }
+            index += 1;
+        }
+
+        if let Some(command_index) = command_start_index {
+            let tail = &args[command_index..];
+            if !tail.is_empty() {
+                self.set_command_text("command_line", format_invocation_args(tail));
+            }
+        }
+        Ok(())
+    }
+
+    fn populate_generic_fields_from_args(
+        &mut self,
+        args: &[String],
+    ) -> std::result::Result<(), String> {
+        let positional_field_indices = self
+            .command_fields
+            .iter()
+            .enumerate()
+            .filter_map(|(index, field)| {
+                matches!(field.spec.arg, FieldArg::Positional).then_some(index)
+            })
+            .collect::<Vec<_>>();
+
+        let mut positional_cursor = 0usize;
+        let mut index = 0usize;
+
+        while index < args.len() {
+            let token = &args[index];
+            if token.starts_with("--") {
+                let (flag, inline_value) = split_long_option_token(token);
+                if let Some(field_index) = self.command_fields.iter().position(|field| {
+                    matches!(field.spec.arg, FieldArg::Flag(candidate) if candidate == flag)
+                }) {
+                    if inline_value.is_some() {
+                        return Err(format!("`{flag}` does not take a value"));
+                    }
+                    if let Some(FieldState {
+                        value: FieldValue::Bool(current),
+                        ..
+                    }) = self.command_fields.get_mut(field_index)
+                    {
+                        *current = true;
+                    }
+                    index += 1;
+                    continue;
+                }
+                if let Some(field_index) = self.command_fields.iter().position(|field| {
+                    matches!(field.spec.arg, FieldArg::OptionValue(candidate) if candidate == flag)
+                }) {
+                    let value = if let Some(value) = inline_value {
+                        value.to_owned()
+                    } else {
+                        let Some(next_value) = args.get(index + 1) else {
+                            return Err(format!("`{flag}` requires a value"));
+                        };
+                        index += 1;
+                        next_value.to_owned()
+                    };
+                    self.assign_command_field_literal(field_index, &value)?;
+                    index += 1;
+                    continue;
+                }
+                return Err(format!("unknown option `{flag}`"));
+            }
+
+            if positional_cursor >= positional_field_indices.len() {
+                return Err(format!("unexpected argument `{token}`"));
+            }
+            let field_index = positional_field_indices[positional_cursor];
+            self.assign_command_field_literal(field_index, token)?;
+            positional_cursor += 1;
+            index += 1;
+        }
+
+        Ok(())
+    }
+
+    fn assign_command_field_literal(
+        &mut self,
+        field_index: usize,
+        literal: &str,
+    ) -> std::result::Result<(), String> {
+        let Some(field) = self.command_fields.get_mut(field_index) else {
+            return Err("internal error: field index out of bounds".to_owned());
+        };
+        match (&field.spec.kind, &mut field.value) {
+            (FieldKind::Text, FieldValue::Text(current)) => {
+                *current = literal.to_owned();
+            }
+            (FieldKind::Choice(choices), FieldValue::Choice(choice_index)) => {
+                let Some(index) = choices.iter().position(|choice| *choice == literal) else {
+                    return Err(format!(
+                        "invalid value `{literal}` for `{}`",
+                        field.spec.label
+                    ));
+                };
+                *choice_index = index;
+            }
+            (FieldKind::Bool, FieldValue::Bool(current)) => {
+                *current = matches!(literal, "1" | "true" | "on" | "yes");
+            }
+            _ => {
+                return Err(format!(
+                    "unable to set `{}` from startup args",
+                    field.spec.label
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn selected_command_spec(&self) -> &'static CommandSpec {
@@ -1365,7 +1836,32 @@ impl TuiApp {
         }
 
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.scroll_horizontal_for_focus(false);
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.scroll_horizontal_for_focus(true);
+            }
+            KeyCode::Char('H') => {
+                self.scroll_horizontal_for_focus(false);
+            }
+            KeyCode::Char('L') => {
+                self.scroll_horizontal_for_focus(true);
+            }
+            KeyCode::Esc => {
+                if self.fullscreen_enabled {
+                    self.fullscreen_enabled = false;
+                    self.focus = FocusPane::Commands;
+                    self.status_line =
+                        "Fullscreen disabled; focus reset to command tree".to_owned();
+                } else if self.active_run.is_some() {
+                    self.status_line =
+                        "Run in progress. Press Ctrl+C to cancel before quitting.".to_owned();
+                } else {
+                    self.should_quit = true;
+                }
+            }
+            KeyCode::Char('q') => {
                 if self.active_run.is_some() {
                     self.status_line =
                         "Run in progress. Press Ctrl+C to cancel before quitting.".to_owned();
@@ -1396,10 +1892,17 @@ impl TuiApp {
                 self.input_mode = InputMode::Edit;
                 self.editing_target = Some(EditingTarget::CommandFilter);
                 self.editing_buffer = self.command_filter.clone();
+                self.editing_original_buffer = self.command_filter.clone();
                 self.status_line = "Editing command filter".to_owned();
+            }
+            KeyCode::Char('f') if key.modifiers.is_empty() => {
+                self.toggle_fullscreen();
             }
             KeyCode::Char('?') => {
                 self.execute_selected_help()?;
+            }
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                self.on_enter_cycle()?;
             }
             KeyCode::Char('x') => {
                 self.reset_selected_field(false);
@@ -1419,6 +1922,21 @@ impl TuiApp {
         Ok(())
     }
 
+    fn scroll_horizontal_for_focus(&mut self, forward: bool) {
+        let scroll = match self.focus {
+            FocusPane::Commands => &mut self.command_horizontal_scroll,
+            FocusPane::Globals => &mut self.globals_horizontal_scroll,
+            FocusPane::Fields => &mut self.fields_horizontal_scroll,
+            FocusPane::Output => &mut self.output_horizontal_scroll,
+        };
+        if forward {
+            *scroll = scroll.saturating_add(HORIZONTAL_SCROLL_STEP);
+        } else {
+            *scroll = scroll.saturating_sub(HORIZONTAL_SCROLL_STEP);
+        }
+        self.status_line = format!("Horizontal scroll {}: {}", self.focus.label(), *scroll);
+    }
+
     fn on_navigation_key(&mut self, key: KeyEvent) {
         match self.focus {
             FocusPane::Commands => self.on_command_list_key(key),
@@ -1428,24 +1946,149 @@ impl TuiApp {
         }
     }
 
+    fn on_enter_cycle(&mut self) -> Result<()> {
+        match self.focus {
+            FocusPane::Commands => {
+                let rows = self.command_tree_rows();
+                if rows.is_empty() {
+                    self.status_line = EMPTY_FILTER_PLACEHOLDER.to_owned();
+                    return Ok(());
+                }
+                if self.selected_command_tree_row >= rows.len() {
+                    self.selected_command_tree_row = rows.len() - 1;
+                }
+                if let Some(row) = rows.get(self.selected_command_tree_row) {
+                    if row.is_branch {
+                        if row.is_expanded {
+                            self.expanded_command_tree_paths.remove(&row.key);
+                        } else {
+                            self.expanded_command_tree_paths.insert(row.key.clone());
+                        }
+                        self.status_line = format!("Toggled group `{}`", row.label);
+                        self.reconcile_tree_selection();
+                        return Ok(());
+                    }
+                    if let Some(command_index) = row.command_index {
+                        self.select_command_by_index(command_index);
+                    }
+                }
+                self.focus = FocusPane::Globals;
+                self.status_line = format!(
+                    "Cycle -> global flags for `{}`",
+                    self.selected_command_spec().title
+                );
+            }
+            FocusPane::Globals => {
+                if self.command_fields.is_empty() {
+                    self.execute_selected_command()?;
+                    self.focus = FocusPane::Commands;
+                } else {
+                    self.focus = FocusPane::Fields;
+                    self.status_line = "Cycle -> command fields".to_owned();
+                }
+            }
+            FocusPane::Fields => {
+                self.execute_selected_command()?;
+                self.focus = FocusPane::Commands;
+            }
+            FocusPane::Output => {
+                self.focus = FocusPane::Commands;
+                self.status_line = "Cycle reset to command tree".to_owned();
+            }
+        }
+        Ok(())
+    }
+
+    fn toggle_fullscreen(&mut self) {
+        self.fullscreen_enabled = !self.fullscreen_enabled;
+        self.status_line = if self.fullscreen_enabled {
+            format!("Fullscreen enabled for {} pane", self.focus.label())
+        } else {
+            "Fullscreen disabled".to_owned()
+        };
+    }
+
     fn on_edit_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
-                self.input_mode = InputMode::Navigate;
-                self.editing_target = None;
-                self.editing_buffer.clear();
-                self.status_line = "Edit canceled".to_owned();
+                self.cancel_edit_buffer();
+                if self.fullscreen_enabled {
+                    self.fullscreen_enabled = false;
+                    self.focus = FocusPane::Commands;
+                    self.status_line =
+                        "Fullscreen disabled; focus reset to command tree".to_owned();
+                }
             }
             KeyCode::Enter => {
                 self.commit_edit_buffer();
             }
             KeyCode::Backspace => {
                 self.editing_buffer.pop();
+                self.apply_live_edit_buffer();
             }
             KeyCode::Char(character) => {
                 self.editing_buffer.push(character);
+                self.apply_live_edit_buffer();
             }
             _ => {}
+        }
+    }
+
+    fn cancel_edit_buffer(&mut self) {
+        let Some(target) = self.editing_target else {
+            return;
+        };
+        match target {
+            EditingTarget::Global(index) => {
+                if let Some(field_state) = self.global_fields.get_mut(index) {
+                    field_state.value = FieldValue::Text(self.editing_original_buffer.clone());
+                }
+            }
+            EditingTarget::Field(index) => {
+                if let Some(field_state) = self.command_fields.get_mut(index) {
+                    field_state.value = FieldValue::Text(self.editing_original_buffer.clone());
+                }
+            }
+            EditingTarget::CommandFilter => {
+                self.command_filter = self.editing_original_buffer.trim().to_owned();
+                self.selected_command_tree_row = 0;
+                self.reconcile_tree_selection();
+            }
+        }
+        self.input_mode = InputMode::Navigate;
+        self.editing_target = None;
+        self.editing_buffer.clear();
+        self.editing_original_buffer.clear();
+        self.status_line = "Edit canceled".to_owned();
+    }
+
+    fn apply_live_edit_buffer(&mut self) {
+        let Some(target) = self.editing_target else {
+            return;
+        };
+        match target {
+            EditingTarget::Global(index) => {
+                if let Some(field_state) = self.global_fields.get_mut(index) {
+                    field_state.value = FieldValue::Text(self.editing_buffer.clone());
+                    self.clear_pending_confirmation();
+                }
+            }
+            EditingTarget::Field(index) => {
+                if let Some(field_state) = self.command_fields.get_mut(index) {
+                    field_state.value = FieldValue::Text(self.editing_buffer.clone());
+                    self.clear_pending_confirmation();
+                }
+            }
+            EditingTarget::CommandFilter => {
+                self.command_filter = self.editing_buffer.trim().to_owned();
+                self.selected_command_tree_row = 0;
+                self.reconcile_tree_selection();
+                self.status_line = if self.command_filter.is_empty() {
+                    "Filter cleared".to_owned()
+                } else {
+                    format!("Filter set: {}", self.command_filter)
+                };
+            }
         }
     }
 
@@ -1480,6 +2123,7 @@ impl TuiApp {
         self.input_mode = InputMode::Navigate;
         self.editing_target = None;
         self.editing_buffer.clear();
+        self.editing_original_buffer.clear();
         if !matches!(target, EditingTarget::CommandFilter) {
             self.status_line = "Value updated".to_owned();
         }
@@ -1501,6 +2145,12 @@ impl TuiApp {
             KeyCode::Down | KeyCode::Char('j') => {
                 self.selected_command_tree_row =
                     (self.selected_command_tree_row + 1).min(rows.len().saturating_sub(1));
+            }
+            KeyCode::Right if self.fullscreen_enabled => {
+                self.scroll_horizontal_for_focus(true);
+            }
+            KeyCode::Left if self.fullscreen_enabled => {
+                self.scroll_horizontal_for_focus(false);
             }
             KeyCode::Right | KeyCode::Char('l') => {
                 if let Some(row) = rows.get(self.selected_command_tree_row) {
@@ -1567,6 +2217,12 @@ impl TuiApp {
             KeyCode::Down | KeyCode::Char('j') => {
                 selected_index = (selected_index + 1).min(field_count.saturating_sub(1));
             }
+            KeyCode::Left if self.fullscreen_enabled => {
+                self.scroll_horizontal_for_focus(false);
+            }
+            KeyCode::Right if self.fullscreen_enabled => {
+                self.scroll_horizontal_for_focus(true);
+            }
             KeyCode::Left | KeyCode::Char('h') => {
                 self.cycle_choice(global, selected_index, false);
             }
@@ -1576,7 +2232,7 @@ impl TuiApp {
             KeyCode::Char(' ') => {
                 self.toggle_bool(global, selected_index);
             }
-            KeyCode::Char('e') | KeyCode::Char('i') | KeyCode::Enter => {
+            KeyCode::Char('e') | KeyCode::Char('i') => {
                 self.start_edit(global, selected_index);
             }
             _ => {}
@@ -1598,6 +2254,12 @@ impl TuiApp {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.output_scroll = self.output_scroll.saturating_add(OUTPUT_SCROLL_STEP);
+            }
+            KeyCode::Left => {
+                self.scroll_horizontal_for_focus(false);
+            }
+            KeyCode::Right => {
+                self.scroll_horizontal_for_focus(true);
             }
             KeyCode::PageUp => {
                 self.output_scroll = self.output_scroll.saturating_sub(OUTPUT_SCROLL_PAGE_STEP);
@@ -1650,6 +2312,7 @@ impl TuiApp {
             EditingTarget::Field(index)
         });
         self.editing_buffer = current_value.clone();
+        self.editing_original_buffer = current_value.clone();
         self.status_line = format!("Editing `{}`", field_state.spec.label);
     }
 
@@ -1712,6 +2375,13 @@ impl TuiApp {
     }
 
     fn execute_selected_command(&mut self) -> Result<()> {
+        self.execute_selected_command_with_policy(false)
+    }
+
+    fn execute_selected_command_with_policy(
+        &mut self,
+        bypass_risky_confirmation: bool,
+    ) -> Result<()> {
         if self.active_run.is_some() {
             self.status_line =
                 "A run is already active. Press Ctrl+C to cancel it first.".to_owned();
@@ -1752,6 +2422,7 @@ impl TuiApp {
         };
         let signature = command_signature(command_spec, &invocation_args);
         if is_risky_command(command_spec.id)
+            && !bypass_risky_confirmation
             && self.pending_risky_signature.as_deref() != Some(signature.as_str())
         {
             self.pending_risky_signature = Some(signature);
@@ -2133,14 +2804,20 @@ impl TuiApp {
         } else {
             "none"
         };
+        let view_state = if self.fullscreen_enabled {
+            format!("fullscreen ({})", self.focus.label())
+        } else {
+            "split".to_owned()
+        };
         let filter_text = if self.command_filter.is_empty() {
             "<none>".to_owned()
         } else {
             self.command_filter.clone()
         };
         let header = Paragraph::new(format!(
-            "gloves tui | mode: {} | focus: {} | confirm: {} | filter: {} | status: {}",
+            "gloves tui | mode: {} | view: {} | focus: {} | confirm: {} | filter: {} | status: {}",
             self.input_mode_label(),
+            view_state,
             self.focus.label(),
             confirmation_state,
             filter_text,
@@ -2153,28 +2830,41 @@ impl TuiApp {
         );
         frame.render_widget(header, root_chunks[0]);
 
-        let body_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(28),
-                Constraint::Percentage(32),
-                Constraint::Percentage(40),
-            ])
-            .split(root_chunks[1]);
+        if self.fullscreen_enabled {
+            self.render_focused_pane(frame, root_chunks[1]);
+        } else {
+            let body_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(28),
+                    Constraint::Percentage(32),
+                    Constraint::Percentage(40),
+                ])
+                .split(root_chunks[1]);
 
-        self.render_commands(frame, body_chunks[0]);
-        self.render_forms(frame, body_chunks[1]);
-        self.render_output(frame, body_chunks[2]);
+            self.render_commands(frame, body_chunks[0]);
+            self.render_forms(frame, body_chunks[1]);
+            self.render_output(frame, body_chunks[2]);
+        }
 
         let footer_text = if self.input_mode == InputMode::Edit {
             "Edit: type, Enter=save, Esc=cancel"
         } else {
-            "Navigate: Tab switch pane, / filter, Up/Down move, Left/Right expand/collapse tree (or cycle choices in field panes), Space toggle bool, e edit text, Enter toggle tree node, ? help, r/F5 run, Ctrl+C cancel active run, Home/g top, End/G tail, x/X reset field, c clear output, q quit"
+            "Navigate: Tab switch pane, f fullscreen toggle, / filter, Up/Down move, Left/Right expand/collapse tree (or cycle choices in field panes), Space toggle bool, e edit text, Enter cycle (commands -> globals -> fields -> run -> commands; branches toggle), ? help, r/F5 run, Ctrl+C cancel active run, Home/g top, End/G tail, x/X reset field, c clear output, q quit"
         };
         let footer = Paragraph::new(footer_text)
             .wrap(Wrap { trim: true })
             .block(Block::default().borders(Borders::ALL).title("Keys"));
         frame.render_widget(footer, root_chunks[2]);
+    }
+
+    fn render_focused_pane(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+        match self.focus {
+            FocusPane::Commands => self.render_commands(frame, area),
+            FocusPane::Globals => self.render_field_list(frame, area, true),
+            FocusPane::Fields => self.render_field_list(frame, area, false),
+            FocusPane::Output => self.render_output(frame, area),
+        }
     }
 
     fn render_commands(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
@@ -2183,8 +2873,13 @@ impl TuiApp {
             .iter()
             .filter(|row| row.command_index.is_some())
             .count();
+        let content_width = usize::from(area.width.saturating_sub(4));
         let items = if rows.is_empty() {
-            vec![ListItem::new(Line::from(EMPTY_FILTER_PLACEHOLDER))]
+            vec![ListItem::new(Line::from(visible_line_window(
+                EMPTY_FILTER_PLACEHOLDER,
+                self.command_horizontal_scroll,
+                content_width,
+            )))]
         } else {
             rows.iter()
                 .map(|row| {
@@ -2198,21 +2893,19 @@ impl TuiApp {
                     } else {
                         " - "
                     };
-                    let mut spans = vec![Span::raw(format!("{indent}{marker} "))];
-                    if row.command_index.is_some() {
-                        spans.push(Span::styled(
-                            row.label.clone(),
-                            Style::default().add_modifier(Modifier::BOLD),
-                        ));
-                    } else {
-                        spans.push(Span::raw(row.label.clone()));
-                    }
+                    let mut line = format!("{indent}{marker} ");
+                    line.push_str(&row.label);
                     if let Some(command_index) = row.command_index {
                         if let Some(spec) = COMMAND_SPECS.get(command_index) {
-                            spans.push(Span::raw(format!("  {}", spec.summary)));
+                            line.push_str("  ");
+                            line.push_str(spec.summary);
                         }
                     }
-                    ListItem::new(Line::from(spans))
+                    ListItem::new(Line::from(visible_line_window(
+                        &line,
+                        self.command_horizontal_scroll,
+                        content_width,
+                    )))
                 })
                 .collect::<Vec<_>>()
         };
@@ -2268,19 +2961,26 @@ impl TuiApp {
             )
         };
 
+        let horizontal_scroll = if global {
+            self.globals_horizontal_scroll
+        } else {
+            self.fields_horizontal_scroll
+        };
+        let content_width = usize::from(area.width.saturating_sub(4));
         let items = fields
             .iter()
             .map(|field_state| {
                 let suffix = if field_state.spec.required { " *" } else { "" };
                 let value = field_display_value(field_state);
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{}{}: ", field_state.spec.label, suffix),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(value),
-                    Span::raw(format!("  [{}]", field_state.spec.help)),
-                ]))
+                let line = format!(
+                    "{}{}: {}  [{}]",
+                    field_state.spec.label, suffix, value, field_state.spec.help
+                );
+                ListItem::new(Line::from(visible_line_window(
+                    &line,
+                    horizontal_scroll,
+                    content_width,
+                )))
             })
             .collect::<Vec<_>>();
 
@@ -2301,13 +3001,12 @@ impl TuiApp {
         self.sync_output_scroll();
         let title = pane_title("Execution Output", self.focus == FocusPane::Output);
         let rendered_lines = self.flatten_output_lines();
-        let output_text = if rendered_lines.is_empty() {
-            "No output yet".to_owned()
-        } else {
-            rendered_lines.join("\n")
-        };
+        let output_text = format_output_text_for_viewport(
+            &rendered_lines,
+            area.width,
+            self.output_horizontal_scroll,
+        );
         let output_widget = Paragraph::new(output_text)
-            .wrap(Wrap { trim: false })
             .scroll((self.output_scroll, 0))
             .block(Block::default().borders(Borders::ALL).title(title));
         frame.render_widget(output_widget, area);
@@ -2412,11 +3111,61 @@ impl RunRecord {
 }
 
 fn push_section_line(section_lines: &mut Vec<String>, line: String) {
-    section_lines.push(line);
+    section_lines.push(sanitize_output_line(&line));
     if section_lines.len() > MAX_OUTPUT_SECTION_LINES {
         let overflow = section_lines.len() - MAX_OUTPUT_SECTION_LINES;
         section_lines.drain(0..overflow);
     }
+}
+
+fn format_output_text_for_viewport(
+    lines: &[String],
+    area_width: u16,
+    horizontal_scroll: u16,
+) -> String {
+    if lines.is_empty() {
+        return "No output yet".to_owned();
+    }
+    let content_width = usize::from(area_width.saturating_sub(3));
+    lines
+        .iter()
+        .map(|line| visible_line_window(line, horizontal_scroll, content_width))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn visible_line_window(line: &str, horizontal_scroll: u16, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    line.chars()
+        .skip(usize::from(horizontal_scroll))
+        .take(max_width)
+        .collect()
+}
+
+fn sanitize_output_line(raw_line: &str) -> String {
+    let mut sanitized = String::with_capacity(raw_line.len());
+    let mut chars = raw_line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            if chars.peek().is_some_and(|next| *next == '[') {
+                chars.next();
+                for sequence_character in chars.by_ref() {
+                    if ('@'..='~').contains(&sequence_character) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        match character {
+            '\t' => sanitized.push_str(OUTPUT_TAB_EXPANSION),
+            _ if character.is_control() => {}
+            _ => sanitized.push(character),
+        }
+    }
+    sanitized
 }
 
 fn tail_scroll_start(total_lines: usize, viewport_height: u16) -> u16 {
@@ -2849,10 +3598,12 @@ impl FocusPane {
 #[cfg(test)]
 mod unit_tests {
     use super::{
-        build_command_tree, build_invocation_args, field_states_for_spec, initial_field_state,
-        is_risky_command, stdin_payload_for_command, tail_scroll_start, CommandSpec,
-        CommandTreeNode, FieldState, FieldValue, RunPhase, RunRecord, TuiApp, COMMAND_SPECS,
-        GLOBAL_FIELDS, MAX_OUTPUT_LINES,
+        build_command_tree, build_invocation_args, field_states_for_spec,
+        format_output_text_for_viewport, initial_field_state, is_risky_command,
+        normalize_launch_command_args, resolve_launch_command_spec, sanitize_output_line,
+        stdin_payload_for_command, tail_scroll_start, visible_line_window, CommandSpec,
+        CommandTreeNode, FieldState, FieldValue, FocusPane, NavigatorLaunchOptions, RunPhase,
+        RunRecord, TuiApp, COMMAND_SPECS, GLOBAL_FIELDS, HORIZONTAL_SCROLL_STEP, MAX_OUTPUT_LINES,
     };
     use crate::cli::Cli;
     use clap::CommandFactory;
@@ -2967,6 +3718,129 @@ mod unit_tests {
     }
 
     #[test]
+    fn command_tree_routes_secret_commands_through_secrets_group() {
+        let tree = build_command_tree();
+        for label in ["set", "get", "grant", "revoke", "status"] {
+            assert!(tree.iter().all(|node| node.label != label));
+        }
+
+        let secrets = node_by_label(&tree, "secrets");
+        let expected_ids = [
+            ("set", "set"),
+            ("get", "get"),
+            ("grant", "grant"),
+            ("revoke", "revoke"),
+            ("status", "status"),
+        ];
+
+        for (label, expected_id) in expected_ids {
+            let leaf = secrets
+                .children
+                .iter()
+                .find(|node| node.label == label)
+                .expect("secrets leaf exists");
+            let command_index = leaf.command_index.expect("secrets leaf is executable");
+            assert_eq!(COMMAND_SPECS[command_index].id, expected_id);
+        }
+    }
+
+    #[test]
+    fn launch_command_normalization_maps_legacy_shortcuts() {
+        let legacy_secret = normalize_launch_command_args(&[
+            "set".to_owned(),
+            "service/token".to_owned(),
+            "--generate".to_owned(),
+        ]);
+        assert_eq!(
+            legacy_secret,
+            vec![
+                "secrets".to_owned(),
+                "set".to_owned(),
+                "service/token".to_owned(),
+                "--generate".to_owned()
+            ]
+        );
+
+        let legacy_request = normalize_launch_command_args(&[
+            "approve".to_owned(),
+            "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+        ]);
+        assert_eq!(
+            legacy_request,
+            vec![
+                "requests".to_owned(),
+                "approve".to_owned(),
+                "123e4567-e89b-12d3-a456-426614174000".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn launch_command_resolver_matches_nested_request_commands() {
+        let args = vec![
+            "requests".to_owned(),
+            "approve".to_owned(),
+            "123e4567-e89b-12d3-a456-426614174000".to_owned(),
+        ];
+        let (command_index, consumed_path_segments) =
+            resolve_launch_command_spec(&args).expect("resolver should match command");
+        assert_eq!(COMMAND_SPECS[command_index].id, "requests_approve");
+        assert_eq!(consumed_path_segments, 2);
+    }
+
+    #[test]
+    fn tui_launch_options_prefill_globals_and_select_command_fields() {
+        let app = TuiApp::new(NavigatorLaunchOptions {
+            root: Some("/tmp/gloves".to_owned()),
+            config: Some("/etc/gloves/prod.gloves.toml".to_owned()),
+            command_args: vec!["audit".to_owned(), "--limit".to_owned(), "100".to_owned()],
+            ..NavigatorLaunchOptions::default()
+        });
+
+        assert_eq!(app.selected_command_spec().id, "audit");
+        assert!(app.startup_command_pending);
+        let limit_field = app
+            .command_fields
+            .iter()
+            .find(|field| field.spec.id == "limit")
+            .expect("audit limit field");
+        match &limit_field.value {
+            FieldValue::Text(value) => assert_eq!(value, "100"),
+            _ => panic!("limit field must be text"),
+        }
+
+        let config_field = app
+            .global_fields
+            .iter()
+            .find(|field| field.spec.id == "config")
+            .expect("global config field");
+        match &config_field.value {
+            FieldValue::Text(value) => assert_eq!(value, "/etc/gloves/prod.gloves.toml"),
+            _ => panic!("config field must be text"),
+        }
+    }
+
+    #[test]
+    fn tui_startup_autorun_enters_fullscreen_output_and_runs_command() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions {
+            command_args: vec!["secrets".to_owned(), "revoke".to_owned()],
+            ..NavigatorLaunchOptions::default()
+        });
+        assert!(app.startup_command_pending);
+        assert_eq!(app.focus, FocusPane::Commands);
+        assert!(!app.fullscreen_enabled);
+
+        app.execute_startup_command_if_needed()
+            .expect("startup autorun should execute");
+
+        assert!(!app.startup_command_pending);
+        assert_eq!(app.focus, FocusPane::Output);
+        assert!(app.fullscreen_enabled);
+        assert_eq!(app.status_line, "Validation failed");
+        assert_eq!(app.run_history.len(), 1);
+    }
+
+    #[test]
     fn command_catalog_covers_all_visible_cli_leaf_commands_except_tui() {
         let mut paths = Vec::new();
         collect_visible_leaf_paths(&Cli::command(), &[], &mut paths);
@@ -3023,6 +3897,7 @@ mod unit_tests {
             vec![
                 "--error-format",
                 "text",
+                "secrets",
                 "grant",
                 "service/token",
                 "--to",
@@ -3047,6 +3922,7 @@ mod unit_tests {
             vec![
                 "--error-format",
                 "text",
+                "secrets",
                 "set",
                 "service/token",
                 "--value",
@@ -3072,6 +3948,7 @@ mod unit_tests {
             vec![
                 "--error-format",
                 "text",
+                "secrets",
                 "set",
                 "service/token",
                 "--stdin",
@@ -3135,8 +4012,41 @@ mod unit_tests {
     }
 
     #[test]
+    fn sanitize_output_line_removes_escape_sequences_and_control_characters() {
+        let sanitized = sanitize_output_line("\u{1b}[32mok\u{1b}[0m\tone\rtwo\u{0007}");
+        assert_eq!(sanitized, "ok    onetwo");
+    }
+
+    #[test]
+    fn visible_line_window_applies_horizontal_offset_and_width() {
+        assert_eq!(visible_line_window("abcdefgh", 0, 4), "abcd");
+        assert_eq!(visible_line_window("abcdefgh", 3, 4), "defg");
+        assert_eq!(visible_line_window("abc", 9, 4), "");
+    }
+
+    #[test]
+    fn output_text_for_viewport_honors_horizontal_scroll() {
+        let text =
+            format_output_text_for_viewport(&["alpha-beta".to_owned(), "two".to_owned()], 8, 3);
+        assert_eq!(text, "ha-be\n");
+    }
+
+    #[test]
+    fn output_arrow_keys_scroll_horizontally() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Output;
+        assert_eq!(app.output_horizontal_scroll, 0);
+        app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .expect("right scroll");
+        assert_eq!(app.output_horizontal_scroll, HORIZONTAL_SCROLL_STEP);
+        app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .expect("left scroll");
+        assert_eq!(app.output_horizontal_scroll, 0);
+    }
+
+    #[test]
     fn output_scroll_follow_tail_transitions_with_manual_navigation() {
-        let mut app = TuiApp::new();
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
         let run_id = 9;
         let mut record = RunRecord::new(run_id, "version".to_owned(), "gloves version".to_owned());
         for index in 0..32 {
@@ -3166,8 +4076,166 @@ mod unit_tests {
     }
 
     #[test]
+    fn fullscreen_toggle_follows_focused_pane() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        assert!(!app.fullscreen_enabled);
+
+        app.focus = FocusPane::Output;
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .expect("toggle fullscreen on");
+        assert!(app.fullscreen_enabled);
+        assert!(app
+            .status_line
+            .contains("Fullscreen enabled for output pane"));
+
+        app.focus = FocusPane::Commands;
+        app.on_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE))
+            .expect("toggle fullscreen off");
+        assert!(!app.fullscreen_enabled);
+        assert_eq!(app.status_line, "Fullscreen disabled");
+    }
+
+    #[test]
+    fn escape_exits_fullscreen_before_quitting() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Fields;
+        app.fullscreen_enabled = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Esc should exit fullscreen");
+        assert!(!app.fullscreen_enabled);
+        assert_eq!(app.focus, FocusPane::Commands);
+        assert!(!app.should_quit);
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("Esc should quit from split view");
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn text_field_edit_streams_updates_and_escape_reverts() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("set command exists");
+        app.select_command_by_index(set_index);
+
+        app.start_edit(false, 0);
+        assert_eq!(app.input_mode_label(), "edit");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE))
+            .expect("live update a");
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE))
+            .expect("live update b");
+
+        match &app.command_fields[0].value {
+            FieldValue::Text(value) => assert_eq!(value, "ab"),
+            _ => panic!("expected text field"),
+        }
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("cancel edit");
+        assert_eq!(app.input_mode_label(), "navigate");
+        match &app.command_fields[0].value {
+            FieldValue::Text(value) => assert!(value.is_empty()),
+            _ => panic!("expected text field"),
+        }
+    }
+
+    #[test]
+    fn command_filter_edit_streams_updates_and_escape_reverts() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        assert!(app.command_filter.is_empty());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("start filter edit");
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE))
+            .expect("live filter update");
+        assert_eq!(app.command_filter, "v");
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .expect("cancel filter edit");
+        assert!(app.command_filter.is_empty());
+        assert_eq!(app.input_mode_label(), "navigate");
+    }
+
+    #[test]
+    fn enter_cycle_moves_focus_from_leaf_commands_to_globals_to_fields() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("set command exists");
+        let rows = app.command_tree_rows();
+        let set_row = rows
+            .iter()
+            .position(|row| row.command_index == Some(set_index))
+            .expect("set row exists");
+        app.selected_command_tree_row = set_row;
+        app.reconcile_tree_selection();
+        app.focus = FocusPane::Commands;
+        assert_eq!(app.focus, FocusPane::Commands);
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("commands -> globals");
+        assert_eq!(app.focus, FocusPane::Globals);
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("globals -> fields");
+        assert_eq!(app.focus, FocusPane::Fields);
+    }
+
+    #[test]
+    fn enter_cycle_runs_from_fields_and_returns_focus_to_commands() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let revoke_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "revoke")
+            .expect("revoke command exists");
+        let rows = app.command_tree_rows();
+        let revoke_row = rows
+            .iter()
+            .position(|row| row.command_index == Some(revoke_index))
+            .expect("revoke row exists");
+        app.selected_command_tree_row = revoke_row;
+        app.reconcile_tree_selection();
+        app.focus = FocusPane::Fields;
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("fields -> run -> commands");
+        assert_eq!(app.focus, FocusPane::Commands);
+        assert_eq!(app.status_line, "Validation failed");
+        assert_eq!(app.run_history.len(), 1);
+    }
+
+    #[test]
+    fn enter_on_command_branch_toggles_expand_collapse() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let rows = app.command_tree_rows();
+        let requests_index = rows
+            .iter()
+            .position(|row| row.label == "requests" && row.is_branch)
+            .expect("requests branch exists");
+        let requests_key = rows[requests_index].key.clone();
+        app.selected_command_tree_row = requests_index;
+        app.focus = FocusPane::Commands;
+        assert!(app.expanded_command_tree_paths.contains(&requests_key));
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("collapse branch");
+        assert!(!app.expanded_command_tree_paths.contains(&requests_key));
+        assert_eq!(app.focus, FocusPane::Commands);
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("expand branch");
+        assert!(app.expanded_command_tree_paths.contains(&requests_key));
+        assert_eq!(app.focus, FocusPane::Commands);
+    }
+
+    #[test]
     fn run_record_lifecycle_transitions_cover_success_failure_and_cancel() {
-        let mut app = TuiApp::new();
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
 
         let success_run_id = 21;
         app.run_history.push(RunRecord::new(
@@ -3238,7 +4306,7 @@ mod unit_tests {
 
     #[test]
     fn output_history_respects_global_retention_cap() {
-        let mut app = TuiApp::new();
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
         for index in 0..64 {
             let mut record = RunRecord::new(
                 index as u64,

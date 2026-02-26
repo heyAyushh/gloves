@@ -410,6 +410,64 @@ fn cli_help_lists_tui_and_error_format_option() {
 }
 
 #[test]
+fn cli_help_command_index_hides_legacy_request_shortcuts() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("\n  requests "));
+    assert!(stdout.contains("\n  secrets "));
+    assert!(!stdout.contains("\n  approve "));
+    assert!(!stdout.contains("\n  deny "));
+    assert!(!stdout.contains("\n  set "));
+    assert!(!stdout.contains("\n  get "));
+    assert!(!stdout.contains("\n  grant "));
+    assert!(!stdout.contains("\n  revoke "));
+    assert!(!stdout.contains("\n  status "));
+}
+
+#[test]
+fn cli_help_compacts_command_rows_on_one_line() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .arg("--help")
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("  init"));
+    assert!(stdout.contains("Initializes directory tree"));
+    assert!(!stdout.contains("  init\n          Initializes directory tree"));
+}
+
+#[test]
+fn cli_tui_accepts_bootstrap_args_before_command_path() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("prod.gloves.toml");
+    write_config(
+        &config_path,
+        &format!(
+            "version = 1\n[paths]\nroot = \"{}\"\n",
+            temp_dir.path().join("root").display()
+        ),
+    );
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "tui",
+            "--config",
+            config_path.to_str().unwrap(),
+            "audit",
+            "--limit",
+            "100",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("requires an interactive terminal"));
+    assert!(!stderr.contains("unexpected argument"));
+}
+
+#[test]
 fn cli_version_command_prints_helpful_metadata() {
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .arg("version")
@@ -430,25 +488,33 @@ fn cli_help_tui_includes_controls() {
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("Startup:"));
+    assert!(stdout.contains("auto-executed"));
+    assert!(stdout.contains("fullscreen output view"));
     assert!(stdout.contains("Controls:"));
     assert!(stdout.contains("r or F5"));
     assert!(stdout.contains("/ : filter"));
     assert!(stdout.contains("collapse/expand command groups"));
+    assert!(stdout.contains("horizontal scroll in output pane"));
+    assert!(stdout.contains("Shift+Left/Shift+Right or H/L"));
+    assert!(stdout.contains("toggle fullscreen for focused pane"));
+    assert!(stdout.contains("cycle commands -> global flags -> command fields -> run -> commands"));
     assert!(stdout.contains("? : run `gloves help`"));
     assert!(stdout.contains("Ctrl+C: cancel active run"));
     assert!(stdout.contains("Home or g"));
     assert!(stdout.contains("End or G"));
+    assert!(stdout.contains("Esc: exit fullscreen and return focus to command tree"));
     assert!(stdout.contains("live streaming output"));
 }
 
 #[test]
 fn cli_help_grant_includes_usage_examples() {
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["help", "grant"])
+        .args(["help", "secrets", "grant"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
-    assert!(stdout.contains("gloves grant service/token --to agent-b"));
+    assert!(stdout.contains("gloves secrets grant service/token --to agent-b"));
     assert!(stdout.contains("original creator of the secret"));
 }
 
@@ -461,7 +527,7 @@ fn cli_help_recursive_topic_path_renders_leaf_help() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
     assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
-    assert!(stdout.contains("Request UUID from `gloves list --pending`"));
+    assert!(stdout.contains("Request UUID from `gloves requests list`"));
 }
 
 #[test]
@@ -473,7 +539,19 @@ fn cli_subcommand_help_renders_nested_leaf_help() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
     assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
-    assert!(stdout.contains("Request UUID from `gloves list --pending`"));
+    assert!(stdout.contains("Request UUID from `gloves requests list`"));
+}
+
+#[test]
+fn cli_help_legacy_shortcut_topic_still_works() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["help", "approve"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains("USAGE:"));
+    assert!(stdout.contains("gloves approve <REQUEST_ID>"));
+    assert!(stdout.contains("gloves requests approve <request-id>"));
 }
 
 #[test]
@@ -1032,6 +1110,7 @@ fn cli_secret_acl_blocks_non_matching_set() {
             config_path.to_str().unwrap(),
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "rustical/token",
             "--value",
@@ -1059,6 +1138,7 @@ fn cli_secret_acl_blocks_non_matching_get() {
             "--no-config",
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "rustical/token",
             "--value",
@@ -1084,6 +1164,7 @@ fn cli_secret_acl_blocks_non_matching_get() {
             config_path.to_str().unwrap(),
             "--agent",
             "agent-main",
+            "secrets",
             "get",
             "rustical/token",
             "--pipe-to",
@@ -1107,6 +1188,7 @@ fn cli_secret_acl_cannot_be_bypassed_with_no_config_for_same_root() {
             "--no-config",
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "rustical/token",
             "--value",
@@ -1133,6 +1215,7 @@ fn cli_secret_acl_cannot_be_bypassed_with_no_config_for_same_root() {
             "--no-config",
             "--agent",
             "agent-main",
+            "secrets",
             "get",
             "rustical/token",
             "--pipe-to",
@@ -1156,6 +1239,7 @@ fn cli_secret_acl_filters_list_results() {
             "--no-config",
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "github/token",
             "--value",
@@ -1173,6 +1257,7 @@ fn cli_secret_acl_filters_list_results() {
             "--no-config",
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "rustical/token",
             "--value",
@@ -1222,6 +1307,7 @@ fn cli_secret_acl_uses_agent_override_policy() {
             "--no-config",
             "--agent",
             "agent-relationships",
+            "secrets",
             "set",
             "contacts/token",
             "--value",
@@ -1247,6 +1333,7 @@ fn cli_secret_acl_uses_agent_override_policy() {
             config_path.to_str().unwrap(),
             "--agent",
             "agent-main",
+            "secrets",
             "get",
             "contacts/token",
             "--pipe-to",
@@ -1263,6 +1350,7 @@ fn cli_secret_acl_uses_agent_override_policy() {
             config_path.to_str().unwrap(),
             "--agent",
             "agent-relationships",
+            "secrets",
             "get",
             "contacts/token",
             "--pipe-to",
@@ -1376,6 +1464,7 @@ fn cli_secret_acl_blocks_status_for_non_matching_path() {
             config_path.to_str().unwrap(),
             "--agent",
             ACL_TEST_AGENT_MAIN,
+            "secrets",
             "status",
             ACL_TEST_SECRET_GITHUB_TOKEN,
         ])
@@ -1403,6 +1492,7 @@ fn cli_secret_acl_blocks_revoke_without_revoke_operation() {
             config_path.to_str().unwrap(),
             "--agent",
             ACL_TEST_AGENT_MAIN,
+            "secrets",
             "revoke",
             ACL_TEST_SECRET_GITHUB_TOKEN,
         ])
@@ -1688,6 +1778,7 @@ fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -1701,7 +1792,15 @@ fn cli_set_and_get_succeed_without_runtime_rage_binaries() {
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", empty_path.to_str().unwrap())
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
-        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("placeholder-secret"));
@@ -1728,6 +1827,7 @@ fn cli_extpass_get_reads_raw_secret_bytes() {
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "vault/agent_data",
             "--stdin",
@@ -1757,6 +1857,7 @@ fn cli_set_generate() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--generate",
@@ -1775,12 +1876,30 @@ fn cli_set_duplicate_secret_fails() {
     let root = temp_dir.path().to_str().unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "x", "--generate", "--ttl", "1"])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "x",
+            "--generate",
+            "--ttl",
+            "1",
+        ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "x", "--generate", "--ttl", "1"])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "x",
+            "--generate",
+            "--ttl",
+            "1",
+        ])
         .assert()
         .failure();
 }
@@ -1792,6 +1911,7 @@ fn cli_set_then_get_roundtrip() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -1807,6 +1927,7 @@ fn cli_set_then_get_roundtrip() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to",
@@ -1828,6 +1949,7 @@ fn cli_grant_allows_granted_agent_to_get_secret() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "x",
             "--value",
@@ -1845,6 +1967,7 @@ fn cli_grant_allows_granted_agent_to_get_secret() {
             root,
             "--agent",
             "agent-b",
+            "secrets",
             "get",
             "x",
             "--pipe-to",
@@ -1859,6 +1982,7 @@ fn cli_grant_allows_granted_agent_to_get_secret() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "grant",
             "x",
             "--to",
@@ -1883,6 +2007,7 @@ fn cli_grant_allows_granted_agent_to_get_secret() {
             root,
             "--agent",
             "agent-b",
+            "secrets",
             "get",
             "x",
             "--pipe-to",
@@ -1911,6 +2036,7 @@ fn cli_grant_requires_secret_creator_identity() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "x",
             "--value",
@@ -1923,7 +2049,7 @@ fn cli_grant_requires_secret_creator_identity() {
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "--agent", "agent-b", "grant", "x", "--to", "agent-c",
+            "--root", root, "--agent", "agent-b", "secrets", "grant", "x", "--to", "agent-c",
         ])
         .assert()
         .failure();
@@ -1943,6 +2069,7 @@ fn cli_grant_is_idempotent_for_existing_recipient() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "set",
             "x",
             "--value",
@@ -1959,6 +2086,7 @@ fn cli_grant_is_idempotent_for_existing_recipient() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "grant",
             "x",
             "--to",
@@ -1973,6 +2101,7 @@ fn cli_grant_is_idempotent_for_existing_recipient() {
             root,
             "--agent",
             "agent-main",
+            "secrets",
             "grant",
             "x",
             "--to",
@@ -2012,6 +2141,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-main",
+                "secrets",
                 "set",
                 &secret_name,
                 "--value",
@@ -2029,6 +2159,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-main",
+                "secrets",
                 "get",
                 &secret_name,
                 "--pipe-to",
@@ -2045,6 +2176,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-b",
+                "secrets",
                 "get",
                 &secret_name,
                 "--pipe-to",
@@ -2059,6 +2191,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-b",
+                "secrets",
                 "grant",
                 &secret_name,
                 "--to",
@@ -2076,6 +2209,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-main",
+                "secrets",
                 "grant",
                 &secret_name,
                 "--to",
@@ -2091,6 +2225,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-b",
+                "secrets",
                 "get",
                 &secret_name,
                 "--pipe-to",
@@ -2106,6 +2241,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-main",
+                "secrets",
                 "grant",
                 &secret_name,
                 "--to",
@@ -2121,6 +2257,7 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
                 root,
                 "--agent",
                 "agent-c",
+                "secrets",
                 "get",
                 &secret_name,
                 "--pipe-to",
@@ -2154,6 +2291,7 @@ fn cli_get_missing_secret_suggests_recovery() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "get",
             "missing",
         ])
@@ -2162,7 +2300,7 @@ fn cli_get_missing_secret_suggests_recovery() {
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("secret `missing` was not found"));
     assert!(stderr.contains("gloves list"));
-    assert!(stderr.contains("gloves get <secret-name>"));
+    assert!(stderr.contains("gloves secrets get <secret-name>"));
 }
 
 #[test]
@@ -2172,14 +2310,24 @@ fn cli_get_preserves_non_utf8_bytes_without_newline() {
     let expected = vec![0xff, 0x00, 0x61, 0x80];
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "bin", "--stdin", "--ttl", "1"])
+        .args([
+            "--root", root, "secrets", "set", "bin", "--stdin", "--ttl", "1",
+        ])
         .write_stdin(expected.clone())
         .assert()
         .success();
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
-        .args(["--root", root, "get", "bin", "--pipe-to", TEST_PIPE_COMMAND])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "bin",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
         .assert()
         .success()
         .get_output()
@@ -2205,7 +2353,9 @@ head -c 1 >/dev/null || true
     );
 
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "huge", "--stdin", "--ttl", "1"])
+        .args([
+            "--root", root, "secrets", "set", "huge", "--stdin", "--ttl", "1",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2218,7 +2368,15 @@ head -c 1 >/dev/null || true
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("PATH", with_fake_path(&fake_bin))
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, "drain-one-byte")
-        .args(["--root", root, "get", "huge", "--pipe-to", "drain-one-byte"])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "huge",
+            "--pipe-to",
+            "drain-one-byte",
+        ])
         .assert()
         .get_output()
         .clone();
@@ -2236,13 +2394,13 @@ fn cli_get_non_tty_requires_pipe_target() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+            "--root", root, "secrets", "set", "x", "--value", "secret", "--ttl", "1",
         ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "get", "x"])
+        .args(["--root", root, "secrets", "get", "x"])
         .assert()
         .failure()
         .stderr(predicates::str::contains(
@@ -2257,13 +2415,21 @@ fn cli_get_pipe_to_requires_allowlist() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+            "--root", root, "secrets", "set", "x", "--value", "secret", "--ttl", "1",
         ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
         .assert()
         .failure()
         .stderr(predicates::str::contains("secret piping is disabled"));
@@ -2276,14 +2442,14 @@ fn cli_get_pipe_to_rejects_unallowlisted_command() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+            "--root", root, "secrets", "set", "x", "--value", "secret", "--ttl", "1",
         ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
-        .args(["--root", root, "get", "x", "--pipe-to", "tee"])
+        .args(["--root", root, "secrets", "get", "x", "--pipe-to", "tee"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("not allowlisted"));
@@ -2296,14 +2462,14 @@ fn cli_get_pipe_to_rejects_non_bare_command_names() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+            "--root", root, "secrets", "set", "x", "--value", "secret", "--ttl", "1",
         ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
-        .args(["--root", root, "get", "x", "--pipe-to", "./cat"])
+        .args(["--root", root, "secrets", "get", "x", "--pipe-to", "./cat"])
         .assert()
         .failure()
         .stderr(predicates::str::contains("must be a bare executable name"));
@@ -2316,14 +2482,22 @@ fn cli_get_pipe_to_allowed_command_streams_secret() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "x", "--value", "secret", "--ttl", "1",
+            "--root", root, "secrets", "set", "x", "--value", "secret", "--ttl", "1",
         ])
         .assert()
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
-        .args(["--root", root, "get", "x", "--pipe-to", TEST_PIPE_COMMAND])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "x",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("secret"));
@@ -2348,6 +2522,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2364,6 +2539,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2393,6 +2569,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2409,6 +2586,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2438,6 +2616,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2457,6 +2636,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2486,6 +2666,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2505,6 +2686,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2536,6 +2718,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2555,6 +2738,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2586,6 +2770,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2603,6 +2788,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2634,6 +2820,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2653,6 +2840,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2669,6 +2857,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2698,6 +2887,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2717,6 +2907,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2748,6 +2939,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2767,6 +2959,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2798,6 +2991,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2815,6 +3009,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2846,6 +3041,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2865,6 +3061,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2896,6 +3093,7 @@ printf '%s' "$2"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2915,6 +3113,7 @@ printf '%s' "$2"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2944,6 +3143,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -2963,6 +3163,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -2994,6 +3195,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3013,6 +3215,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3044,6 +3247,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3063,6 +3267,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3092,6 +3297,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3111,6 +3317,7 @@ printf '%s' "$1"
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3148,6 +3355,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3164,6 +3372,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3179,6 +3388,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3216,6 +3426,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3232,6 +3443,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3271,6 +3483,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3287,6 +3500,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3326,6 +3540,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3342,6 +3557,7 @@ printf '%s' "$*"
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "x",
             "--pipe-to-args",
@@ -3360,7 +3576,9 @@ fn cli_get_pipe_to_args_rejects_non_utf8_secret_values() {
     let root = temp_dir.path().to_str().unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "bin", "--stdin", "--ttl", "1"])
+        .args([
+            "--root", root, "secrets", "set", "bin", "--stdin", "--ttl", "1",
+        ])
         .write_stdin(vec![0xff, 0x00, 0x61, 0x80])
         .assert()
         .success();
@@ -3370,6 +3588,7 @@ fn cli_get_pipe_to_args_rejects_non_utf8_secret_values() {
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "bin",
             "--pipe-to-args",
@@ -3386,7 +3605,16 @@ fn cli_get_pipe_to_args_rejects_control_characters() {
     let root = temp_dir.path().to_str().unwrap();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "set", "linebreak", "--stdin", "--ttl", "1"])
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "linebreak",
+            "--stdin",
+            "--ttl",
+            "1",
+        ])
         .write_stdin("line1\nline2")
         .assert()
         .success();
@@ -3396,6 +3624,7 @@ fn cli_get_pipe_to_args_rejects_control_characters() {
         .args([
             "--root",
             root,
+            "secrets",
             "get",
             "linebreak",
             "--pipe-to-args",
@@ -3413,6 +3642,7 @@ fn cli_set_from_stdin() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "stdin_secret",
             "--stdin",
@@ -3428,6 +3658,7 @@ fn cli_set_from_stdin() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "get",
             "stdin_secret",
             "--pipe-to",
@@ -3445,6 +3676,7 @@ fn cli_set_empty_stdin_rejected() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "stdin_secret",
             "--stdin",
@@ -3463,6 +3695,7 @@ fn cli_set_requires_input_source() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "missing_input",
         ])
@@ -3477,6 +3710,7 @@ fn cli_set_rejects_generate_and_value() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--generate",
@@ -3494,6 +3728,7 @@ fn cli_set_rejects_empty_value() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3510,7 +3745,7 @@ fn cli_set_rejects_non_positive_ttl() {
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
-            "--root", root, "set", "ttl_zero", "--value", "x", "--ttl", "0",
+            "--root", root, "secrets", "set", "ttl_zero", "--value", "x", "--ttl", "0",
         ])
         .assert()
         .failure();
@@ -3523,6 +3758,7 @@ fn cli_set_rejects_non_positive_ttl() {
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "ttl_negative",
             "--value",
@@ -3540,6 +3776,7 @@ fn cli_set_invalid_secret_name_includes_name_rules_hint() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "db pass!",
             "--value",
@@ -3578,6 +3815,7 @@ fn cli_get_raw_tty_warning() {
         .args([
             "--root",
             root,
+            "secrets",
             "set",
             "x",
             "--value",
@@ -3590,7 +3828,7 @@ fn cli_get_raw_tty_warning() {
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env("GLOVES_FORCE_TTY_WARNING", "1")
-        .args(["--root", root, "get", "x"])
+        .args(["--root", root, "secrets", "get", "x"])
         .assert()
         .stderr(predicates::str::contains("warning"));
 }
@@ -3715,7 +3953,7 @@ fn cli_approve_invalid_uuid_fails() {
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("invalid request id `not-a-uuid`"));
-    assert!(stderr.contains("gloves list --pending"));
+    assert!(stderr.contains("gloves requests list"));
     assert!(stderr.contains("gloves approve <request-id>"));
 }
 
@@ -3733,7 +3971,7 @@ fn cli_approve_requests_label_explains_expected_id() {
         .failure();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("`requests` is a label, not a request id"));
-    assert!(stderr.contains("gloves list --pending"));
+    assert!(stderr.contains("gloves requests list"));
 }
 
 #[test]
@@ -3761,8 +3999,8 @@ fn cli_explain_known_error_code_prints_guidance() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("E102 invalid request identifier"));
-    assert!(stdout.contains("gloves list --pending"));
-    assert!(stdout.contains("gloves approve <request-id>"));
+    assert!(stdout.contains("gloves requests list"));
+    assert!(stdout.contains("gloves requests approve <request-id>"));
 }
 
 #[test]
@@ -4139,6 +4377,7 @@ fn cli_revoke() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "set",
             "x",
             "--generate",
@@ -4149,7 +4388,13 @@ fn cli_revoke() {
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", temp_dir.path().to_str().unwrap(), "revoke", "x"])
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "secrets",
+            "revoke",
+            "x",
+        ])
         .assert()
         .success();
 
@@ -4163,6 +4408,7 @@ fn cli_revoke_missing_secret_suggests_recovery() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "revoke",
             "missing",
         ])
@@ -4171,7 +4417,7 @@ fn cli_revoke_missing_secret_suggests_recovery() {
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("secret `missing` was not found"));
     assert!(stderr.contains("gloves list"));
-    assert!(stderr.contains("gloves revoke <secret-name>"));
+    assert!(stderr.contains("gloves secrets revoke <secret-name>"));
 }
 
 #[test]
@@ -4190,7 +4436,13 @@ fn cli_status() {
         .success();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", temp_dir.path().to_str().unwrap(), "status", "x"])
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "secrets",
+            "status",
+            "x",
+        ])
         .assert()
         .success()
         .stdout(predicates::str::contains("pending"));
@@ -4203,6 +4455,7 @@ fn cli_status_defaults_to_fulfilled() {
         .args([
             "--root",
             temp_dir.path().to_str().unwrap(),
+            "secrets",
             "status",
             "missing",
         ])
@@ -4298,6 +4551,7 @@ fn cli_vault_init_respects_configured_agent_id() {
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "vault/agent_data",
             "--pipe-to",
@@ -4360,6 +4614,7 @@ fn cli_vault_init_uses_configured_secret_defaults() {
         .args([
             "--config",
             config_path.to_str().unwrap(),
+            "secrets",
             "get",
             "vault/agent_data",
             "--pipe-to",

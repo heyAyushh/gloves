@@ -26,20 +26,22 @@ const DEFAULT_VAULT_SECRET_LENGTH_BYTES: usize = 64;
 const SECRET_NAME_ARG_HELP: &str =
     "Secret id (example: `service/token`). Allowed characters: letters, digits, `.`, `_`, `-`, and `/`.";
 const REQUEST_ID_ARG_HELP: &str =
-    "Request UUID from `gloves list --pending` (example: `123e4567-e89b-12d3-a456-426614174000`).";
+    "Request UUID from `gloves requests list` (example: `123e4567-e89b-12d3-a456-426614174000`).";
 const ERROR_CODE_ARG_HELP: &str = "Error code from CLI stderr (example: `E102`).";
 const ERROR_FORMAT_ARG_HELP: &str = "Error output format (`text` or `json`).";
 const CLI_AFTER_HELP: &str = r#"Examples:
   gloves --root .openclaw/secrets init
-  gloves --root .openclaw/secrets set service/token --generate --ttl 1
-  gloves --root .openclaw/secrets get service/token --pipe-to cat
+  gloves --root .openclaw/secrets secrets set service/token --generate --ttl 1
+  gloves --root .openclaw/secrets secrets get service/token --pipe-to cat
   gloves --root .openclaw/secrets request prod/db --reason "run migration"
   gloves --root .openclaw/secrets requests list
-  gloves --root .openclaw/secrets grant service/token --to agent-b
+  gloves --root .openclaw/secrets secrets grant service/token --to agent-b
   gloves help requests approve
+  gloves help secrets set
   gloves requests help approve
+  gloves tui --config /etc/gloves/prod.gloves.toml audit --limit 100
   gloves explain E102
-  gloves --error-format json approve 123e4567-e89b-12d3-a456-426614174000
+  gloves --error-format json requests approve 123e4567-e89b-12d3-a456-426614174000
 
 Version:
   gloves --version
@@ -51,8 +53,8 @@ More help:
   gloves help vault
 "#;
 const SET_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves set service/token --generate --ttl 1
-  printf 'secret-value' | gloves set service/token --stdin --ttl 7
+  gloves secrets set service/token --generate --ttl 1
+  printf 'secret-value' | gloves secrets set service/token --stdin --ttl 7
 
 Tips:
   - Use `--generate` or `--stdin` for safer input handling.
@@ -60,8 +62,8 @@ Tips:
 "#;
 const REQUEST_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves request prod/db --reason "run migration"
-  gloves list --pending
-  gloves approve <request-id>
+  gloves requests list
+  gloves requests approve <request-id>
 "#;
 const REQUESTS_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves requests list
@@ -72,47 +74,49 @@ Tip:
   Use this command group when you want noun-first navigation.
 "#;
 const APPROVE_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves list --pending
+  gloves requests list
+  gloves requests approve <request-id>
   gloves approve <request-id>
 
 Tip:
-  `<request-id>` must be a UUID from `gloves list --pending`.
+  `<request-id>` must be a UUID from `gloves requests list`.
 "#;
 const DENY_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves list --pending
+  gloves requests list
+  gloves requests deny <request-id>
   gloves deny <request-id>
 
 Tip:
-  `<request-id>` must be a UUID from `gloves list --pending`.
+  `<request-id>` must be a UUID from `gloves requests list`.
 "#;
 const LIST_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves list
-  gloves list --pending
+  gloves requests list
 "#;
 const GRANT_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves grant service/token --to agent-b
-  gloves --agent default-agent grant service/token --to reviewer-a
+  gloves secrets grant service/token --to agent-b
+  gloves --agent default-agent secrets grant service/token --to reviewer-a
 
 Notes:
   - Grant updates recipient access for an existing agent-owned secret.
   - The caller must be the original creator of the secret.
 "#;
 const GET_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves get service/token
-  gloves get service/token --pipe-to cat
+  gloves secrets get service/token
+  gloves secrets get service/token --pipe-to cat
 
 Recovery:
   If the secret does not exist, run `gloves list`.
 "#;
 const REVOKE_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves revoke service/token
+  gloves secrets revoke service/token
 
 Recovery:
   Use `gloves list` to confirm the exact secret id before revoking.
 "#;
 const STATUS_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves status prod/db
-  gloves list --pending
+  gloves secrets status prod/db
+  gloves requests list
 "#;
 const VERSION_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --version
@@ -121,14 +125,22 @@ const VERSION_COMMAND_AFTER_HELP: &str = r#"Examples:
 "#;
 const HELP_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves help
-  gloves help set
+  gloves help secrets set
   gloves help requests approve
+  gloves secrets help get
   gloves requests help approve
   gloves vault help mount
 
 Tips:
   - Use command paths to drill down recursively.
   - `help` works both at the top level and inside command groups.
+"#;
+const SECRETS_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves secrets set service/token --generate --ttl 1
+  gloves secrets get service/token
+  gloves secrets grant service/token --to agent-b
+  gloves secrets revoke service/token
+  gloves secrets status service/token
 "#;
 const EXPLAIN_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves explain E102
@@ -139,15 +151,23 @@ Tip:
 "#;
 const TUI_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves tui
+  gloves tui --config /etc/gloves/prod.gloves.toml audit --limit 100
+
+Startup:
+  - When a command path is provided after `gloves tui`, it is preloaded and auto-executed.
+  - Startup runs open in fullscreen output view.
 
 Controls:
   - Up/Down or j/k: move command tree
-  - Left/Right or h/l: collapse/expand command groups
-  - Enter: toggle selected command group
+  - h/l: collapse/expand command groups (or cycle choices in field panes)
+  - Left/Right: horizontal scroll in output pane; in fullscreen, horizontal scroll for focused pane
+  - Shift+Left/Shift+Right or H/L: horizontal scroll for focused pane
+  - Enter: cycle commands -> global flags -> command fields -> run -> commands (branches toggle expand/collapse)
   - Tab / Shift+Tab: switch panes
+  - f: toggle fullscreen for focused pane
   - e: edit selected text field
   - Space: toggle booleans
-  - Left/Right: change choice fields in field panes
+  - Left/Right in field panes: change choices in split view; in fullscreen they pan horizontally
   - r or F5: execute selected command with live streaming output
   - Ctrl+C: cancel active run (q/Esc waits for cancellation first)
   - ? : run `gloves help` for selected command in output pane
@@ -155,7 +175,8 @@ Controls:
   - Home or g: jump output to top and disable follow-tail
   - End or G: jump output to tail and re-enable follow-tail
   - c: clear output history cards
-  - q or Esc: quit
+  - Esc: exit fullscreen and return focus to command tree; in split view it quits
+  - q: quit
 "#;
 const GPG_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent agent-main gpg create
@@ -183,8 +204,7 @@ Recovery:
     after_help = CLI_AFTER_HELP,
     infer_subcommands = true,
     disable_help_subcommand = true,
-    arg_required_else_help = true,
-    next_line_help = true
+    arg_required_else_help = true
 )]
 pub struct Cli {
     /// Root storage directory override.
@@ -233,7 +253,17 @@ pub enum Command {
     },
     /// Opens an interactive command navigator.
     #[command(visible_alias = "ui", after_help = TUI_COMMAND_AFTER_HELP)]
-    Tui,
+    Tui {
+        /// Optional TUI startup arguments: global overrides first, then command path and fields.
+        /// Example: `gloves tui --config /etc/gloves/prod.gloves.toml audit --limit 100`
+        #[arg(
+            value_name = "ARGS",
+            num_args = 0..,
+            trailing_var_arg = true,
+            allow_hyphen_values = true
+        )]
+        args: Vec<String>,
+    },
     /// Shows recursively helpful command documentation.
     #[command(after_help = HELP_COMMAND_AFTER_HELP)]
     Help {
@@ -241,37 +271,12 @@ pub enum Command {
         #[arg(value_name = "TOPIC", num_args = 0..)]
         topic: Vec<String>,
     },
-    /// Sets an agent secret.
-    #[command(after_help = SET_COMMAND_AFTER_HELP)]
-    Set {
-        /// Secret name.
-        #[arg(help = SECRET_NAME_ARG_HELP)]
-        name: String,
-        /// Generate random value.
-        #[arg(long)]
-        generate: bool,
-        /// Inline secret value (less secure than stdin).
-        #[arg(long)]
-        value: Option<String>,
-        /// Read secret value from stdin (trims trailing CR/LF).
-        #[arg(long)]
-        stdin: bool,
-        /// TTL in days.
-        #[arg(long)]
-        ttl: Option<i64>,
-    },
-    /// Gets a secret value.
-    #[command(after_help = GET_COMMAND_AFTER_HELP)]
-    Get {
-        /// Secret name.
-        #[arg(help = SECRET_NAME_ARG_HELP)]
-        name: String,
-        /// Pipe secret bytes to an approved command.
-        #[arg(long, conflicts_with = "pipe_to_args")]
-        pipe_to: Option<String>,
-        /// Execute an approved command template with `{secret}` interpolation.
-        #[arg(long, conflicts_with = "pipe_to")]
-        pipe_to_args: Option<String>,
+    /// Manages secret workflows (set/get/grant/revoke/status).
+    #[command(after_help = SECRETS_COMMAND_AFTER_HELP)]
+    Secrets {
+        /// Secret operation.
+        #[command(subcommand)]
+        command: SecretsCommand,
     },
     /// Prints redacted env export text.
     Env {
@@ -281,7 +286,7 @@ pub enum Command {
         /// Variable name.
         var: String,
     },
-    /// Creates a pending human request.
+    /// Creates one pending human request.
     #[command(after_help = REQUEST_COMMAND_AFTER_HELP)]
     Request {
         /// Secret name.
@@ -299,57 +304,33 @@ pub enum Command {
         #[arg(long)]
         blocklist: Option<String>,
     },
-    /// Groups request workflows (list/approve/deny) for noun-first navigation.
+    /// Manages pending request workflows (list/approve/deny).
     #[command(visible_alias = "req", after_help = REQUESTS_COMMAND_AFTER_HELP)]
     Requests {
         /// Request operation.
         #[command(subcommand)]
         command: RequestsCommand,
     },
-    /// Approves a pending request by id.
-    #[command(after_help = APPROVE_COMMAND_AFTER_HELP)]
+    /// Legacy shortcut: approves a pending request by id.
+    #[command(hide = true, after_help = APPROVE_COMMAND_AFTER_HELP)]
     Approve {
         /// Request UUID.
         #[arg(help = REQUEST_ID_ARG_HELP)]
         request_id: String,
     },
-    /// Denies a pending request by id.
-    #[command(after_help = DENY_COMMAND_AFTER_HELP)]
+    /// Legacy shortcut: denies a pending request by id.
+    #[command(hide = true, after_help = DENY_COMMAND_AFTER_HELP)]
     Deny {
         /// Request UUID.
         #[arg(help = REQUEST_ID_ARG_HELP)]
         request_id: String,
     },
-    /// Lists entries.
+    /// Lists secret entries (`requests list` shows pending requests).
     #[command(visible_alias = "ls", after_help = LIST_COMMAND_AFTER_HELP)]
     List {
         /// Show only pending request entries.
         #[arg(long)]
         pending: bool,
-    },
-    /// Grants an existing secret to another agent.
-    #[command(after_help = GRANT_COMMAND_AFTER_HELP)]
-    Grant {
-        /// Secret name.
-        #[arg(help = SECRET_NAME_ARG_HELP)]
-        name: String,
-        /// Agent id to grant access to.
-        #[arg(long)]
-        to: String,
-    },
-    /// Revokes a secret.
-    #[command(after_help = REVOKE_COMMAND_AFTER_HELP)]
-    Revoke {
-        /// Secret name.
-        #[arg(help = SECRET_NAME_ARG_HELP)]
-        name: String,
-    },
-    /// Shows request status by secret name.
-    #[command(after_help = STATUS_COMMAND_AFTER_HELP)]
-    Status {
-        /// Secret name.
-        #[arg(help = SECRET_NAME_ARG_HELP)]
-        name: String,
     },
     /// Views audit events.
     Audit {
@@ -530,6 +511,74 @@ pub enum VaultCommand {
 /// Supported config subcommands.
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
+pub enum SecretsCommand {
+    /// Shows help for secret workflows.
+    Help {
+        /// Optional nested topic (for example: `set`).
+        #[arg(value_name = "TOPIC", num_args = 0..)]
+        topic: Vec<String>,
+    },
+    /// Sets an agent secret.
+    #[command(after_help = SET_COMMAND_AFTER_HELP)]
+    Set {
+        /// Secret name.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        name: String,
+        /// Generate random value.
+        #[arg(long)]
+        generate: bool,
+        /// Inline secret value (less secure than stdin).
+        #[arg(long)]
+        value: Option<String>,
+        /// Read secret value from stdin (trims trailing CR/LF).
+        #[arg(long)]
+        stdin: bool,
+        /// TTL in days.
+        #[arg(long)]
+        ttl: Option<i64>,
+    },
+    /// Gets a secret value.
+    #[command(after_help = GET_COMMAND_AFTER_HELP)]
+    Get {
+        /// Secret name.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        name: String,
+        /// Pipe secret bytes to an approved command.
+        #[arg(long, conflicts_with = "pipe_to_args")]
+        pipe_to: Option<String>,
+        /// Execute an approved command template with `{secret}` interpolation.
+        #[arg(long, conflicts_with = "pipe_to")]
+        pipe_to_args: Option<String>,
+    },
+    /// Grants an existing secret to another agent.
+    #[command(after_help = GRANT_COMMAND_AFTER_HELP)]
+    Grant {
+        /// Secret name.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        name: String,
+        /// Agent id to grant access to.
+        #[arg(long)]
+        to: String,
+    },
+    /// Revokes a secret.
+    #[command(after_help = REVOKE_COMMAND_AFTER_HELP)]
+    Revoke {
+        /// Secret name.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        name: String,
+    },
+    /// Shows request status by secret name.
+    #[command(after_help = STATUS_COMMAND_AFTER_HELP)]
+    Status {
+        /// Secret name.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        name: String,
+    },
+}
+
+/// Supported config subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
 pub enum ConfigCommand {
     /// Shows help for config workflows.
     Help {
@@ -636,7 +685,7 @@ mod unit_tests {
             validate_ttl_days,
         },
         secret_input::{parse_duration_value, resolve_secret_input},
-        ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand,
+        ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand, SecretsCommand,
     };
     use crate::error::GlovesError;
     use crate::paths::SecretsPaths;
@@ -805,11 +854,38 @@ mod unit_tests {
 
     #[test]
     fn cli_set_help_includes_input_examples() {
-        let cli = Cli::try_parse_from(["gloves", "help", "set"]).unwrap();
+        let cli = Cli::try_parse_from(["gloves", "help", "secrets", "set"]).unwrap();
         assert!(matches!(
             cli.command,
-            Command::Help { topic } if topic == vec!["set".to_owned()]
+            Command::Help { topic } if topic == vec!["secrets".to_owned(), "set".to_owned()]
         ));
+    }
+
+    #[test]
+    fn cli_secrets_set_parses_to_nested_command() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "secrets",
+            "set",
+            "service/token",
+            "--generate",
+            "--ttl",
+            "1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Secrets {
+                command: SecretsCommand::Set { name, generate, ttl, .. }
+            } if name == "service/token" && generate && ttl == Some(1)
+        ));
+    }
+
+    #[test]
+    fn cli_top_level_set_is_not_supported() {
+        let error =
+            Cli::try_parse_from(["gloves", "set", "service/token", "--generate"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -830,12 +906,32 @@ mod unit_tests {
     }
 
     #[test]
-    fn cli_grant_parses_to_grant_command() {
-        let cli =
-            Cli::try_parse_from(["gloves", "grant", "service/token", "--to", "agent-b"]).unwrap();
+    fn cli_grant_parses_to_secrets_grant_command() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "secrets",
+            "grant",
+            "service/token",
+            "--to",
+            "agent-b",
+        ])
+        .unwrap();
         assert!(matches!(
             cli.command,
-            Command::Grant { name, to } if name == "service/token" && to == "agent-b"
+            Command::Secrets {
+                command: SecretsCommand::Grant { name, to }
+            } if name == "service/token" && to == "agent-b"
+        ));
+    }
+
+    #[test]
+    fn cli_secrets_help_subcommand_parses_nested_topic() {
+        let cli = Cli::try_parse_from(["gloves", "secrets", "help", "get"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Secrets {
+                command: SecretsCommand::Help { topic }
+            } if topic == vec!["get".to_owned()]
         ));
     }
 
@@ -885,5 +981,31 @@ mod unit_tests {
     fn cli_error_format_accepts_json() {
         let cli = Cli::try_parse_from(["gloves", "--error-format", "json", "version"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormatArg::Json);
+    }
+
+    #[test]
+    fn cli_tui_accepts_trailing_bootstrap_args() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "tui",
+            "--config",
+            "/etc/gloves/prod.gloves.toml",
+            "audit",
+            "--limit",
+            "100",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Tui { args }
+                if args
+                    == vec![
+                        "--config".to_owned(),
+                        "/etc/gloves/prod.gloves.toml".to_owned(),
+                        "audit".to_owned(),
+                        "--limit".to_owned(),
+                        "100".to_owned()
+                    ]
+        ));
     }
 }
