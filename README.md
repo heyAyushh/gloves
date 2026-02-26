@@ -248,7 +248,8 @@ Use the built-in CLI help for command-specific details:
 
 ```bash
 gloves --help
-gloves help <command>
+gloves help [topic...]
+gloves requests help [topic...]
 gloves --version
 gloves version
 gloves version --json
@@ -268,6 +269,7 @@ Navigation shortcuts:
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
 | `version` | Print CLI version and defaults | `--json` for machine-readable metadata |
+| `help [topic...]` | Show recursive help for any command path | examples: `gloves help requests approve`, `gloves requests help approve` |
 | `explain <code>` | Explain an error code with recovery guidance | example: `gloves explain E102` |
 | `tui` | Open interactive tree-based command center (ratatui) | Noun-first command tree, live streamed run cards, `Ctrl+C` cancel for active run, follow-tail output (`Home/g`, `End/G`), `?` per-command help, `/` filter |
 | `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
@@ -321,7 +323,7 @@ Common input-error recovery:
 - `forbidden` errors usually indicate ACL policy; inspect with `gloves access paths --agent <id> --json`.
 - CLI errors include stable codes (for example `error[E102]: ...`). Use `gloves explain <code>` for detailed remediation.
 - Parse errors can also be rendered as JSON (`--error-format json`) for tool integrations.
-- For workflow examples per command, use `gloves help <command>` (for example: `gloves help approve`, `gloves help set`, `gloves help gpg`).
+- For workflow examples per command, use recursive help paths (for example: `gloves help approve`, `gloves help requests approve`, `gloves requests help approve`, `gloves help gpg`).
 
 Environment variables:
 
