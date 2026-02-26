@@ -1,6 +1,6 @@
 ---
 name: gloves-cli-usage
-description: Operate and troubleshoot the gloves secrets CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to run or explain CLI operations (`set/get/list/revoke/request/approve/deny/status/verify/daemon/vault/config/access/gpg`) and command behavior from implementation/tests. Use `gloves-setup-migrate` for bootstrap or migration playbooks.
+description: Operate and troubleshoot the gloves secrets CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to run or explain CLI operations (`set/get/list/revoke/request/requests/approve/deny/status/verify/daemon/vault/config/access/gpg/version/explain/tui`) and command behavior from implementation/tests. Use `gloves-setup-migrate` for bootstrap or migration playbooks.
 ---
 
 # Gloves CLI Usage
@@ -21,10 +21,11 @@ Command details and examples:
 ## Workflow
 
 1. Identify the user goal.
-2. Choose a secrets root (`--root`) and initialize layout if needed (`init`).
-3. Run the minimal command sequence for that goal.
-4. Validate the result using `list`, `status`, or command output.
-5. Report results with exact command(s) executed and key output.
+2. Confirm available CLI surface quickly when needed (`gloves --help`, `gloves help <command>`, `gloves --version`, `gloves version --json`, `gloves requests --help`, `gloves tui`).
+3. Choose a secrets root (`--root`) and initialize layout if needed (`init`).
+4. Run the minimal command sequence for that goal.
+5. Validate the result using `list`, `status`, `audit`, or command output.
+6. Report results with exact command(s) executed and key output.
 
 ## Task Playbooks
 
@@ -67,6 +68,9 @@ Command details and examples:
    gloves --root <root> approve <request-uuid>
    # or:
    gloves --root <root> deny <request-uuid>
+   # grouped navigation:
+   gloves --root <root> requests approve <request-uuid>
+   gloves --root <root> requests deny <request-uuid>
    ```
 4. Verify status transition:
    ```bash
@@ -167,6 +171,9 @@ Command details and examples:
 - `integrity check failed`: Ciphertext checksum mismatch.
 - `invalid input: ...`: Most often malformed UUID or invalid argument value.
 - `gpg denied`: `pass`/GPG access denied for human backend reads.
+- `error[E...]`: Use `gloves explain <code>` for a detailed fix path.
+- `--error-format json`: use structured diagnostics for automation/agents.
+- Typo auto-run is off by default; use `GLOVES_SUGGEST_AUTORUN=1` for safe commands, and require `GLOVES_SUGGEST_AUTORUN_RISKY=1` for mutating commands.
 
 ## Verification
 

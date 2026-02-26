@@ -32,6 +32,8 @@ Install script behavior:
 ## 3. Fresh Root Initialization
 
 ```bash
+gloves --version
+gloves version --json
 gloves --root ~/.openclaw/secrets init
 gloves --root ~/.openclaw/secrets config validate
 ```

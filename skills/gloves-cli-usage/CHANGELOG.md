@@ -1,5 +1,42 @@
 # gloves-cli-usage
 
+## 0.2.5
+
+### Patch Changes
+
+- Added `tui` command reference for ratatui-based interactive navigation.
+- Documented `--error-format <text|json>` diagnostics output mode.
+- Documented typo suggestion auto-run environment controls and safety gates.
+
+## 0.2.4
+
+### Patch Changes
+
+- Added `requests` grouped workflow coverage (`requests list|approve|deny`, `req` alias).
+- Added `explain` command coverage for stable CLI error codes (`gloves explain <code>`).
+- Updated troubleshooting guidance to reference `error[E...]` output and direct remediation path.
+
+## 0.2.3
+
+### Patch Changes
+
+- Added guidance to use `gloves help approve|set|request` for command-level recovery examples.
+- Documented new remediation hints for common input mistakes (`request-id`, name format, ACL, and TTL).
+
+## 0.2.2
+
+### Patch Changes
+
+- Added `version` command coverage in command reference (`gloves version`, `gloves version --json`).
+- Added explicit recovery guidance for `approve`/`deny` request-id mistakes (`gloves list --pending` first).
+
+## 0.2.1
+
+### Patch Changes
+
+- Updated command reference for current CLI flags and subcommands (`get --pipe-to/--pipe-to-args`, `list --pending`, `audit`, `vault exec`).
+- Added quick inspection commands (`gloves --help`, `gloves help <command>`, `gloves --version`) to workflow guidance.
+
 ## 0.2.0
 
 ### Minor Changes

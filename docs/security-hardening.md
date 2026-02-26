@@ -159,6 +159,7 @@ Policy behavior:
 ## 4) Sidecar and environment hygiene
 
 - Keep daemon on loopback only (`127.0.0.1`).
+- For daemon TCP clients, set `GLOVES_DAEMON_TOKEN` and require matching request JSON `token`.
 - Do not log raw secret values or persist them in memory summaries.
 - CLI and daemon actions emit `command_executed` audit events (actor, interface, action, optional target).
 - Use `gloves audit --limit <n>` for readable output and `gloves audit --json` for automation/reporting.

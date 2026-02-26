@@ -120,6 +120,9 @@ Each tagged release now includes these installable assets:
 ## Quick Start
 
 ```bash
+# 0) confirm installed version
+gloves --version
+
 # 1) initialize runtime layout
 gloves --root .openclaw/secrets init
 
@@ -241,21 +244,48 @@ If your `gloves` binary is not in `~/.cargo/bin/gloves`, edit `ExecStart` and `E
 
 ## Commands
 
+Use the built-in CLI help for command-specific details:
+
+```bash
+gloves --help
+gloves help <command>
+gloves --version
+gloves version
+gloves version --json
+gloves explain E102
+gloves requests --help
+gloves tui
+```
+
+Navigation shortcuts:
+
+- Grouped request workflow: `gloves requests list|approve|deny` (alias: `gloves req ...`)
+- Version shortcut: `gloves ver`
+- List shortcut: `gloves ls`
+- Prefix matching is enabled for unique subcommands (for example: `gloves ver` for `version`)
+
 | Command | Purpose | Options / Notes |
 |---|---|---|
 | `init` | Initialize runtime directories/files | none |
+| `version` | Print CLI version and defaults | `--json` for machine-readable metadata |
+| `explain <code>` | Explain an error code with recovery guidance | example: `gloves explain E102` |
+| `tui` | Open interactive tree-based command center (ratatui) | Noun-first command tree, live streamed run cards, `Ctrl+C` cancel for active run, follow-tail output (`Home/g`, `End/G`), `?` per-command help, `/` filter |
 | `set <name>` | Store agent-owned secret | `--generate`, `--stdin`, `--value`, `--ttl <days>` (`days > 0`) |
 | `get <name>` | Retrieve secret value | `--pipe-to <command>` streams bytes to stdin; `--pipe-to-args "<command> {secret}"` interpolates UTF-8 secrets into args; executable must be in `GLOVES_GET_PIPE_ALLOWLIST`; optional `GLOVES_GET_PIPE_ARG_POLICY` (exact templates) and `.gloves.toml [secrets.pipe.commands.<command>]` (URL prefixes) can tighten `--pipe-to-args`; warns on TTY |
 | `env <name> <var>` | Print redacted env export | outputs `export VAR=<REDACTED>` |
 | `request <name> --reason <text>` | Create human access request | optional `--allowlist` and `--blocklist` accept `*`, `namespace/*`, exact id |
+| `requests list` | List pending human requests only | alias: `gloves req list`; equivalent to `gloves list --pending` |
+| `requests approve <request_id>` | Approve pending request via grouped command | alias: `gloves req approve <request_id>` |
+| `requests deny <request_id>` | Deny pending request via grouped command | alias: `gloves req deny <request_id>` |
 | `approve <request_id>` | Approve pending request | request UUID; returns JSON review payload |
 | `deny <request_id>` | Deny pending request | request UUID; returns JSON review payload |
 | `status <name>` | Request status for secret | `pending` / `fulfilled` / `denied` / `expired` |
 | `list` | List metadata and pending requests | `--pending` filters to pending request entries |
+| `grant <name> --to <agent>` | Grant an existing agent-owned secret to another agent | caller must be secret creator; idempotent (`already_granted` when unchanged) |
 | `audit` | View audit trail entries | `--limit <n>` (default 50), `--json` for structured output |
 | `revoke <name>` | Revoke caller-owned secret | removes ciphertext + metadata |
 | `verify` | Reap expired items and verify runtime state | logs expiry events |
-| `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`) |
+| `daemon` | Run local sidecar daemon | loopback TCP only (`--bind`, default `127.0.0.1:7788`); request JSON accepts optional `agent` and `token` |
 | `vault init <name> --owner <agent|human>` | Create encrypted vault metadata + ciphertext dir | `agent` owner auto-generates vault secret |
 | `vault mount <name>` | Mount encrypted vault with TTL session | `--ttl <duration>`, `--mountpoint`, `--agent` |
 | `vault exec <name> -- <command...>` | Mount vault, run command, then unmount | supports `--ttl`, `--mountpoint`, `--agent`; returns wrapped command exit code; strips extpass env vars from wrapped command |
@@ -275,6 +305,23 @@ Global flags:
 - `--config <PATH>`: use one config file.
 - `--no-config`: disable config loading/discovery.
 - `--vault-mode <auto|required|disabled>`: override vault runtime mode for one invocation.
+- `--error-format <text|json>`: choose diagnostic output format.
+- `--version`: print installed `gloves` version.
+
+Common input-error recovery:
+
+- `gloves approve <id>` and `gloves deny <id>` require one request UUID, not labels like `requests`.
+- Find valid IDs with `gloves list --pending` or `gloves requests list`, then rerun:
+  - `gloves approve <request-id>`
+  - `gloves deny <request-id>`
+  - `gloves requests approve <request-id>`
+  - `gloves requests deny <request-id>`
+- Secret-name validation errors show allowed formats; use names like `service/token`.
+- `--ttl` errors require positive days; use `--ttl 1` (or larger).
+- `forbidden` errors usually indicate ACL policy; inspect with `gloves access paths --agent <id> --json`.
+- CLI errors include stable codes (for example `error[E102]: ...`). Use `gloves explain <code>` for detailed remediation.
+- Parse errors can also be rendered as JSON (`--error-format json`) for tool integrations.
+- For workflow examples per command, use `gloves help <command>` (for example: `gloves help approve`, `gloves help set`, `gloves help gpg`).
 
 Environment variables:
 
@@ -285,6 +332,16 @@ Environment variables:
   Example: `{"curl":["https://api.example.com/v1/","http://127.0.0.1:4001/carddav/"]}`
 - `GLOVES_REQUEST_ALLOWLIST`: optional comma-separated request allowlist patterns (`*`, `namespace/*`, exact id).
 - `GLOVES_REQUEST_BLOCKLIST`: optional comma-separated request blocklist patterns (`*`, `namespace/*`, exact id).
+- `GLOVES_DAEMON_TOKEN`: optional daemon API token; when set, each daemon TCP request must include matching JSON `token`.
+- `GLOVES_SUGGEST_AUTORUN`: optional (`1/true/yes/on`) enables typo suggestion auto-run.
+- `GLOVES_SUGGEST_AUTORUN_RISKY`: optional (`1/true/yes/on`) allows typo auto-run for mutating/risky commands.
+- `GLOVES_SUGGEST_AUTORUN_DELAY_MS`: optional countdown before auto-run (default `1200`, max `10000`).
+
+Typo auto-run safety:
+
+- Auto-run is disabled by default.
+- With only `GLOVES_SUGGEST_AUTORUN=1`, gloves auto-runs safe read/navigation commands only.
+- Mutating commands stay blocked unless `GLOVES_SUGGEST_AUTORUN_RISKY=1` is explicitly set.
 
 Config-managed URL policy for `--pipe-to-args`:
 

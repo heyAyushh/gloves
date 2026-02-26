@@ -1,5 +1,17 @@
 # gloves-setup-migrate
 
+## 0.1.2
+
+### Patch Changes
+
+- Added `gloves version --json` to bootstrap verification flow for machine-readable setup checks.
+
+## 0.1.1
+
+### Patch Changes
+
+- Added explicit `gloves --version` verification step before initialization in bootstrap checklist.
+
 ## 0.1.0
 
 ### Minor Changes
