@@ -4,7 +4,25 @@
 
 ### Minor Changes
 
-- No unreleased changes yet.
+- Upgraded `gloves tui` startup flow to auto-load and auto-run a command path passed after `tui`, opening directly in fullscreen output for immediate operator feedback.
+- Added horizontal panning support in TUI panes:
+  - Output pane supports left/right panning in both split and fullscreen views.
+  - Fullscreen command/forms panes support horizontal panning for long rows and field help text.
+  - Focused-pane panning shortcuts are available via `Shift+Left/Shift+Right` and `H/L`.
+
+### Patch Changes
+
+- Fixed fullscreen `Esc` behavior to return focus to the command tree first, then allow quit on subsequent `Esc` in split view.
+- Hardened output rendering to prevent visual overlap/garbling:
+  - Sanitize streamed lines by stripping ANSI sequences and control characters.
+  - Keep tabs deterministic via expansion before render.
+  - Render output with stable line windows to avoid wrapping artifacts under scroll.
+- Refined `help tui` controls text to clearly describe startup autorun, fullscreen escape behavior, and horizontal navigation semantics.
+- Added regression coverage for:
+  - startup autorun + fullscreen entry
+  - fullscreen escape focus reset
+  - output sanitization and line-window rendering
+  - horizontal scroll key behavior and viewport formatting
 
 ## 0.5.4
 
