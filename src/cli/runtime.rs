@@ -19,7 +19,7 @@ use crate::{
     types::{AgentId, Owner, SecretId, SecretValue},
 };
 
-const REQUEST_ID_COMMAND_HINT: &str = "To find a valid request id:\n  gloves list --pending\n  gloves requests list\nThen run one of:\n  gloves approve <request-id>\n  gloves deny <request-id>\n  gloves requests approve <request-id>\n  gloves requests deny <request-id>";
+const REQUEST_ID_COMMAND_HINT: &str = "To find a valid request id:\n  gloves requests list\nThen run one of:\n  gloves requests approve <request-id>\n  gloves requests deny <request-id>\n  (legacy shortcuts)\n  gloves approve <request-id>\n  gloves deny <request-id>";
 const REQUEST_ID_EXAMPLE: &str = "123e4567-e89b-12d3-a456-426614174000";
 
 pub(crate) fn init_layout(paths: &SecretsPaths) -> Result<()> {

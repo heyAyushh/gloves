@@ -1,22 +1,20 @@
 # Releasing Gloves Binaries
 
-`gloves` publishes binaries and crate artifacts through GitHub Actions (`.github/workflows/publish.yml`).
+Back to docs map: [Documentation Index](INDEX.md)
 
-This release pipeline is tag-driven.
+`gloves` publishes binaries and crate artifacts through GitHub Actions (`.github/workflows/publish.yml`).
 
 ## 1) Prerequisites
 
-- Branch and channel policy:
-  - Stable tags: `vX.Y.Z` from `main` or `release/*`
-  - Beta tags: `vX.Y.Z-beta.N` from `next`
-  - Alpha tags: `vX.Y.Z-alpha.N` from `canary`
-- `Cargo.toml` version must match the tag version (without `v` prefix).
-- Required workflows (`CI`, `Tests`, `Coverage`) must pass for the tagged commit.
-- Repository secret `CARGO_REGISTRY_TOKEN` must be configured for crates.io publish job.
+- branch/channel policy:
+  - stable tags: `vX.Y.Z` from `main` or `release/*`
+  - beta tags: `vX.Y.Z-beta.N` from `next`
+  - alpha tags: `vX.Y.Z-alpha.N` from `canary`
+- `Cargo.toml` version must match tag version (without `v`)
+- required workflows (`CI`, `Tests`, `Coverage`) must pass
+- `CARGO_REGISTRY_TOKEN` must be configured
 
-## 2) Local verification on release commit
-
-Run on the exact commit you will tag:
+## 2) Local verification
 
 ```bash
 cargo fmt --all
@@ -36,18 +34,7 @@ git tag -a v0.5.0 -m "v0.5.0"
 git push origin v0.5.0
 ```
 
-Beta example:
-
-```bash
-git checkout next
-git pull --ff-only
-git tag -a v0.6.0-beta.1 -m "v0.6.0-beta.1"
-git push origin v0.6.0-beta.1
-```
-
 ## 4) Release outputs
-
-The workflow uploads these assets to GitHub Releases:
 
 - `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `gloves-<version>-x86_64-apple-darwin.tar.gz`
@@ -55,24 +42,14 @@ The workflow uploads these assets to GitHub Releases:
 - `gloves-<version>-x86_64-pc-windows-msvc.zip`
 - `checksums.txt`
 
-It also runs `cargo publish --locked` to publish to crates.io.
-
 ## 5) Post-release validation
-
-- Confirm release notes and attached assets in GitHub Releases.
-- Verify checksums from `checksums.txt`.
-- Smoke-test one binary install path:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash -s -- --release-ref vX.Y.Z
 gloves --version
 ```
 
-## 6) If a tagged publish fails
+## Related Docs
 
-- Do not re-use a failed semver tag.
-- Fix the failing gate on `main` first (tests/coverage/docs as needed).
-- Bump `Cargo.toml` to the next patch version.
-- Update `CHANGELOG.md` with the fix notes.
-- Re-run full local verification on that exact commit.
-- Create and push a new tag (`vX.Y.(Z+1)`).
+- [Release Playbook](../RELEASE.md)
+- [CHANGELOG](../CHANGELOG.md)

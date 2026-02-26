@@ -1,178 +1,89 @@
-# Gloves Security Hardening Notes
+# Security Hardening
 
-This document describes the security controls around the new workflow-reduction features:
+Back to docs map: [Documentation Index](INDEX.md)
 
-- `gloves get --pipe-to-args`
-- `gloves vault exec`
-- `gloves vault mount --agent`
+This guide captures security controls and hardening guidance for `gloves`.
 
-The goal is to keep behavior ergonomic while reducing accidental data exposure.
+## 1) Secret forwarding controls
 
-## 1) Secret forwarding controls (`get`)
+`gloves secrets get` supports two non-interactive modes:
 
-`gloves get` has two non-interactive output modes:
+- `--pipe-to <command>`: stream raw secret bytes to stdin
+- `--pipe-to-args "<command> {secret}"`: interpolate UTF-8 secret text into args
 
-- `--pipe-to <command>`: streams raw secret bytes to command stdin
-- `--pipe-to-args "<command> {secret}"`: interpolates secret text into command arguments
+Guardrails:
 
-Security controls:
-
-- The executable must be a bare command name (no path separators).
-- The executable must be allowlisted in `GLOVES_GET_PIPE_ALLOWLIST`.
-- Optional sub-policy `GLOVES_GET_PIPE_ARG_POLICY` can enforce exact approved `--pipe-to-args` templates per executable.
-- Optional config policy `[secrets.pipe.commands.<command>]` can enforce approved URL prefixes per executable.
-- Optional env fallback `GLOVES_GET_PIPE_URL_POLICY` can enforce approved URL prefixes when config has no command entry.
+- Executable must be a bare command name.
+- Executable must be allowlisted by `GLOVES_GET_PIPE_ALLOWLIST`.
 - `--pipe-to` and `--pipe-to-args` are mutually exclusive.
-- `--pipe-to-args` template must include `{secret}` and cannot place `{secret}` as the executable.
-- `--pipe-to-args` only accepts UTF-8 secrets.
-- `--pipe-to-args` rejects control characters in secrets. Use `--pipe-to` for raw byte-safe forwarding.
-- Secret bytes and interpolated argument buffers are zeroized in-process after use.
+- `--pipe-to-args` must include `{secret}` and cannot use `{secret}` as executable.
+- `--pipe-to-args` rejects control characters in secret input.
 
-`GLOVES_GET_PIPE_ARG_POLICY` format:
+Extra policy options:
 
-```json
-{
-  "curl": [
-    "curl -u ayush:{secret} http://127.0.0.1:4001/carddav/principal/ayush/"
-  ],
-  "print-arg": [
-    "print-arg prefix:{secret}:suffix"
-  ]
-}
-```
+- `GLOVES_GET_PIPE_ARG_POLICY`: exact template allowlist
+- `.gloves.toml [secrets.pipe.commands.<command>]`: URL-prefix policy
+- `GLOVES_GET_PIPE_URL_POLICY`: env fallback URL-prefix policy
 
-Policy behavior:
-
-- Applies to `--pipe-to-args` only.
-- Requires an exact template match after shell-style parsing/normalization.
-- If policy is set and a command has no entry, execution is denied.
-
-Normalization detail:
-
-- Matching uses shell-style tokenization (`shlex`) before comparison.
-- Equivalent whitespace/quoting that resolves to the same argv tokens is treated as the same template.
-- Any token-level argument change (flags, values, URL, ordering) requires an explicit policy entry.
-
-Config URL policy format (`.gloves.toml`):
+Example config URL policy:
 
 ```toml
 [secrets.pipe.commands.curl]
 require_url = true
 url_prefixes = ["https://api.example.com/v1/"]
-
-[secrets.pipe.commands.applecli]
-require_url = true
-url_prefixes = ["https://internal.example.local/"]
 ```
 
-Config URL policy behavior:
+## 2) Request policy controls
 
-- Applies to `--pipe-to-args` only.
-- Works for any configured executable name.
-- Enforces URL arguments (http/https) with strict scheme + authority + path-segment prefix checks.
-- Prevents host-boundary bypasses (for example `https://api.example.com.evil/...` does not match `https://api.example.com`).
-- Prevents path-prefix confusion (`/v1` does not match `/v10`).
-- URL prefixes must not include query (`?`) or fragment (`#`) components.
-- `require_url = true` denies templates that do not include any URL argument.
-- For commands with config entries, config policy takes precedence over env URL policy.
-
-`GLOVES_GET_PIPE_URL_POLICY` format (env fallback):
-
-```json
-{
-  "curl": [
-    "https://api.example.com/v1/",
-    "http://127.0.0.1:4001/carddav/"
-  ]
-}
-```
-
-URL policy behavior:
-
-- Applies to `--pipe-to-args` only.
-- Enforces URL arguments with strict scheme + authority + path-segment prefix checks.
-- Allows payload/flag variation while keeping URL scope restricted.
-- URL prefixes with query/fragment components are rejected.
-- If a command has URL policy entries, templates without URL arguments are denied.
-
-Example behavior:
-
-- Allowed with `url_prefixes = ["https://api.example.com/v1/"]`:
-  - `curl --data '{"a":1}' https://api.example.com/v1/items?token={secret}`
-  - `curl --data '{"a":2}' https://api.example.com/v1/items?token={secret}`
-- Denied:
-  - `curl --data '{"a":1}' https://api.example.com/v2/items?token={secret}`
-
-Operational guidance:
-
-- Prefer `--pipe-to` for highest safety.
-- Use `--pipe-to-args` only when downstream tools cannot read from stdin.
-- Keep `GLOVES_GET_PIPE_ALLOWLIST` minimal and explicit.
-- For networked binaries (for example `curl`), set `GLOVES_GET_PIPE_ARG_POLICY` or config URL policy under `[secrets.pipe.commands.<command>]` instead of relying on executable-only allowlists.
-- Prefer `GLOVES_GET_PIPE_ARG_POLICY` for maximal control; use URL-prefix policy when exact-template policy is too strict for dynamic payloads.
-
-Control selection:
-
-- Need flexible payloads against a fixed endpoint set: use config URL policy.
-- Need fixed command shape and fixed flags: use exact template policy.
-- Need temporary low-friction rollout: use executable allowlist, then tighten.
-
-## 2) Vault execution controls (`vault exec`)
-
-`gloves vault exec <name> -- <command...>` mounts a vault, runs a command, then unmounts.
-
-Security controls:
-
-- Unmount is attempted on both command success and command failure paths.
-- The wrapped command inherits stdio for compatibility, and returns its exit code.
-- Sensitive extpass wiring env vars are removed from wrapped command environment:
-  - `GLOVES_EXTPASS_ROOT`
-  - `GLOVES_EXTPASS_AGENT`
-- `--agent` on `vault mount` / `vault exec` controls mount attribution and extpass identity.
-
-Operational guidance:
-
-- Use short TTL values for mount windows.
-- Prefer `vault exec` over ad hoc mount/unmount scripts when possible.
-- Keep wrapped commands deterministic and non-interactive in automation.
-
-## 3) Request policy controls
-
-Request review can be constrained by secret patterns:
+Controls:
 
 - `GLOVES_REQUEST_ALLOWLIST`
 - `GLOVES_REQUEST_BLOCKLIST`
-- CLI equivalents on `request`: `--allowlist`, `--blocklist`
+- `gloves request --allowlist ... --blocklist ...`
 
-Pattern forms:
+Pattern formats:
 
 - `*`
 - `namespace/*`
 - exact secret id (`namespace/name`)
 
-Policy behavior:
+## 3) Vault execution controls
 
-- Blocklist always denies matching secrets.
-- If allowlist is set, only allowlisted secrets are accepted.
-- Invalid or empty pattern entries are rejected.
+`gloves vault exec <name> -- <command...>` mounts, executes, and unmounts.
 
-## 4) Sidecar and environment hygiene
+Safety properties:
 
-- Keep daemon on loopback only (`127.0.0.1`).
-- For daemon TCP clients, set `GLOVES_DAEMON_TOKEN` and require matching request JSON `token`.
-- Do not log raw secret values or persist them in memory summaries.
-- CLI and daemon actions emit `command_executed` audit events (actor, interface, action, optional target).
-- Use `gloves audit --limit <n>` for readable output and `gloves audit --json` for automation/reporting.
-- Keep secrets root permissions private to the service account.
-- Run `gloves verify` on a schedule.
+- unmount attempted on success and failure paths
+- wrapped command exit code is preserved
+- extpass env vars are removed from wrapped command env
 
-## 5) Validation gates
+## 4) Runtime hygiene
 
-Before publishing changes that touch secret flow, run:
+- Keep daemon loopback-only (`127.0.0.1`).
+- Use `GLOVES_DAEMON_TOKEN` for daemon API request authentication.
+- Keep config + runtime root permissions private.
+- Never persist raw secret values in logs or memory summaries.
+
+## 5) Verification cadence
+
+Run routinely:
 
 ```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features --locked
-cargo doc --no-deps
+gloves config validate
+gloves verify
+gloves audit --json --limit 200
 ```
+
+## 6) Recommended defaults
+
+- Prefer stdin-based flows (`secrets set --stdin`, `secrets get --pipe-to`).
+- Use least-privilege ACL per agent.
+- Use short TTL values for temporary secrets and vault mounts.
+- Require explicit `--agent` in automation.
+
+## Related Docs
+
+- [Configuration Guide](configuration.md)
+- [Secrets and Requests](secrets-and-requests.md)
+- [Troubleshooting](troubleshooting.md)
+- [VM Multi-Agent Operations](vm-multi-agent-human-guide.md)

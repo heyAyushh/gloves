@@ -12,12 +12,12 @@ const CLI_GLOBAL_HELP_HINT: &str =
 const CLI_TTL_HINT: &str = "hint: use a positive day count, for example `--ttl 1`";
 const CLI_FORBIDDEN_HINT: &str = "hint: this action is blocked by policy. check ACLs with `gloves access paths --agent <id> --json` and review `.gloves.toml`";
 const CLI_NOT_FOUND_HINT: &str =
-    "hint: check existing entries with `gloves list` or pending requests with `gloves list --pending`";
+    "hint: check existing entries with `gloves list` or pending requests with `gloves requests list`";
 const CLI_ALREADY_EXISTS_HINT: &str =
-    "hint: entry already exists. choose a new name or remove the old one with `gloves revoke <name>`";
+    "hint: entry already exists. choose a new name or remove the old one with `gloves secrets revoke <name>`";
 const CLI_UNAUTHORIZED_HINT: &str = "hint: this caller is not authorized for the operation. check `--agent` and request/approval state";
 const CLI_EXPIRED_HINT: &str =
-    "hint: the item has expired. rotate by creating a new value (`gloves set <name> ...`) and retry";
+    "hint: the item has expired. rotate by creating a new value (`gloves secrets set <name> ...`) and retry";
 const CLI_GPG_DENIED_HINT: &str =
     "hint: `pass`/GPG denied access. verify your session can read it with `pass show <secret-name>`";
 const CLI_INTEGRITY_HINT: &str =
@@ -28,7 +28,8 @@ const CLI_PATH_TRAVERSAL_HINT: &str =
     "hint: secret names cannot start with `/`, contain `..`, or contain `//`";
 const CLI_IO_HINT: &str =
     "hint: check path existence and permissions for `--root` (default `.openclaw/secrets`)";
-const CLI_REQUEST_PENDING_HINT: &str = "hint: request may already be resolved. check current pending requests with `gloves list --pending`";
+const CLI_REQUEST_PENDING_HINT: &str =
+    "hint: request may already be resolved. check current pending requests with `gloves requests list`";
 const CLI_PIPE_POLICY_HINT: &str = "hint: for safe secret piping, configure `GLOVES_GET_PIPE_ALLOWLIST` or command policy in `.gloves.toml`";
 const CLI_MISSING_RUNTIME_HINT: &str =
     "hint: install the missing runtime binary and ensure it is available in PATH";
@@ -495,8 +496,11 @@ fn is_autorun_safe_command(corrected_args: &[String]) -> bool {
         .map(String::as_str)
         .unwrap_or_default();
     match command {
-        "help" | "version" | "ver" | "explain" | "list" | "ls" | "status" | "audit" | "tui"
-        | "ui" => true,
+        "help" | "version" | "ver" | "explain" | "list" | "ls" | "audit" | "tui" | "ui" => true,
+        "secrets" => matches!(
+            corrected_args.get(command_index + 1).map(String::as_str),
+            Some("help" | "get" | "status")
+        ),
         "requests" | "req" => matches!(
             corrected_args.get(command_index + 1).map(String::as_str),
             Some("list")

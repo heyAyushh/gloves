@@ -71,7 +71,7 @@ gloves --root ~/.openclaw/secrets/shared init
 Migration approach:
 
 1. Export inventory from old root with `list` and metadata backups.
-2. Re-create secrets into target roots with `set` and controlled requester approvals.
+2. Re-create secrets into target roots with `secrets set` and controlled requester approvals.
 3. Update agent process configs to use the intended root.
 4. Keep shared cross-agent secrets in `shared/` and gate access through approvals/ACL.
 

@@ -30,9 +30,10 @@ use super::{
     output::{self, OutputStatus},
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
-    AccessCommand, Cli, Command, ConfigCommand, GpgCommand, RequestsCommand, DEFAULT_AGENT_ID,
-    DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES,
-    DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
+    AccessCommand, Cli, Command, ConfigCommand, ErrorFormatArg, GpgCommand, RequestsCommand,
+    SecretsCommand, VaultModeArg, DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND,
+    DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR,
+    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
     DEFAULT_VAULT_SECRET_TTL_DAYS,
 };
 
@@ -59,8 +60,14 @@ const GPG_AGENT_USER_ID_PREFIX: &str = "gloves-agent-";
 const CLI_ACTION_INTERFACE: &str = "cli";
 const CLI_HELP_HINT: &str = "gloves --help";
 const CLI_COMMAND_HELP_HINT: &str = "gloves help [topic...]";
-const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves list --pending";
+const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves requests list";
 const SECRET_LOOKUP_COMMAND: &str = "gloves list";
+const TUI_FLAG_ROOT: &str = "--root";
+const TUI_FLAG_AGENT: &str = "--agent";
+const TUI_FLAG_CONFIG: &str = "--config";
+const TUI_FLAG_NO_CONFIG: &str = "--no-config";
+const TUI_FLAG_VAULT_MODE: &str = "--vault-mode";
+const TUI_FLAG_ERROR_FORMAT: &str = "--error-format";
 
 #[derive(Debug, Clone)]
 struct EffectiveCliState {
@@ -76,6 +83,17 @@ struct EffectiveCliState {
     daemon_io_timeout_seconds: u64,
     daemon_request_limit_bytes: usize,
     vault_mode: VaultMode,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TuiBootstrapArgs {
+    root: Option<PathBuf>,
+    agent: Option<String>,
+    config: Option<PathBuf>,
+    no_config: bool,
+    vault_mode: Option<VaultModeArg>,
+    error_format: Option<ErrorFormatArg>,
+    command_args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -150,10 +168,15 @@ impl GpgHomedir {
     }
 }
 
-pub(crate) fn run(cli: Cli) -> Result<i32> {
+pub(crate) fn run(mut cli: Cli) -> Result<i32> {
     if let Command::ExtpassGet { name } = &cli.command {
         return run_extpass_get(name);
     }
+
+    let tui_bootstrap = prepare_tui_bootstrap(&mut cli)?;
+    let tui_launch_options = tui_bootstrap
+        .as_ref()
+        .map(|bootstrap| navigator_launch_options(&cli, bootstrap));
 
     let state = load_effective_state(&cli)?;
     enforce_vault_mode(&state.vault_mode, &cli.command)?;
@@ -185,8 +208,10 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 Some(normalized_code),
             );
         }
-        Command::Tui => {
-            navigator::run_command_navigator()?;
+        Command::Tui { .. } => {
+            let launch_options =
+                tui_launch_options.unwrap_or_else(navigator::NavigatorLaunchOptions::default);
+            navigator::run_command_navigator(launch_options)?;
             log_command_executed(&state.paths, &state.default_agent_id, "tui", None);
         }
         Command::Help { topic } => {
@@ -194,107 +219,168 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
-        Command::Set {
-            name,
-            generate,
-            value,
-            stdin,
-            ttl,
-        } => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            let secret_id = SecretId::new(&name)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Write, Some(&secret_id))?;
-            let creator = state.default_agent_id.clone();
-            let recipient = runtime::load_or_create_recipient_for_agent(&state.paths, &creator)?;
-            let mut recipients = HashSet::new();
-            recipients.insert(creator.clone());
-            let ttl_days =
-                runtime::validate_ttl_days(ttl.unwrap_or(state.default_secret_ttl_days), "--ttl")?;
-            let value =
-                SecretValue::new(secret_input::resolve_secret_input(generate, value, stdin)?);
-            manager.set(
-                secret_id,
+        Command::Secrets { command } => match command {
+            SecretsCommand::Help { topic } => {
+                if let Some(code) = run_help_command_with_prefix(&["secrets"], &topic)? {
+                    return Ok(code);
+                }
+            }
+            SecretsCommand::Set {
+                name,
+                generate,
                 value,
-                crate::manager::SetSecretOptions {
-                    owner: Owner::Agent,
-                    ttl: Duration::days(ttl_days),
-                    created_by: creator,
-                    recipients,
-                    recipient_keys: vec![recipient],
-                },
-            )?;
-            log_command_executed(&state.paths, &state.default_agent_id, "set", Some(name));
-            if let Some(code) = stdout_line_or_exit("ok")? {
-                return Ok(code);
+                stdin,
+                ttl,
+            } => {
+                let manager = runtime::manager_for_paths(&state.paths)?;
+                let secret_id = SecretId::new(&name)?;
+                ensure_secret_acl_allowed(&state, SecretAclOperation::Write, Some(&secret_id))?;
+                let creator = state.default_agent_id.clone();
+                let recipient =
+                    runtime::load_or_create_recipient_for_agent(&state.paths, &creator)?;
+                let mut recipients = HashSet::new();
+                recipients.insert(creator.clone());
+                let ttl_days = runtime::validate_ttl_days(
+                    ttl.unwrap_or(state.default_secret_ttl_days),
+                    "--ttl",
+                )?;
+                let value =
+                    SecretValue::new(secret_input::resolve_secret_input(generate, value, stdin)?);
+                manager.set(
+                    secret_id,
+                    value,
+                    crate::manager::SetSecretOptions {
+                        owner: Owner::Agent,
+                        ttl: Duration::days(ttl_days),
+                        created_by: creator,
+                        recipients,
+                        recipient_keys: vec![recipient],
+                    },
+                )?;
+                log_command_executed(&state.paths, &state.default_agent_id, "set", Some(name));
+                if let Some(code) = stdout_line_or_exit("ok")? {
+                    return Ok(code);
+                }
             }
-        }
-        Command::Get {
-            name,
-            pipe_to,
-            pipe_to_args,
-        } => {
-            let secret_id = SecretId::new(&name)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Read, Some(&secret_id))?;
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            if !manager.metadata_store.path_for(&secret_id).exists() {
-                return Err(secret_not_found_error(secret_id.as_str(), "get"));
-            }
-            let force_tty_warning = std::env::var("GLOVES_FORCE_TTY_WARNING")
-                .map(|value| value == "1")
-                .unwrap_or(false);
-            let stdout_is_tty = atty::is(atty::Stream::Stdout);
-            let force_raw_stdout_warning =
-                force_tty_warning && pipe_to.is_none() && pipe_to_args.is_none();
-            if force_raw_stdout_warning {
-                let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
-            }
-            let output_target = resolve_secret_output_target(
+            SecretsCommand::Get {
+                name,
                 pipe_to,
                 pipe_to_args,
-                stdout_is_tty,
-                state.loaded_config.as_ref(),
-            )?;
-            if matches!(&output_target, SecretOutputTarget::Stdout)
-                && stdout_is_tty
-                && !force_raw_stdout_warning
-            {
-                let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
-            }
-            let caller = state.default_agent_id.clone();
-            let identity_file = runtime::load_or_create_identity_for_agent(&state.paths, &caller)?;
-            let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
-            match value {
-                Ok(secret) => {
-                    let mut secret_bytes = secret.expose(ToOwned::to_owned);
-                    let output_result = match output_target {
-                        SecretOutputTarget::Stdout => stdout_bytes_or_exit(&secret_bytes),
-                        SecretOutputTarget::PipeCommand(pipe_command) => {
-                            pipe_secret_to_command(&pipe_command, &secret_bytes).map(|_| None)
-                        }
-                        SecretOutputTarget::PipeCommandArgs(template) => {
-                            pipe_secret_to_command_args(&template, &secret_bytes).map(|_| None)
-                        }
-                    };
-                    secret_bytes.zeroize();
-                    let output_code = output_result?;
-                    log_command_executed(
-                        &state.paths,
-                        &state.default_agent_id,
-                        "get",
-                        Some(secret_id.as_str().to_owned()),
-                    );
-                    if let Some(code) = output_code {
-                        return Ok(code);
-                    }
-                }
-                Err(GlovesError::NotFound) => {
+            } => {
+                let secret_id = SecretId::new(&name)?;
+                ensure_secret_acl_allowed(&state, SecretAclOperation::Read, Some(&secret_id))?;
+                let manager = runtime::manager_for_paths(&state.paths)?;
+                if !manager.metadata_store.path_for(&secret_id).exists() {
                     return Err(secret_not_found_error(secret_id.as_str(), "get"));
                 }
-                Err(error) => {
-                    return Err(error);
+                let force_tty_warning = std::env::var("GLOVES_FORCE_TTY_WARNING")
+                    .map(|value| value == "1")
+                    .unwrap_or(false);
+                let stdout_is_tty = atty::is(atty::Stream::Stdout);
+                let force_raw_stdout_warning =
+                    force_tty_warning && pipe_to.is_none() && pipe_to_args.is_none();
+                if force_raw_stdout_warning {
+                    let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
+                }
+                let output_target = resolve_secret_output_target(
+                    pipe_to,
+                    pipe_to_args,
+                    stdout_is_tty,
+                    state.loaded_config.as_ref(),
+                )?;
+                if matches!(&output_target, SecretOutputTarget::Stdout)
+                    && stdout_is_tty
+                    && !force_raw_stdout_warning
+                {
+                    let _ = stderr_line_ignore_broken_pipe("warning: raw secret output on tty");
+                }
+                let caller = state.default_agent_id.clone();
+                let identity_file =
+                    runtime::load_or_create_identity_for_agent(&state.paths, &caller)?;
+                let value = manager.get(&secret_id, &caller, Some(identity_file.as_path()));
+                match value {
+                    Ok(secret) => {
+                        let mut secret_bytes = secret.expose(ToOwned::to_owned);
+                        let output_result = match output_target {
+                            SecretOutputTarget::Stdout => stdout_bytes_or_exit(&secret_bytes),
+                            SecretOutputTarget::PipeCommand(pipe_command) => {
+                                pipe_secret_to_command(&pipe_command, &secret_bytes).map(|_| None)
+                            }
+                            SecretOutputTarget::PipeCommandArgs(template) => {
+                                pipe_secret_to_command_args(&template, &secret_bytes).map(|_| None)
+                            }
+                        };
+                        secret_bytes.zeroize();
+                        let output_code = output_result?;
+                        log_command_executed(
+                            &state.paths,
+                            &state.default_agent_id,
+                            "get",
+                            Some(secret_id.as_str().to_owned()),
+                        );
+                        if let Some(code) = output_code {
+                            return Ok(code);
+                        }
+                    }
+                    Err(GlovesError::NotFound) => {
+                        return Err(secret_not_found_error(secret_id.as_str(), "get"));
+                    }
+                    Err(error) => {
+                        return Err(error);
+                    }
                 }
             }
-        }
+            SecretsCommand::Grant { name, to } => {
+                if let Some(code) = run_grant_command(&state, &name, &to)? {
+                    return Ok(code);
+                }
+            }
+            SecretsCommand::Revoke { name } => {
+                let manager = runtime::manager_for_paths(&state.paths)?;
+                let secret_id = SecretId::new(&name)?;
+                ensure_secret_acl_allowed(&state, SecretAclOperation::Revoke, Some(&secret_id))?;
+                if !manager.metadata_store.path_for(&secret_id).exists() {
+                    return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
+                }
+                let caller = state.default_agent_id.clone();
+                match manager.revoke(&secret_id, &caller) {
+                    Ok(()) => {}
+                    Err(GlovesError::NotFound) => {
+                        return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
+                    }
+                    Err(error) => return Err(error),
+                }
+                log_command_executed(
+                    &state.paths,
+                    &state.default_agent_id,
+                    "revoke",
+                    Some(secret_id.as_str().to_owned()),
+                );
+                if let Some(code) = stdout_line_or_exit("revoked")? {
+                    return Ok(code);
+                }
+            }
+            SecretsCommand::Status { name } => {
+                let secret_id = SecretId::new(&name)?;
+                ensure_secret_acl_allowed(&state, SecretAclOperation::Status, Some(&secret_id))?;
+                let manager = runtime::manager_for_paths(&state.paths)?;
+                let pending = manager.pending_store.load_all()?;
+                let status = pending
+                    .into_iter()
+                    .find(|request| request.secret_name.as_str() == secret_id.as_str())
+                    .map(|request| request.status)
+                    .unwrap_or(crate::types::RequestStatus::Fulfilled);
+                log_command_executed(
+                    &state.paths,
+                    &state.default_agent_id,
+                    "status",
+                    Some(secret_id.as_str().to_owned()),
+                );
+                if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
+                    return Ok(code);
+                }
+            }
+        },
         Command::Env { name, var } => {
             log_command_executed(&state.paths, &state.default_agent_id, "env", Some(name));
             if let Some(code) = stdout_line_or_exit(&format!("export {var}=<REDACTED>"))? {
@@ -365,56 +451,6 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         }
         Command::List { pending } => {
             if let Some(code) = run_list_command(&state, pending, "list")? {
-                return Ok(code);
-            }
-        }
-        Command::Grant { name, to } => {
-            if let Some(code) = run_grant_command(&state, &name, &to)? {
-                return Ok(code);
-            }
-        }
-        Command::Revoke { name } => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            let secret_id = SecretId::new(&name)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Revoke, Some(&secret_id))?;
-            if !manager.metadata_store.path_for(&secret_id).exists() {
-                return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
-            }
-            let caller = state.default_agent_id.clone();
-            match manager.revoke(&secret_id, &caller) {
-                Ok(()) => {}
-                Err(GlovesError::NotFound) => {
-                    return Err(secret_not_found_error(secret_id.as_str(), "revoke"));
-                }
-                Err(error) => return Err(error),
-            }
-            log_command_executed(
-                &state.paths,
-                &state.default_agent_id,
-                "revoke",
-                Some(secret_id.as_str().to_owned()),
-            );
-            if let Some(code) = stdout_line_or_exit("revoked")? {
-                return Ok(code);
-            }
-        }
-        Command::Status { name } => {
-            let secret_id = SecretId::new(&name)?;
-            ensure_secret_acl_allowed(&state, SecretAclOperation::Status, Some(&secret_id))?;
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            let pending = manager.pending_store.load_all()?;
-            let status = pending
-                .into_iter()
-                .find(|request| request.secret_name.as_str() == secret_id.as_str())
-                .map(|request| request.status)
-                .unwrap_or(crate::types::RequestStatus::Fulfilled);
-            log_command_executed(
-                &state.paths,
-                &state.default_agent_id,
-                "status",
-                Some(secret_id.as_str().to_owned()),
-            );
-            if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
                 return Ok(code);
             }
         }
@@ -597,6 +633,193 @@ pub(crate) fn run(cli: Cli) -> Result<i32> {
         Command::ExtpassGet { .. } => {}
     }
     Ok(0)
+}
+
+fn prepare_tui_bootstrap(cli: &mut Cli) -> Result<Option<TuiBootstrapArgs>> {
+    let args = match &cli.command {
+        Command::Tui { args } => args.clone(),
+        _ => return Ok(None),
+    };
+    let bootstrap = parse_tui_bootstrap_args(&args)?;
+
+    if let Some(root) = bootstrap.root.as_ref() {
+        cli.root = Some(root.clone());
+    }
+    if let Some(agent) = bootstrap.agent.as_ref() {
+        cli.agent = Some(agent.clone());
+    }
+    if let Some(config) = bootstrap.config.as_ref() {
+        cli.config = Some(config.clone());
+    }
+    if bootstrap.no_config {
+        cli.no_config = true;
+    }
+    if let Some(vault_mode) = bootstrap.vault_mode.as_ref() {
+        cli.vault_mode = Some(vault_mode.clone());
+    }
+    if let Some(error_format) = bootstrap.error_format {
+        cli.error_format = error_format;
+    }
+
+    Ok(Some(bootstrap))
+}
+
+fn parse_tui_bootstrap_args(args: &[String]) -> Result<TuiBootstrapArgs> {
+    let mut bootstrap = TuiBootstrapArgs::default();
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let token = &args[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if !token.starts_with("--") {
+            break;
+        }
+
+        let (flag, inline_value) = split_long_option_token(token);
+        match flag {
+            TUI_FLAG_ROOT => {
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(GlovesError::InvalidInput(
+                            "`gloves tui --root` requires a path value".to_owned(),
+                        ));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                bootstrap.root = Some(PathBuf::from(value));
+            }
+            TUI_FLAG_AGENT => {
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(GlovesError::InvalidInput(
+                            "`gloves tui --agent` requires an id value".to_owned(),
+                        ));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                bootstrap.agent = Some(value);
+            }
+            TUI_FLAG_CONFIG => {
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(GlovesError::InvalidInput(
+                            "`gloves tui --config` requires a path value".to_owned(),
+                        ));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                bootstrap.config = Some(PathBuf::from(value));
+            }
+            TUI_FLAG_NO_CONFIG => {
+                if inline_value.is_some() {
+                    return Err(GlovesError::InvalidInput(
+                        "`gloves tui --no-config` does not take a value".to_owned(),
+                    ));
+                }
+                bootstrap.no_config = true;
+            }
+            TUI_FLAG_VAULT_MODE => {
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(GlovesError::InvalidInput(
+                            "`gloves tui --vault-mode` requires one of: auto, required, disabled"
+                                .to_owned(),
+                        ));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                bootstrap.vault_mode = Some(parse_vault_mode_arg_for_tui(&value)?);
+            }
+            TUI_FLAG_ERROR_FORMAT => {
+                let value = if let Some(value) = inline_value {
+                    value.to_owned()
+                } else {
+                    let Some(next_value) = args.get(index + 1) else {
+                        return Err(GlovesError::InvalidInput(
+                            "`gloves tui --error-format` requires one of: text, json".to_owned(),
+                        ));
+                    };
+                    index += 1;
+                    next_value.to_owned()
+                };
+                bootstrap.error_format = Some(parse_error_format_arg_for_tui(&value)?);
+            }
+            _ => {
+                break;
+            }
+        }
+
+        index += 1;
+    }
+
+    bootstrap.command_args = args[index..].to_vec();
+    Ok(bootstrap)
+}
+
+fn parse_vault_mode_arg_for_tui(value: &str) -> Result<VaultModeArg> {
+    match value {
+        "auto" => Ok(VaultModeArg::Auto),
+        "required" => Ok(VaultModeArg::Required),
+        "disabled" => Ok(VaultModeArg::Disabled),
+        _ => Err(GlovesError::InvalidInput(format!(
+            "invalid `--vault-mode` value `{value}` for `gloves tui`; expected auto, required, or disabled"
+        ))),
+    }
+}
+
+fn parse_error_format_arg_for_tui(value: &str) -> Result<ErrorFormatArg> {
+    match value {
+        "text" => Ok(ErrorFormatArg::Text),
+        "json" => Ok(ErrorFormatArg::Json),
+        _ => Err(GlovesError::InvalidInput(format!(
+            "invalid `--error-format` value `{value}` for `gloves tui`; expected text or json"
+        ))),
+    }
+}
+
+fn split_long_option_token(token: &str) -> (&str, Option<&str>) {
+    if let Some((flag, value)) = token.split_once('=') {
+        (flag, Some(value))
+    } else {
+        (token, None)
+    }
+}
+
+fn navigator_launch_options(
+    cli: &Cli,
+    bootstrap: &TuiBootstrapArgs,
+) -> navigator::NavigatorLaunchOptions {
+    navigator::NavigatorLaunchOptions {
+        root: cli.root.as_ref().map(|value| value.display().to_string()),
+        agent: cli.agent.clone(),
+        config: cli.config.as_ref().map(|value| value.display().to_string()),
+        no_config: cli.no_config,
+        vault_mode: cli.vault_mode.as_ref().map(|value| match value {
+            VaultModeArg::Auto => "auto".to_owned(),
+            VaultModeArg::Required => "required".to_owned(),
+            VaultModeArg::Disabled => "disabled".to_owned(),
+        }),
+        error_format: Some(match cli.error_format {
+            ErrorFormatArg::Text => "text".to_owned(),
+            ErrorFormatArg::Json => "json".to_owned(),
+        }),
+        command_args: bootstrap.command_args.clone(),
+    }
 }
 
 fn stdout_line_or_exit(line: &str) -> Result<Option<i32>> {
@@ -1132,7 +1355,7 @@ fn pending_request_for_id(
 
 fn secret_not_found_error(secret_name: &str, action: &str) -> GlovesError {
     GlovesError::InvalidInput(format!(
-        "secret `{secret_name}` was not found\nRun `{SECRET_LOOKUP_COMMAND}` to inspect available secrets, then retry `gloves {action} <secret-name>`"
+        "secret `{secret_name}` was not found\nRun `{SECRET_LOOKUP_COMMAND}` to inspect available secrets, then retry `gloves secrets {action} <secret-name>`"
     ))
 }
 
@@ -2453,8 +2676,9 @@ fn path_operation_label(operation: &PathOperation) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_policy_url_argument, parse_policy_url_prefix, policy_url_matches_prefix,
-        validate_pipe_url_prefix, SECRET_PIPE_URL_POLICY_ENV_VAR,
+        parse_policy_url_argument, parse_policy_url_prefix, parse_tui_bootstrap_args,
+        policy_url_matches_prefix, validate_pipe_url_prefix, ErrorFormatArg, VaultModeArg,
+        SECRET_PIPE_URL_POLICY_ENV_VAR,
     };
 
     #[test]
@@ -2513,5 +2737,68 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains(SECRET_PIPE_URL_POLICY_ENV_VAR));
         assert!(text.contains("must not include query or fragment"));
+    }
+
+    #[test]
+    fn parse_tui_bootstrap_args_extracts_global_overrides_and_command_tail() {
+        let parsed = parse_tui_bootstrap_args(&[
+            "--config".to_owned(),
+            "/etc/gloves/prod.gloves.toml".to_owned(),
+            "audit".to_owned(),
+            "--limit".to_owned(),
+            "100".to_owned(),
+        ])
+        .expect("tui bootstrap args should parse");
+
+        assert_eq!(
+            parsed
+                .config
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .as_deref(),
+            Some("/etc/gloves/prod.gloves.toml")
+        );
+        assert_eq!(
+            parsed.command_args,
+            vec!["audit".to_owned(), "--limit".to_owned(), "100".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_tui_bootstrap_args_supports_inline_values() {
+        let parsed = parse_tui_bootstrap_args(&[
+            "--root=/tmp/gloves".to_owned(),
+            "--agent=agent-main".to_owned(),
+            "--vault-mode=required".to_owned(),
+            "--error-format=json".to_owned(),
+            "requests".to_owned(),
+            "list".to_owned(),
+        ])
+        .expect("inline tui bootstrap args should parse");
+
+        assert_eq!(
+            parsed
+                .root
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .as_deref(),
+            Some("/tmp/gloves")
+        );
+        assert_eq!(parsed.agent.as_deref(), Some("agent-main"));
+        assert!(matches!(parsed.vault_mode, Some(VaultModeArg::Required)));
+        assert!(matches!(parsed.error_format, Some(ErrorFormatArg::Json)));
+        assert_eq!(
+            parsed.command_args,
+            vec!["requests".to_owned(), "list".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_tui_bootstrap_args_rejects_invalid_vault_mode() {
+        let error = parse_tui_bootstrap_args(&["--vault-mode=fast".to_owned()])
+            .expect_err("invalid vault mode should fail");
+        assert!(error
+            .to_string()
+            .contains("expected auto, required, or disabled"));
     }
 }

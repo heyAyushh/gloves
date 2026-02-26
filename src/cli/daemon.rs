@@ -788,7 +788,7 @@ mod tests {
         match response {
             DaemonResponse::Error { error } => {
                 assert!(error.contains("invalid request id `not-a-uuid`"));
-                assert!(error.contains("gloves list --pending"));
+                assert!(error.contains("gloves requests list"));
             }
             DaemonResponse::Ok { .. } => panic!("expected error response"),
         }

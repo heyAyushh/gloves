@@ -95,7 +95,7 @@ const ERROR_EXPLANATION_E100: &str = r#"E100 invalid input
 The command arguments are syntactically valid but semantically unsupported.
 
 Common fixes:
-  - Run `gloves help <command>` for exact argument usage.
+  - Run `gloves help [topic...]` for exact argument usage.
   - For TTL fields, use a positive day value (example: `--ttl 1`).
   - For piping policy errors, configure `GLOVES_GET_PIPE_ALLOWLIST` or `.gloves.toml` policy."#;
 const ERROR_EXPLANATION_E101: &str = r#"E101 invalid secret identifier
@@ -111,9 +111,9 @@ const ERROR_EXPLANATION_E102: &str = r#"E102 invalid request identifier
 Request ids must be UUID values from pending requests.
 
 Recovery:
-  gloves list --pending
-  gloves approve <request-id>
-  gloves deny <request-id>
+  gloves requests list
+  gloves requests approve <request-id>
+  gloves requests deny <request-id>
 
 Tip:
   `requests` is a label, not a request id."#;
@@ -146,14 +146,14 @@ The referenced secret/request/key could not be located.
 
 Recovery:
   gloves list
-  gloves list --pending"#;
+  gloves requests list"#;
 const ERROR_EXPLANATION_E301: &str = r#"E301 resource already exists
 
 The target name is already present and overwrite is not allowed.
 
 Recovery:
   - Choose a different name.
-  - Or remove existing value with `gloves revoke <name>` and retry."#;
+  - Or remove existing value with `gloves secrets revoke <name>` and retry."#;
 const ERROR_EXPLANATION_E302: &str = r#"E302 expired resource
 
 The secret or request has exceeded its TTL.
@@ -303,8 +303,8 @@ mod unit_tests {
     #[test]
     fn explain_request_id_code_contains_recovery_steps() {
         let explanation = explain_error_code("e102").unwrap();
-        assert!(explanation.contains("gloves list --pending"));
-        assert!(explanation.contains("gloves approve <request-id>"));
+        assert!(explanation.contains("gloves requests list"));
+        assert!(explanation.contains("gloves requests approve <request-id>"));
     }
 
     #[test]

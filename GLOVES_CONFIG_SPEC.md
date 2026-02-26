@@ -166,14 +166,14 @@ url_prefixes = [
 
 Secret ACL operation mapping:
 
-- `read`: `gloves get`
-- `write`: `gloves set`
+- `read`: `gloves secrets get`
+- `write`: `gloves secrets set`
 - `list`: `gloves list`
-- `revoke`: `gloves revoke`
+- `revoke`: `gloves secrets revoke`
 - `request`: `gloves request`
-- `status`: `gloves status`
-- `approve`: `gloves approve`
-- `deny`: `gloves deny`
+- `status`: `gloves secrets status`
+- `approve`: `gloves requests approve`
+- `deny`: `gloves requests deny`
 
 Secret pipe URL policy mapping:
 

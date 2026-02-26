@@ -1,5 +1,13 @@
 # gloves-cli-usage
 
+## 0.2.6
+
+### Patch Changes
+
+- Updated skill guidance to the grouped CLI model (`secrets ...`, `requests ...`) and removed top-level command examples that cause confusion.
+- Updated request workflow examples to use noun-first review commands (`requests list|approve|deny`) and `secrets status`.
+- Updated reference help paths to recursive forms (`gloves help [topic...]`, `gloves requests help approve`, `gloves secrets help set`).
+
 ## 0.2.5
 
 ### Patch Changes

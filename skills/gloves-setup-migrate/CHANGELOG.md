@@ -1,5 +1,11 @@
 # gloves-setup-migrate
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated migration playbook wording to the grouped CLI syntax (`secrets set`) for consistency with current command model.
+
 ## 0.1.2
 
 ### Patch Changes
