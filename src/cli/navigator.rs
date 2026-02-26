@@ -9,13 +9,16 @@ use std::{
 
 use chrono::{DateTime, Local};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -140,6 +143,10 @@ struct TuiApp {
     active_run: Option<ActiveRun>,
     output_scroll: u16,
     output_viewport_height: u16,
+    command_viewport_width: u16,
+    globals_viewport_width: u16,
+    fields_viewport_width: u16,
+    output_viewport_width: u16,
     command_horizontal_scroll: u16,
     globals_horizontal_scroll: u16,
     fields_horizontal_scroll: u16,
@@ -298,18 +305,6 @@ const GLOBAL_FIELDS: &[FieldSpec] = &[
 ];
 
 const NO_FIELDS: &[FieldSpec] = &[];
-
-const VERSION_FIELDS: &[FieldSpec] = &[FieldSpec {
-    id: "json",
-    label: "JSON",
-    help: "--json",
-    required: false,
-    kind: FieldKind::Bool,
-    arg: FieldArg::Flag("--json"),
-    default_text: "",
-    default_bool: false,
-    default_choice: 0,
-}];
 
 const EXPLAIN_FIELDS: &[FieldSpec] = &[FieldSpec {
     id: "code",
@@ -539,30 +534,17 @@ const GRANT_FIELDS: &[FieldSpec] = &[
     },
 ];
 
-const AUDIT_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        id: "limit",
-        label: "Limit",
-        help: "--limit (default 50)",
-        required: false,
-        kind: FieldKind::Text,
-        arg: FieldArg::OptionValue("--limit"),
-        default_text: "50",
-        default_bool: false,
-        default_choice: 0,
-    },
-    FieldSpec {
-        id: "json",
-        label: "JSON",
-        help: "--json",
-        required: false,
-        kind: FieldKind::Bool,
-        arg: FieldArg::Flag("--json"),
-        default_text: "",
-        default_bool: false,
-        default_choice: 0,
-    },
-];
+const AUDIT_FIELDS: &[FieldSpec] = &[FieldSpec {
+    id: "limit",
+    label: "Limit",
+    help: "--limit (default 50)",
+    required: false,
+    kind: FieldKind::Text,
+    arg: FieldArg::OptionValue("--limit"),
+    default_text: "50",
+    default_bool: false,
+    default_choice: 0,
+}];
 
 const DAEMON_FIELDS: &[FieldSpec] = &[
     FieldSpec {
@@ -813,30 +795,17 @@ const VAULT_ASK_FILE_FIELDS: &[FieldSpec] = &[
     },
 ];
 
-const ACCESS_PATHS_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        id: "agent",
-        label: "Agent",
-        help: "--agent id",
-        required: true,
-        kind: FieldKind::Text,
-        arg: FieldArg::OptionValue("--agent"),
-        default_text: "",
-        default_bool: false,
-        default_choice: 0,
-    },
-    FieldSpec {
-        id: "json",
-        label: "JSON",
-        help: "--json",
-        required: false,
-        kind: FieldKind::Bool,
-        arg: FieldArg::Flag("--json"),
-        default_text: "",
-        default_bool: false,
-        default_choice: 0,
-    },
-];
+const ACCESS_PATHS_FIELDS: &[FieldSpec] = &[FieldSpec {
+    id: "agent",
+    label: "Agent",
+    help: "--agent id",
+    required: true,
+    kind: FieldKind::Text,
+    arg: FieldArg::OptionValue("--agent"),
+    default_text: "",
+    default_bool: false,
+    default_choice: 0,
+}];
 
 const COMMAND_SPECS: &[CommandSpec] = &[
     CommandSpec {
@@ -845,13 +814,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Initialize runtime layout",
         path: &["init"],
         fields: NO_FIELDS,
-    },
-    CommandSpec {
-        id: "version",
-        title: "version",
-        summary: "Print version/runtime defaults",
-        path: &["version"],
-        fields: VERSION_FIELDS,
     },
     CommandSpec {
         id: "explain",
@@ -1038,7 +1000,6 @@ const COMMAND_SPECS: &[CommandSpec] = &[
 ];
 
 const SAFE_COMMAND_IDS: &[&str] = &[
-    "version",
     "explain",
     "get",
     "env",
@@ -1106,9 +1067,6 @@ fn normalize_launch_command_args(args: &[String]) -> Vec<String> {
         }
         "ls" => {
             normalized[0] = "list".to_owned();
-        }
-        "ver" => {
-            normalized[0] = "version".to_owned();
         }
         "approve" => {
             normalized[0] = "requests".to_owned();
@@ -1284,7 +1242,7 @@ pub(crate) fn run_command_navigator(launch_options: NavigatorLaunchOptions) -> R
 fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -1292,7 +1250,11 @@ fn init_terminal() -> Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
     Ok(())
 }
@@ -1310,8 +1272,16 @@ fn run_event_loop(
             continue;
         }
         let event = event::read()?;
-        if let Event::Key(key) = event {
-            app.on_key(key)?;
+        let terminal_size = terminal.size()?;
+        let terminal_area = Rect::new(0, 0, terminal_size.width, terminal_size.height);
+        match event {
+            Event::Key(key) => {
+                app.on_key(key)?;
+            }
+            Event::Mouse(mouse) => {
+                app.on_mouse(mouse, terminal_area);
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -1340,6 +1310,10 @@ impl TuiApp {
             active_run: None,
             output_scroll: 0,
             output_viewport_height: 0,
+            command_viewport_width: 1,
+            globals_viewport_width: 1,
+            fields_viewport_width: 1,
+            output_viewport_width: 1,
             command_horizontal_scroll: 0,
             globals_horizontal_scroll: 0,
             fields_horizontal_scroll: 0,
@@ -1842,12 +1816,6 @@ impl TuiApp {
             KeyCode::Right if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.scroll_horizontal_for_focus(true);
             }
-            KeyCode::Char('H') => {
-                self.scroll_horizontal_for_focus(false);
-            }
-            KeyCode::Char('L') => {
-                self.scroll_horizontal_for_focus(true);
-            }
             KeyCode::Esc => {
                 if self.fullscreen_enabled {
                     self.fullscreen_enabled = false;
@@ -1898,11 +1866,21 @@ impl TuiApp {
             KeyCode::Char('f') if key.modifiers.is_empty() => {
                 self.toggle_fullscreen();
             }
+            KeyCode::Char('o') | KeyCode::Char('O')
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.focus = FocusPane::Output;
+                self.status_line = "Focus -> execution output".to_owned();
+            }
             KeyCode::Char('?') => {
                 self.execute_selected_help()?;
             }
             KeyCode::Enter if key.modifiers.is_empty() => {
-                self.on_enter_cycle()?;
+                if self.fullscreen_enabled {
+                    self.on_enter_fullscreen()?;
+                } else {
+                    self.on_enter_cycle()?;
+                }
             }
             KeyCode::Char('x') => {
                 self.reset_selected_field(false);
@@ -1922,19 +1900,219 @@ impl TuiApp {
         Ok(())
     }
 
+    fn on_mouse(&mut self, mouse: MouseEvent, terminal_area: Rect) {
+        let Some(target_pane) = self.mouse_target_pane(mouse.column, mouse.row, terminal_area)
+        else {
+            return;
+        };
+
+        match mouse.kind {
+            MouseEventKind::ScrollLeft => {
+                self.scroll_horizontal_for_pane(target_pane, false);
+            }
+            MouseEventKind::ScrollRight => {
+                self.scroll_horizontal_for_pane(target_pane, true);
+            }
+            MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.scroll_horizontal_for_pane(target_pane, false);
+            }
+            MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.scroll_horizontal_for_pane(target_pane, true);
+            }
+            MouseEventKind::ScrollUp if target_pane == FocusPane::Commands => {
+                self.scroll_command_tree(false);
+            }
+            MouseEventKind::ScrollDown if target_pane == FocusPane::Commands => {
+                self.scroll_command_tree(true);
+            }
+            MouseEventKind::ScrollUp if target_pane == FocusPane::Output => {
+                self.on_output_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+            }
+            MouseEventKind::ScrollDown if target_pane == FocusPane::Output => {
+                self.on_output_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+            }
+            _ => {}
+        }
+    }
+
+    fn mouse_target_pane(&self, column: u16, row: u16, terminal_area: Rect) -> Option<FocusPane> {
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(UI_HEADER_HEIGHT),
+                Constraint::Min(1),
+                Constraint::Length(UI_FOOTER_HEIGHT),
+            ])
+            .split(terminal_area);
+        let body_area = root_chunks[1];
+        if !rect_contains_point(body_area, column, row) {
+            return None;
+        }
+
+        if self.fullscreen_enabled {
+            return Some(self.focus);
+        }
+
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(28),
+                Constraint::Percentage(32),
+                Constraint::Percentage(40),
+            ])
+            .split(body_area);
+        if rect_contains_point(body_chunks[0], column, row) {
+            return Some(FocusPane::Commands);
+        }
+        if rect_contains_point(body_chunks[2], column, row) {
+            return Some(FocusPane::Output);
+        }
+        if !rect_contains_point(body_chunks[1], column, row) {
+            return None;
+        }
+
+        let form_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(body_chunks[1]);
+        if rect_contains_point(form_chunks[0], column, row) {
+            return Some(FocusPane::Globals);
+        }
+        if rect_contains_point(form_chunks[1], column, row) {
+            return Some(FocusPane::Fields);
+        }
+
+        None
+    }
+
     fn scroll_horizontal_for_focus(&mut self, forward: bool) {
-        let scroll = match self.focus {
+        self.scroll_horizontal_for_pane(self.focus, forward);
+    }
+
+    fn scroll_command_tree(&mut self, forward: bool) {
+        let rows = self.command_tree_rows();
+        if rows.is_empty() {
+            self.status_line = EMPTY_FILTER_PLACEHOLDER.to_owned();
+            return;
+        }
+        if self.selected_command_tree_row >= rows.len() {
+            self.selected_command_tree_row = rows.len() - 1;
+        }
+        if forward {
+            self.selected_command_tree_row =
+                (self.selected_command_tree_row + 1).min(rows.len().saturating_sub(1));
+        } else {
+            self.selected_command_tree_row = self.selected_command_tree_row.saturating_sub(1);
+        }
+        self.reconcile_tree_selection();
+    }
+
+    fn pane_scroll_mut(&mut self, pane: FocusPane) -> &mut u16 {
+        match pane {
             FocusPane::Commands => &mut self.command_horizontal_scroll,
             FocusPane::Globals => &mut self.globals_horizontal_scroll,
             FocusPane::Fields => &mut self.fields_horizontal_scroll,
             FocusPane::Output => &mut self.output_horizontal_scroll,
+        }
+    }
+
+    fn pane_viewport_width(&self, pane: FocusPane) -> usize {
+        let width = match pane {
+            FocusPane::Commands => self.command_viewport_width,
+            FocusPane::Globals => self.globals_viewport_width,
+            FocusPane::Fields => self.fields_viewport_width,
+            FocusPane::Output => self.output_viewport_width,
         };
+        usize::from(width).max(1)
+    }
+
+    fn pane_max_line_width(&self, pane: FocusPane) -> usize {
+        match pane {
+            FocusPane::Commands => {
+                let rows = self.command_tree_rows();
+                if rows.is_empty() {
+                    return EMPTY_FILTER_PLACEHOLDER.chars().count();
+                }
+                rows.iter()
+                    .map(|row| {
+                        let indent = "  ".repeat(row.depth);
+                        let marker = if row.is_branch {
+                            if row.is_expanded {
+                                "[-]"
+                            } else {
+                                "[+]"
+                            }
+                        } else {
+                            " - "
+                        };
+                        let mut line = format!("{indent}{marker} ");
+                        line.push_str(&row.label);
+                        if let Some(command_index) = row.command_index {
+                            if let Some(spec) = COMMAND_SPECS.get(command_index) {
+                                line.push_str("  ");
+                                line.push_str(spec.summary);
+                            }
+                        }
+                        line.chars().count()
+                    })
+                    .max()
+                    .unwrap_or(0)
+            }
+            FocusPane::Globals => self
+                .global_fields
+                .iter()
+                .map(field_line_text)
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0),
+            FocusPane::Fields => self
+                .command_fields
+                .iter()
+                .map(field_line_text)
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0),
+            FocusPane::Output => self
+                .flatten_output_lines()
+                .iter()
+                .map(|line| line.chars().count())
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
+    fn max_horizontal_scroll_for_pane(&self, pane: FocusPane) -> u16 {
+        let viewport_width = self.pane_viewport_width(pane);
+        let max_line_width = self.pane_max_line_width(pane);
+        max_line_width
+            .saturating_sub(viewport_width)
+            .min(u16::MAX as usize) as u16
+    }
+
+    fn clamp_all_horizontal_scrolls(&mut self) {
+        for pane in [
+            FocusPane::Commands,
+            FocusPane::Globals,
+            FocusPane::Fields,
+            FocusPane::Output,
+        ] {
+            let max_scroll = self.max_horizontal_scroll_for_pane(pane);
+            let scroll = self.pane_scroll_mut(pane);
+            *scroll = (*scroll).min(max_scroll);
+        }
+    }
+
+    fn scroll_horizontal_for_pane(&mut self, pane: FocusPane, forward: bool) {
+        let max_scroll = self.max_horizontal_scroll_for_pane(pane);
+        let scroll = self.pane_scroll_mut(pane);
         if forward {
-            *scroll = scroll.saturating_add(HORIZONTAL_SCROLL_STEP);
+            *scroll = scroll
+                .saturating_add(HORIZONTAL_SCROLL_STEP)
+                .min(max_scroll);
         } else {
             *scroll = scroll.saturating_sub(HORIZONTAL_SCROLL_STEP);
         }
-        self.status_line = format!("Horizontal scroll {}: {}", self.focus.label(), *scroll);
+        self.status_line = format!("Horizontal scroll {}: {}", pane.label(), *scroll);
     }
 
     fn on_navigation_key(&mut self, key: KeyEvent) {
@@ -1994,6 +2172,49 @@ impl TuiApp {
             FocusPane::Output => {
                 self.focus = FocusPane::Commands;
                 self.status_line = "Cycle reset to command tree".to_owned();
+            }
+        }
+        Ok(())
+    }
+
+    fn on_enter_fullscreen(&mut self) -> Result<()> {
+        match self.focus {
+            FocusPane::Commands => {
+                let rows = self.command_tree_rows();
+                if rows.is_empty() {
+                    self.status_line = EMPTY_FILTER_PLACEHOLDER.to_owned();
+                    return Ok(());
+                }
+                if self.selected_command_tree_row >= rows.len() {
+                    self.selected_command_tree_row = rows.len() - 1;
+                }
+                if let Some(row) = rows.get(self.selected_command_tree_row) {
+                    if row.is_branch {
+                        if row.is_expanded {
+                            self.expanded_command_tree_paths.remove(&row.key);
+                        } else {
+                            self.expanded_command_tree_paths.insert(row.key.clone());
+                        }
+                        self.status_line = format!("Toggled group `{}`", row.label);
+                    } else if let Some(command_index) = row.command_index {
+                        self.select_command_by_index(command_index);
+                        self.status_line =
+                            format!("Selected `{}`", self.selected_command_spec().title);
+                    }
+                }
+                self.reconcile_tree_selection();
+            }
+            FocusPane::Globals => {
+                self.status_line =
+                    "Fullscreen mode: Enter stays on globals; use Tab to switch panes".to_owned();
+            }
+            FocusPane::Fields => {
+                self.execute_selected_command()?;
+                self.status_line.push_str(" (fullscreen focus retained)");
+            }
+            FocusPane::Output => {
+                self.status_line =
+                    "Fullscreen mode: Enter stays on output; use Tab to switch panes".to_owned();
             }
         }
         Ok(())
@@ -2152,14 +2373,14 @@ impl TuiApp {
             KeyCode::Left if self.fullscreen_enabled => {
                 self.scroll_horizontal_for_focus(false);
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 if let Some(row) = rows.get(self.selected_command_tree_row) {
                     if row.is_branch {
                         self.expanded_command_tree_paths.insert(row.key.clone());
                     }
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 if let Some(row) = rows.get(self.selected_command_tree_row) {
                     if row.is_branch && row.is_expanded {
                         self.expanded_command_tree_paths.remove(&row.key);
@@ -2223,10 +2444,10 @@ impl TuiApp {
             KeyCode::Right if self.fullscreen_enabled => {
                 self.scroll_horizontal_for_focus(true);
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            KeyCode::Left => {
                 self.cycle_choice(global, selected_index, false);
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right => {
                 self.cycle_choice(global, selected_index, true);
             }
             KeyCode::Char(' ') => {
@@ -2790,6 +3011,7 @@ impl TuiApp {
     }
 
     fn render(&mut self, frame: &mut ratatui::Frame) {
+        self.clamp_all_horizontal_scrolls();
         let root_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -2850,7 +3072,7 @@ impl TuiApp {
         let footer_text = if self.input_mode == InputMode::Edit {
             "Edit: type, Enter=save, Esc=cancel"
         } else {
-            "Navigate: Tab switch pane, f fullscreen toggle, / filter, Up/Down move, Left/Right expand/collapse tree (or cycle choices in field panes), Space toggle bool, e edit text, Enter cycle (commands -> globals -> fields -> run -> commands; branches toggle), ? help, r/F5 run, Ctrl+C cancel active run, Home/g top, End/G tail, x/X reset field, c clear output, q quit"
+            "Navigate: Tab switch pane, o output focus, f fullscreen toggle, / filter, Up/Down move, Left/Right expand/collapse tree (or cycle choices in field panes), Shift+Left/Right horizontal pan, mouse wheel left/right or Shift+wheel horizontal pan, Space toggle bool, e edit text, Enter cycles only in split view (fullscreen keeps pane focus), ? help, r/F5 run, Ctrl+C cancel active run, Home/g top, End/G tail, x/X reset field, c clear output, q quit"
         };
         let footer = Paragraph::new(footer_text)
             .wrap(Wrap { trim: true })
@@ -2867,13 +3089,15 @@ impl TuiApp {
         }
     }
 
-    fn render_commands(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_commands(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let rows = self.command_tree_rows();
         let visible_leaf_count = rows
             .iter()
             .filter(|row| row.command_index.is_some())
             .count();
-        let content_width = usize::from(area.width.saturating_sub(4));
+        self.command_viewport_width = area.width.saturating_sub(4).max(1);
+        self.clamp_all_horizontal_scrolls();
+        let content_width = usize::from(self.command_viewport_width);
         let items = if rows.is_empty() {
             vec![ListItem::new(Line::from(visible_line_window(
                 EMPTY_FILTER_PLACEHOLDER,
@@ -2930,7 +3154,7 @@ impl TuiApp {
         frame.render_stateful_widget(list, area, &mut state);
     }
 
-    fn render_forms(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
+    fn render_forms(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         let form_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
@@ -2940,11 +3164,18 @@ impl TuiApp {
     }
 
     fn render_field_list(
-        &self,
+        &mut self,
         frame: &mut ratatui::Frame,
         area: ratatui::layout::Rect,
         global: bool,
     ) {
+        let viewport_width = area.width.saturating_sub(4).max(1);
+        if global {
+            self.globals_viewport_width = viewport_width;
+        } else {
+            self.fields_viewport_width = viewport_width;
+        }
+        self.clamp_all_horizontal_scrolls();
         let (fields, selected_index, title, is_focused) = if global {
             (
                 &self.global_fields,
@@ -2960,22 +3191,16 @@ impl TuiApp {
                 self.focus == FocusPane::Fields,
             )
         };
-
         let horizontal_scroll = if global {
             self.globals_horizontal_scroll
         } else {
             self.fields_horizontal_scroll
         };
-        let content_width = usize::from(area.width.saturating_sub(4));
+        let content_width = usize::from(viewport_width);
         let items = fields
             .iter()
             .map(|field_state| {
-                let suffix = if field_state.spec.required { " *" } else { "" };
-                let value = field_display_value(field_state);
-                let line = format!(
-                    "{}{}: {}  [{}]",
-                    field_state.spec.label, suffix, value, field_state.spec.help
-                );
+                let line = field_line_text(field_state);
                 ListItem::new(Line::from(visible_line_window(
                     &line,
                     horizontal_scroll,
@@ -2998,6 +3223,8 @@ impl TuiApp {
 
     fn render_output(&mut self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
         self.output_viewport_height = area.height.saturating_sub(2);
+        self.output_viewport_width = area.width.saturating_sub(3).max(1);
+        self.clamp_all_horizontal_scrolls();
         self.sync_output_scroll();
         let title = pane_title("Execution Output", self.focus == FocusPane::Output);
         let rendered_lines = self.flatten_output_lines();
@@ -3177,6 +3404,12 @@ fn tail_scroll_start(total_lines: usize, viewport_height: u16) -> u16 {
     (page_index * viewport).min(u16::MAX as usize) as u16
 }
 
+fn rect_contains_point(area: Rect, column: u16, row: u16) -> bool {
+    let x_end = area.x.saturating_add(area.width);
+    let y_end = area.y.saturating_add(area.height);
+    column >= area.x && column < x_end && row >= area.y && row < y_end
+}
+
 fn pane_title(title: &str, focused: bool) -> Line<'static> {
     if focused {
         Line::from(vec![
@@ -3228,6 +3461,15 @@ fn field_display_value(field_state: &FieldState) -> String {
             .to_owned(),
         _ => "<invalid>".to_owned(),
     }
+}
+
+fn field_line_text(field_state: &FieldState) -> String {
+    let suffix = if field_state.spec.required { " *" } else { "" };
+    let value = field_display_value(field_state);
+    format!(
+        "{}{}: {}  [{}]",
+        field_state.spec.label, suffix, value, field_state.spec.help
+    )
 }
 
 fn build_invocation_args(
@@ -3604,10 +3846,12 @@ mod unit_tests {
         stdin_payload_for_command, tail_scroll_start, visible_line_window, CommandSpec,
         CommandTreeNode, FieldState, FieldValue, FocusPane, NavigatorLaunchOptions, RunPhase,
         RunRecord, TuiApp, COMMAND_SPECS, GLOBAL_FIELDS, HORIZONTAL_SCROLL_STEP, MAX_OUTPUT_LINES,
+        UI_FOOTER_HEIGHT, UI_HEADER_HEIGHT,
     };
     use crate::cli::Cli;
     use clap::CommandFactory;
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use ratatui::layout::{Constraint, Direction, Layout, Rect};
     use std::{collections::BTreeSet, process::Command as ProcessCommand, time::Instant};
 
     fn command_by_id(id: &str) -> &'static CommandSpec {
@@ -3685,11 +3929,11 @@ mod unit_tests {
     fn command_tree_keeps_top_level_leaf_commands() {
         let tree = build_command_tree();
         let init = node_by_label(&tree, "init");
-        let version = node_by_label(&tree, "version");
+        let explain = node_by_label(&tree, "explain");
         assert!(init.command_index.is_some());
-        assert!(version.command_index.is_some());
+        assert!(explain.command_index.is_some());
         assert!(init.children.is_empty());
-        assert!(version.children.is_empty());
+        assert!(explain.children.is_empty());
     }
 
     #[test]
@@ -3996,7 +4240,7 @@ mod unit_tests {
 
     #[test]
     fn risky_classification_matches_read_and_write_commands() {
-        assert!(!is_risky_command("version"));
+        assert!(!is_risky_command("list"));
         assert!(!is_risky_command("requests_list"));
         assert!(is_risky_command("set"));
         assert!(is_risky_command("approve"));
@@ -4035,6 +4279,12 @@ mod unit_tests {
     fn output_arrow_keys_scroll_horizontally() {
         let mut app = TuiApp::new(NavigatorLaunchOptions::default());
         app.focus = FocusPane::Output;
+        app.output_viewport_width = 10;
+        let mut record = RunRecord::new(1, "version".to_owned(), "gloves version".to_owned());
+        record
+            .stdout_lines
+            .push("0123456789abcdefghijklmnop".to_owned());
+        app.run_history.push(record);
         assert_eq!(app.output_horizontal_scroll, 0);
         app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
             .expect("right scroll");
@@ -4042,6 +4292,169 @@ mod unit_tests {
         app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
             .expect("left scroll");
         assert_eq!(app.output_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn mouse_scroll_right_pans_fullscreen_output() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Output;
+        app.fullscreen_enabled = true;
+        app.output_viewport_width = 10;
+        let mut record = RunRecord::new(2, "version".to_owned(), "gloves version".to_owned());
+        record
+            .stdout_lines
+            .push("0123456789abcdefghijklmnop".to_owned());
+        app.run_history.push(record);
+        let terminal_area = Rect::new(0, 0, 140, 40);
+
+        app.on_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollRight,
+                column: 20,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+            terminal_area,
+        );
+        assert_eq!(app.output_horizontal_scroll, HORIZONTAL_SCROLL_STEP);
+
+        app.on_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollLeft,
+                column: 20,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            },
+            terminal_area,
+        );
+        assert_eq!(app.output_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn mouse_shift_wheel_pans_output_in_split_view_without_focus_change() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Commands;
+        app.output_viewport_width = 10;
+        let mut record = RunRecord::new(3, "version".to_owned(), "gloves version".to_owned());
+        record
+            .stdout_lines
+            .push("0123456789abcdefghijklmnop".to_owned());
+        app.run_history.push(record);
+        let terminal_area = Rect::new(0, 0, 140, 40);
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(UI_HEADER_HEIGHT),
+                Constraint::Min(1),
+                Constraint::Length(UI_FOOTER_HEIGHT),
+            ])
+            .split(terminal_area);
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(28),
+                Constraint::Percentage(32),
+                Constraint::Percentage(40),
+            ])
+            .split(root_chunks[1]);
+        let output_area = body_chunks[2];
+
+        app.on_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: output_area.x + 1,
+                row: output_area.y + 1,
+                modifiers: KeyModifiers::SHIFT,
+            },
+            terminal_area,
+        );
+
+        assert_eq!(app.output_horizontal_scroll, HORIZONTAL_SCROLL_STEP);
+        assert_eq!(app.focus, FocusPane::Commands);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_command_tree_selection() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let terminal_area = Rect::new(0, 0, 140, 40);
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(UI_HEADER_HEIGHT),
+                Constraint::Min(1),
+                Constraint::Length(UI_FOOTER_HEIGHT),
+            ])
+            .split(terminal_area);
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(28),
+                Constraint::Percentage(32),
+                Constraint::Percentage(40),
+            ])
+            .split(root_chunks[1]);
+        let command_area = body_chunks[0];
+        let initial_index = app.selected_command_tree_row;
+
+        app.on_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: command_area.x + 1,
+                row: command_area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            terminal_area,
+        );
+        assert!(app.selected_command_tree_row >= initial_index);
+
+        app.on_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: command_area.x + 1,
+                row: command_area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            },
+            terminal_area,
+        );
+        assert_eq!(app.selected_command_tree_row, initial_index);
+    }
+
+    #[test]
+    fn output_horizontal_scroll_is_clamped_to_content_width() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Output;
+        app.output_viewport_width = 10;
+        let mut record = RunRecord::new(4, "version".to_owned(), "gloves version".to_owned());
+        record
+            .stdout_lines
+            .push("0123456789abcdefghijklmnop".to_owned());
+        app.run_history.push(record);
+        let expected_max = app.max_horizontal_scroll_for_pane(FocusPane::Output);
+
+        for _ in 0..40 {
+            app.on_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+                .expect("right scroll");
+        }
+
+        assert_eq!(app.output_horizontal_scroll, expected_max);
+
+        for _ in 0..40 {
+            app.on_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+                .expect("left scroll");
+        }
+
+        assert_eq!(app.output_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn o_key_focuses_output_pane() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.focus = FocusPane::Commands;
+        app.on_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+            .expect("focus output");
+
+        assert_eq!(app.focus, FocusPane::Output);
+        assert_eq!(app.status_line, "Focus -> execution output");
     }
 
     #[test]
@@ -4207,6 +4620,47 @@ mod unit_tests {
         assert_eq!(app.focus, FocusPane::Commands);
         assert_eq!(app.status_line, "Validation failed");
         assert_eq!(app.run_history.len(), 1);
+    }
+
+    #[test]
+    fn enter_in_fullscreen_keeps_focus_on_current_pane() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.fullscreen_enabled = true;
+
+        app.focus = FocusPane::Commands;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("enter in fullscreen commands");
+        assert_eq!(app.focus, FocusPane::Commands);
+
+        app.focus = FocusPane::Globals;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("enter in fullscreen globals");
+        assert_eq!(app.focus, FocusPane::Globals);
+
+        app.focus = FocusPane::Output;
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("enter in fullscreen output");
+        assert_eq!(app.focus, FocusPane::Output);
+
+        let revoke_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "revoke")
+            .expect("revoke command exists");
+        let rows = app.command_tree_rows();
+        let revoke_row = rows
+            .iter()
+            .position(|row| row.command_index == Some(revoke_index))
+            .expect("revoke row exists");
+        app.selected_command_tree_row = revoke_row;
+        app.reconcile_tree_selection();
+        app.focus = FocusPane::Fields;
+
+        let run_count_before = app.run_history.len();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .expect("enter in fullscreen fields");
+        assert_eq!(app.focus, FocusPane::Fields);
+        assert_eq!(app.run_history.len(), run_count_before + 1);
+        assert!(app.status_line.contains("(fullscreen focus retained)"));
     }
 
     #[test]

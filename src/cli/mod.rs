@@ -41,11 +41,12 @@ const CLI_AFTER_HELP: &str = r#"Examples:
   gloves requests help approve
   gloves tui --config /etc/gloves/prod.gloves.toml audit --limit 100
   gloves explain E102
+  gloves --json requests approve 123e4567-e89b-12d3-a456-426614174000
   gloves --error-format json requests approve 123e4567-e89b-12d3-a456-426614174000
 
 Version:
   gloves --version
-  gloves version --json
+  gloves --json --version
 
 More help:
   gloves help [topic...]
@@ -118,11 +119,6 @@ const STATUS_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves secrets status prod/db
   gloves requests list
 "#;
-const VERSION_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves --version
-  gloves version
-  gloves version --json
-"#;
 const HELP_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves help
   gloves help secrets set
@@ -159,10 +155,12 @@ Startup:
 
 Controls:
   - Up/Down or j/k: move command tree
-  - h/l: collapse/expand command groups (or cycle choices in field panes)
-  - Left/Right: horizontal scroll in output pane; in fullscreen, horizontal scroll for focused pane
-  - Shift+Left/Shift+Right or H/L: horizontal scroll for focused pane
-  - Enter: cycle commands -> global flags -> command fields -> run -> commands (branches toggle expand/collapse)
+  - Left/Right: collapse/expand command groups in command tree; change choices in field panes; in output they pan horizontally
+  - Shift+Left/Shift+Right: horizontal scroll for focused pane
+  - Mouse wheel left/right (or Shift+wheel): horizontal scroll for hovered pane
+  - Mouse wheel up/down: vertical scroll in command tree and output pane
+  - o or O: focus execution output pane
+  - Enter: split view cycles commands -> global flags -> command fields -> run -> commands; fullscreen keeps current pane focus
   - Tab / Shift+Tab: switch panes
   - f: toggle fullscreen for focused pane
   - e: edit selected text field
@@ -225,8 +223,17 @@ pub struct Cli {
     #[arg(long, value_enum)]
     pub vault_mode: Option<VaultModeArg>,
     /// Error output format.
-    #[arg(long, value_enum, default_value_t = ErrorFormatArg::Text, help = ERROR_FORMAT_ARG_HELP)]
+    #[arg(
+        long,
+        value_enum,
+        global = true,
+        default_value_t = ErrorFormatArg::Text,
+        help = ERROR_FORMAT_ARG_HELP
+    )]
     pub error_format: ErrorFormatArg,
+    /// Emit JSON output for command results and errors.
+    #[arg(long, global = true)]
+    pub json: bool,
     /// Subcommand.
     #[command(subcommand)]
     pub command: Command,
@@ -237,13 +244,6 @@ pub struct Cli {
 pub enum Command {
     /// Initializes directory tree.
     Init,
-    /// Prints version and runtime defaults.
-    #[command(visible_alias = "ver", after_help = VERSION_COMMAND_AFTER_HELP)]
-    Version {
-        /// Print structured JSON output.
-        #[arg(long)]
-        json: bool,
-    },
     /// Explains a stable error code with recovery guidance.
     #[command(after_help = EXPLAIN_COMMAND_AFTER_HELP)]
     Explain {
@@ -337,9 +337,6 @@ pub enum Command {
         /// Show only the latest N events.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Print JSON output instead of table lines.
-        #[arg(long)]
-        json: bool,
     },
     /// Verifies registry and expiry state.
     Verify,
@@ -605,9 +602,6 @@ pub enum AccessCommand {
         /// Agent identifier.
         #[arg(long)]
         agent: String,
-        /// Print JSON output.
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -670,6 +664,11 @@ pub enum GpgCommand {
 /// Runs CLI and returns process exit code.
 pub fn run(cli: Cli) -> Result<i32> {
     commands::run(cli)
+}
+
+/// Prints version/runtime defaults in text or JSON and returns process exit code.
+pub fn emit_version_output(json: bool) -> Result<i32> {
+    commands::emit_version_output(json)
 }
 
 #[allow(dead_code)]
@@ -826,9 +825,9 @@ mod unit_tests {
         let help = command.render_long_help().to_string();
         assert!(help.contains("Examples:"));
         assert!(help.contains("gloves --version"));
-        assert!(help.contains("gloves version --json"));
+        assert!(help.contains("gloves --json --version"));
         assert!(help.contains("gloves help [topic...]"));
-        assert!(!help.contains("gloves --error-format json approve requests"));
+        assert!(help.contains("--error-format"));
     }
 
     #[test]
@@ -936,9 +935,9 @@ mod unit_tests {
     }
 
     #[test]
-    fn cli_infer_subcommand_allows_version_prefix() {
-        let cli = Cli::try_parse_from(["gloves", "ver"]).unwrap();
-        assert!(matches!(cli.command, Command::Version { json: false }));
+    fn cli_version_subcommand_is_not_supported() {
+        let error = Cli::try_parse_from(["gloves", "version"]).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
     }
 
     #[test]
@@ -972,14 +971,26 @@ mod unit_tests {
     }
 
     #[test]
+    fn cli_json_flag_defaults_to_false() {
+        let cli = Cli::try_parse_from(["gloves", "init"]).unwrap();
+        assert!(!cli.json);
+    }
+
+    #[test]
+    fn cli_json_flag_alias_is_available() {
+        let cli = Cli::try_parse_from(["gloves", "--json", "init"]).unwrap();
+        assert!(cli.json);
+    }
+
+    #[test]
     fn cli_error_format_defaults_to_text() {
-        let cli = Cli::try_parse_from(["gloves", "version"]).unwrap();
+        let cli = Cli::try_parse_from(["gloves", "init"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormatArg::Text);
     }
 
     #[test]
     fn cli_error_format_accepts_json() {
-        let cli = Cli::try_parse_from(["gloves", "--error-format", "json", "version"]).unwrap();
+        let cli = Cli::try_parse_from(["gloves", "--error-format", "json", "init"]).unwrap();
         assert_eq!(cli.error_format, ErrorFormatArg::Json);
     }
 

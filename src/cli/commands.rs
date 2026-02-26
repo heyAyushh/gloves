@@ -68,6 +68,7 @@ const TUI_FLAG_CONFIG: &str = "--config";
 const TUI_FLAG_NO_CONFIG: &str = "--no-config";
 const TUI_FLAG_VAULT_MODE: &str = "--vault-mode";
 const TUI_FLAG_ERROR_FORMAT: &str = "--error-format";
+const TUI_FLAG_JSON: &str = "--json";
 
 #[derive(Debug, Clone)]
 struct EffectiveCliState {
@@ -93,6 +94,7 @@ struct TuiBootstrapArgs {
     no_config: bool,
     vault_mode: Option<VaultModeArg>,
     error_format: Option<ErrorFormatArg>,
+    json: bool,
     command_args: Vec<String>,
 }
 
@@ -181,24 +183,19 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
     let state = load_effective_state(&cli)?;
     enforce_vault_mode(&state.vault_mode, &cli.command)?;
     runtime::init_layout(&state.paths)?;
+    let json_output = cli.json || matches!(cli.error_format, ErrorFormatArg::Json);
 
     match cli.command {
         Command::Init => {
             runtime::init_layout(&state.paths)?;
             log_command_executed(&state.paths, &state.default_agent_id, "init", None);
-            if let Some(code) = stdout_line_or_exit("initialized")? {
-                return Ok(code);
-            }
-        }
-        Command::Version { json } => {
-            log_command_executed(&state.paths, &state.default_agent_id, "version", None);
-            if let Some(code) = run_version_command(json)? {
+            if let Some(code) = emit_command_message_or_json("init", "initialized", json_output)? {
                 return Ok(code);
             }
         }
         Command::Explain { code } => {
             let normalized_code = normalize_error_code(&code);
-            if let Some(exit_code) = run_explain_command(&code)? {
+            if let Some(exit_code) = run_explain_command(&code, json_output)? {
                 return Ok(exit_code);
             }
             log_command_executed(
@@ -215,13 +212,14 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
             log_command_executed(&state.paths, &state.default_agent_id, "tui", None);
         }
         Command::Help { topic } => {
-            if let Some(code) = run_help_command(&topic)? {
+            if let Some(code) = run_help_command(&topic, json_output)? {
                 return Ok(code);
             }
         }
         Command::Secrets { command } => match command {
             SecretsCommand::Help { topic } => {
-                if let Some(code) = run_help_command_with_prefix(&["secrets"], &topic)? {
+                if let Some(code) = run_help_command_with_prefix(&["secrets"], &topic, json_output)?
+                {
                     return Ok(code);
                 }
             }
@@ -234,6 +232,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
             } => {
                 let manager = runtime::manager_for_paths(&state.paths)?;
                 let secret_id = SecretId::new(&name)?;
+                let secret_name = secret_id.as_str().to_owned();
                 ensure_secret_acl_allowed(&state, SecretAclOperation::Write, Some(&secret_id))?;
                 let creator = state.default_agent_id.clone();
                 let recipient =
@@ -258,7 +257,15 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     },
                 )?;
                 log_command_executed(&state.paths, &state.default_agent_id, "set", Some(name));
-                if let Some(code) = stdout_line_or_exit("ok")? {
+                if let Some(code) = emit_command_json_or_text(
+                    "secrets-set",
+                    serde_json::json!({
+                        "secret": secret_name,
+                        "status": "ok",
+                    }),
+                    "ok",
+                    json_output,
+                )? {
                     return Ok(code);
                 }
             }
@@ -302,7 +309,19 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     Ok(secret) => {
                         let mut secret_bytes = secret.expose(ToOwned::to_owned);
                         let output_result = match output_target {
-                            SecretOutputTarget::Stdout => stdout_bytes_or_exit(&secret_bytes),
+                            SecretOutputTarget::Stdout => {
+                                if json_output {
+                                    emit_command_json(
+                                        "secrets-get",
+                                        serde_json::json!({
+                                            "secret": secret_id.as_str(),
+                                            "value": secret_bytes_json_value(&secret_bytes),
+                                        }),
+                                    )
+                                } else {
+                                    stdout_bytes_or_exit(&secret_bytes)
+                                }
+                            }
                             SecretOutputTarget::PipeCommand(pipe_command) => {
                                 pipe_secret_to_command(&pipe_command, &secret_bytes).map(|_| None)
                             }
@@ -356,7 +375,15 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "revoke",
                     Some(secret_id.as_str().to_owned()),
                 );
-                if let Some(code) = stdout_line_or_exit("revoked")? {
+                if let Some(code) = emit_command_json_or_text(
+                    "secrets-revoke",
+                    serde_json::json!({
+                        "secret": secret_id.as_str(),
+                        "status": "revoked",
+                    }),
+                    "revoked",
+                    json_output,
+                )? {
                     return Ok(code);
                 }
             }
@@ -376,14 +403,32 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "status",
                     Some(secret_id.as_str().to_owned()),
                 );
-                if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
+                if json_output {
+                    if let Some(code) = emit_command_json(
+                        "secrets-status",
+                        serde_json::json!({
+                            "secret": secret_id.as_str(),
+                            "status": status,
+                        }),
+                    )? {
+                        return Ok(code);
+                    }
+                } else if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&status)?)? {
                     return Ok(code);
                 }
             }
         },
         Command::Env { name, var } => {
             log_command_executed(&state.paths, &state.default_agent_id, "env", Some(name));
-            if let Some(code) = stdout_line_or_exit(&format!("export {var}=<REDACTED>"))? {
+            if let Some(code) = emit_command_json_or_text(
+                "env",
+                serde_json::json!({
+                    "export": format!("export {var}=<REDACTED>"),
+                    "variable": var,
+                }),
+                &format!("export {var}=<REDACTED>"),
+                json_output,
+            )? {
                 return Ok(code);
             }
         }
@@ -409,14 +454,29 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 Duration::days(state.default_secret_ttl_days),
                 &signing_key,
             )?;
-            log_command_executed(&state.paths, &state.default_agent_id, "request", Some(name));
-            if let Some(code) = stdout_line_or_exit("pending")? {
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "request",
+                Some(name.clone()),
+            );
+            if let Some(code) = emit_command_json_or_text(
+                "request",
+                serde_json::json!({
+                    "secret": name,
+                    "status": "pending",
+                }),
+                "pending",
+                json_output,
+            )? {
                 return Ok(code);
             }
         }
         Command::Requests { command } => match command {
             RequestsCommand::Help { topic } => {
-                if let Some(code) = run_help_command_with_prefix(&["requests"], &topic)? {
+                if let Some(code) =
+                    run_help_command_with_prefix(&["requests"], &topic, json_output)?
+                {
                     return Ok(code);
                 }
             }
@@ -454,7 +514,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
-        Command::Audit { limit, json } => {
+        Command::Audit { limit } => {
             let records = load_audit_records(&state.paths.audit_file())?;
             let sliced_records = latest_audit_records(records, limit);
             log_command_executed(
@@ -463,9 +523,14 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 "audit",
                 Some(format!("limit={limit}")),
             );
-            if json {
-                let payload = serde_json::to_string_pretty(&sliced_records)?;
-                if let Some(code) = stdout_line_or_exit(&payload)? {
+            if json_output {
+                if let Some(code) = emit_command_json(
+                    "audit",
+                    serde_json::json!({
+                        "limit": limit,
+                        "entries": sliced_records,
+                    }),
+                )? {
                     return Ok(code);
                 }
             } else {
@@ -489,7 +554,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 &manager.audit_log,
             )?;
             log_command_executed(&state.paths, &state.default_agent_id, "verify", None);
-            if let Some(code) = stdout_line_or_exit("ok")? {
+            if let Some(code) = emit_command_message_or_json("verify", "ok", json_output)? {
                 return Ok(code);
             }
         }
@@ -519,7 +584,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         Command::Vault { command } => {
             let (action, target) = vault_command_descriptor(&command);
             if let super::VaultCommand::Help { topic } = &command {
-                if let Some(code) = run_help_command_with_prefix(&["vault"], topic)? {
+                if let Some(code) = run_help_command_with_prefix(&["vault"], topic, json_output)? {
                     return Ok(code);
                 }
                 return Ok(0);
@@ -533,6 +598,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     vault_secret_ttl_days: state.default_vault_secret_ttl_days,
                     vault_secret_length_bytes: state.default_vault_secret_length_bytes,
                 },
+                json_output,
             )? {
                 log_command_executed(
                     &state.paths,
@@ -546,7 +612,8 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         }
         Command::Config { command } => match command {
             ConfigCommand::Help { topic } => {
-                if let Some(code) = run_help_command_with_prefix(&["config"], &topic)? {
+                if let Some(code) = run_help_command_with_prefix(&["config"], &topic, json_output)?
+                {
                     return Ok(code);
                 }
             }
@@ -560,18 +627,21 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "config-validate",
                     None,
                 );
-                if let Some(code) = stdout_line_or_exit("ok")? {
+                if let Some(code) =
+                    emit_command_message_or_json("config-validate", "ok", json_output)?
+                {
                     return Ok(code);
                 }
             }
         },
         Command::Access { command } => match command {
             AccessCommand::Help { topic } => {
-                if let Some(code) = run_help_command_with_prefix(&["access"], &topic)? {
+                if let Some(code) = run_help_command_with_prefix(&["access"], &topic, json_output)?
+                {
                     return Ok(code);
                 }
             }
-            AccessCommand::Paths { agent, json } => {
+            AccessCommand::Paths { agent } => {
                 let config = state.loaded_config.as_ref().ok_or_else(|| {
                     GlovesError::InvalidInput(
                         "no config loaded; use --config, GLOVES_CONFIG, or .gloves.toml discovery"
@@ -586,14 +656,14 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "access-paths",
                     Some(agent_id.as_str().to_owned()),
                 );
-                if json {
-                    let payload = serde_json::json!({
-                        "agent": agent_id.as_str(),
-                        "paths": entries,
-                    });
-                    if let Some(code) =
-                        stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)?
-                    {
+                if json_output {
+                    if let Some(code) = emit_command_json(
+                        "access-paths",
+                        serde_json::json!({
+                            "agent": agent_id.as_str(),
+                            "paths": entries,
+                        }),
+                    )? {
                         return Ok(code);
                     }
                 } else {
@@ -618,7 +688,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         },
         Command::Gpg { command } => {
             if let GpgCommand::Help { topic } = &command {
-                if let Some(code) = run_help_command_with_prefix(&["gpg"], topic)? {
+                if let Some(code) = run_help_command_with_prefix(&["gpg"], topic, json_output)? {
                     return Ok(code);
                 }
                 return Ok(0);
@@ -659,6 +729,10 @@ fn prepare_tui_bootstrap(cli: &mut Cli) -> Result<Option<TuiBootstrapArgs>> {
     }
     if let Some(error_format) = bootstrap.error_format {
         cli.error_format = error_format;
+    }
+    if bootstrap.json {
+        cli.json = true;
+        cli.error_format = ErrorFormatArg::Json;
     }
 
     Ok(Some(bootstrap))
@@ -759,6 +833,15 @@ fn parse_tui_bootstrap_args(args: &[String]) -> Result<TuiBootstrapArgs> {
                 };
                 bootstrap.error_format = Some(parse_error_format_arg_for_tui(&value)?);
             }
+            TUI_FLAG_JSON => {
+                if inline_value.is_some() {
+                    return Err(GlovesError::InvalidInput(
+                        "`gloves tui --json` does not take a value".to_owned(),
+                    ));
+                }
+                bootstrap.json = true;
+                bootstrap.error_format = Some(ErrorFormatArg::Json);
+            }
             _ => {
                 break;
             }
@@ -814,12 +897,76 @@ fn navigator_launch_options(
             VaultModeArg::Required => "required".to_owned(),
             VaultModeArg::Disabled => "disabled".to_owned(),
         }),
-        error_format: Some(match cli.error_format {
-            ErrorFormatArg::Text => "text".to_owned(),
-            ErrorFormatArg::Json => "json".to_owned(),
-        }),
+        error_format: Some(
+            if cli.json || matches!(cli.error_format, ErrorFormatArg::Json) {
+                "json".to_owned()
+            } else {
+                "text".to_owned()
+            },
+        ),
         command_args: bootstrap.command_args.clone(),
     }
+}
+
+fn emit_command_json(command: &str, result: serde_json::Value) -> Result<Option<i32>> {
+    let payload = serde_json::json!({
+        "status": "ok",
+        "command": command,
+        "result": result,
+    });
+    stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)
+}
+
+fn emit_command_json_or_text(
+    command: &str,
+    result: serde_json::Value,
+    text: &str,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    if json_output {
+        return emit_command_json(command, result);
+    }
+    stdout_line_or_exit(text)
+}
+
+fn emit_command_message_or_json(
+    command: &str,
+    message: &str,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    emit_command_json_or_text(
+        command,
+        serde_json::json!({
+            "message": message,
+        }),
+        message,
+        json_output,
+    )
+}
+
+fn secret_bytes_json_value(secret_bytes: &[u8]) -> serde_json::Value {
+    if let Ok(value) = std::str::from_utf8(secret_bytes) {
+        return serde_json::json!({
+            "encoding": "utf8",
+            "data": value,
+        });
+    }
+
+    serde_json::json!({
+        "encoding": "hex",
+        "data": bytes_to_hex(secret_bytes),
+    })
+}
+
+const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX_LOWER[(byte >> 4) as usize] as char);
+        encoded.push(HEX_LOWER[(byte & 0x0f) as usize] as char);
+    }
+    encoded
 }
 
 fn stdout_line_or_exit(line: &str) -> Result<Option<i32>> {
@@ -1533,8 +1680,17 @@ fn run_request_deny_command(
     stdout_line_or_exit(&serde_json::to_string_pretty(&payload)?)
 }
 
-fn run_explain_command(code: &str) -> Result<Option<i32>> {
+fn run_explain_command(code: &str, json_output: bool) -> Result<Option<i32>> {
     if let Some(explanation) = explain_error_code(code) {
+        if json_output {
+            return emit_command_json(
+                "explain",
+                serde_json::json!({
+                    "code": normalize_error_code(code),
+                    "content": explanation,
+                }),
+            );
+        }
         return stdout_line_or_exit(explanation);
     }
     let normalized_code = normalize_error_code(code);
@@ -1544,11 +1700,15 @@ fn run_explain_command(code: &str) -> Result<Option<i32>> {
     )))
 }
 
-fn run_help_command(topic: &[String]) -> Result<Option<i32>> {
-    run_help_command_with_prefix(&[], topic)
+fn run_help_command(topic: &[String], json_output: bool) -> Result<Option<i32>> {
+    run_help_command_with_prefix(&[], topic, json_output)
 }
 
-fn run_help_command_with_prefix(prefix: &[&str], topic: &[String]) -> Result<Option<i32>> {
+fn run_help_command_with_prefix(
+    prefix: &[&str],
+    topic: &[String],
+    json_output: bool,
+) -> Result<Option<i32>> {
     let mut args = Vec::with_capacity(2 + prefix.len() + topic.len());
     args.push("gloves".to_owned());
     args.extend(prefix.iter().map(|segment| (*segment).to_owned()));
@@ -1563,7 +1723,27 @@ fn run_help_command_with_prefix(prefix: &[&str], topic: &[String]) -> Result<Opt
             ) =>
         {
             let rendered = format_help_output(&help_error.to_string());
-            stdout_line_or_exit(&rendered)
+            if json_output {
+                let topic_path = if topic.is_empty() {
+                    prefix.join(" ")
+                } else {
+                    let mut combined = prefix.join(" ");
+                    if !combined.is_empty() {
+                        combined.push(' ');
+                    }
+                    combined.push_str(&topic.join(" "));
+                    combined
+                };
+                emit_command_json(
+                    "help",
+                    serde_json::json!({
+                        "topic": topic_path,
+                        "content": rendered,
+                    }),
+                )
+            } else {
+                stdout_line_or_exit(&rendered)
+            }
         }
         Err(parse_error) => {
             let joined_topic = if topic.is_empty() {
@@ -1640,6 +1820,10 @@ fn run_version_command(json: bool) -> Result<Option<i32>> {
         CLI_COMMAND_HELP_HINT,
     );
     stdout_line_or_exit(&rendered)
+}
+
+pub(super) fn emit_version_output(json: bool) -> Result<i32> {
+    Ok(run_version_command(json)?.unwrap_or(0))
 }
 
 fn request_review_output(
@@ -2787,9 +2971,28 @@ mod tests {
         assert_eq!(parsed.agent.as_deref(), Some("agent-main"));
         assert!(matches!(parsed.vault_mode, Some(VaultModeArg::Required)));
         assert!(matches!(parsed.error_format, Some(ErrorFormatArg::Json)));
+        assert!(!parsed.json);
         assert_eq!(
             parsed.command_args,
             vec!["requests".to_owned(), "list".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_tui_bootstrap_args_supports_json_shorthand() {
+        let parsed = parse_tui_bootstrap_args(&[
+            "--json".to_owned(),
+            "audit".to_owned(),
+            "--limit".to_owned(),
+            "100".to_owned(),
+        ])
+        .expect("json shorthand should parse");
+
+        assert!(parsed.json);
+        assert!(matches!(parsed.error_format, Some(ErrorFormatArg::Json)));
+        assert_eq!(
+            parsed.command_args,
+            vec!["audit".to_owned(), "--limit".to_owned(), "100".to_owned()]
         );
     }
 

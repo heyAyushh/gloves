@@ -1,5 +1,12 @@
 # gloves-setup-migrate
 
+## 0.1.4
+
+### Patch Changes
+
+- Updated bootstrap verification to flag-first version checks (`gloves --version`, `gloves --json --version`).
+- Added explicit compatibility note/example for `gloves --error-format json --version` in machine-readable setup checks.
+
 ## 0.1.3
 
 ### Patch Changes

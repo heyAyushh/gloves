@@ -33,7 +33,8 @@ Install script behavior:
 
 ```bash
 gloves --version
-gloves version --json
+gloves --json --version
+gloves --error-format json --version
 gloves --root ~/.openclaw/secrets init
 gloves --root ~/.openclaw/secrets config validate
 ```

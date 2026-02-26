@@ -17,7 +17,7 @@ gloves help
 gloves help secrets set
 gloves requests help approve
 gloves --version
-gloves version --json
+gloves --json --version
 gloves explain E102
 gloves tui
 ```
@@ -27,7 +27,7 @@ gloves tui
 | Command | Purpose | Key Flags/Args |
 |---|---|---|
 | `init` | Create runtime directory/file layout | none |
-| `version` | Print CLI version and runtime defaults | optional `--json` |
+| `--version` | Print CLI version and runtime defaults | use with `--json` or `--error-format json` for JSON |
 | `explain <code>` | Print recovery guidance for stable error code | example: `gloves explain E102` |
 | `tui` | Open interactive command navigator | live run cards, cancel support |
 | `help [topic...]` | Recursive help for command paths | examples: `help secrets set`, `help requests approve` |
@@ -42,18 +42,19 @@ gloves tui
 | `requests approve <request_id>` | Approve request UUID | request UUID |
 | `requests deny <request_id>` | Deny request UUID | request UUID |
 | `list` | List secret entries | use `requests list` for pending queue |
-| `audit` | View audit events | `--limit <n>`, optional `--json` |
+| `audit` | View audit events | `--limit <n>` |
 | `verify` | Reap expired items and verify state | none |
 | `daemon` | Run local sidecar daemon | `--check`, `--bind` |
 | `vault <subcommand>` | Manage encrypted vault workflows | `init`, `mount`, `exec`, `unmount`, `status`, `list`, `ask-file` |
 | `config validate` | Validate effective config | honors `--config`, `--no-config`, `GLOVES_CONFIG` |
-| `access paths` | Show one agent's private-path visibility | `--agent`, optional `--json` |
+| `access paths` | Show one agent's private-path visibility | `--agent` |
 | `gpg create` | Create selected agent GPG key | idempotent |
 | `gpg fingerprint` | Print selected agent GPG fingerprint | `not found` when key absent |
 
-Global diagnostics flag:
+Global machine output flags:
 
-- `--error-format <text|json>` controls parse/runtime diagnostic format.
+- `--json` enables JSON output for command results and diagnostics.
+- `--error-format <text|json>` remains supported; `--error-format json` is equivalent to `--json`.
 
 ## Command Patterns
 
@@ -105,7 +106,7 @@ Notes:
 - `requests approve` and `requests deny` require UUID request ids from `requests list`.
 - For targeted help, use `gloves help requests approve`, `gloves help secrets set`, `gloves help secrets get`.
 - CLI stderr includes stable error codes (`error[E...]`); use `gloves explain <code>`.
-- For machine workflows, use `gloves --error-format json ...`.
+- For machine workflows, use `gloves --json ...` or `gloves --error-format json ...`.
 
 Typo suggestion auto-run (disabled by default):
 
@@ -123,7 +124,7 @@ gloves --root .openclaw/secrets verify
 
 ```bash
 gloves --root .openclaw/secrets audit --limit 25
-gloves --root .openclaw/secrets audit --json --limit 200
+gloves --root .openclaw/secrets --json audit --limit 200
 ```
 
 ### Start Daemon Sidecar
@@ -140,7 +141,7 @@ gloves --root .openclaw/secrets daemon --bind 127.0.0.1:7788
 
 ```bash
 gloves --root .openclaw/secrets config validate
-gloves --root .openclaw/secrets access paths --agent agent-main --json
+gloves --root .openclaw/secrets --json access paths --agent agent-main
 ```
 
 ### GPG Agent Keys

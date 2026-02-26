@@ -1,9 +1,14 @@
-use std::{io::Write, process::Command as ProcessCommand, thread, time::Duration};
+use std::{
+    io::{self, Write},
+    process::Command as ProcessCommand,
+    thread,
+    time::Duration,
+};
 
 use clap::{error::ErrorKind, Parser};
 
 use gloves::{
-    cli::{run, Cli, ErrorFormatArg},
+    cli::{emit_version_output, run, Cli, ErrorFormatArg},
     error::{classify_error_code, GlovesError, ValidationError},
 };
 
@@ -85,7 +90,11 @@ fn main() {
         }
     };
 
-    let error_format = CliErrorFormat::from(cli.error_format);
+    let error_format = if cli.json {
+        CliErrorFormat::Json
+    } else {
+        CliErrorFormat::from(cli.error_format)
+    };
     match run(cli) {
         Ok(code) => std::process::exit(code),
         Err(error) => {
@@ -189,12 +198,26 @@ fn handle_parse_error(
     error_format: CliErrorFormat,
     invocation_args: &[String],
 ) -> i32 {
-    if matches!(
-        parse_error.kind(),
-        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
-    ) {
-        print!("{parse_error}");
-        return 0;
+    if matches!(parse_error.kind(), ErrorKind::DisplayHelp) {
+        if matches!(error_format, CliErrorFormat::Json) {
+            let payload = serde_json::json!({
+                "status": "ok",
+                "command": "help",
+                "result": {
+                    "topic": "",
+                    "content": parse_error.to_string(),
+                },
+            });
+            return write_json_stdout(&payload);
+        }
+        return write_stdout_message(&parse_error.to_string());
+    }
+    if matches!(parse_error.kind(), ErrorKind::DisplayVersion) {
+        let json_output = matches!(error_format, CliErrorFormat::Json);
+        return match emit_version_output(json_output) {
+            Ok(code) => code,
+            Err(error) => write_runtime_error(error_format, &error),
+        };
     }
 
     let message = parse_error.to_string();
@@ -267,6 +290,27 @@ fn handle_parse_error(
     2
 }
 
+fn write_stdout_message(message: &str) -> i32 {
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    match handle
+        .write_all(message.as_bytes())
+        .and_then(|_| handle.flush())
+    {
+        Ok(()) => 0,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(_) => 1,
+    }
+}
+
+fn write_json_stdout(payload: &serde_json::Value) -> i32 {
+    let serialized = serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
+        "{\"kind\":\"runtime_error\",\"code\":\"E999\",\"message\":\"failed to serialize output\"}"
+            .to_owned()
+    });
+    write_stdout_message(&format!("{serialized}\n"))
+}
+
 fn write_json_stderr(payload: &serde_json::Value) {
     let stderr = std::io::stderr();
     let mut handle = stderr.lock();
@@ -279,21 +323,37 @@ fn write_json_stderr(payload: &serde_json::Value) {
 }
 
 fn parse_error_format_from_args(args: &[String]) -> CliErrorFormat {
+    let mut format = CliErrorFormat::Text;
+    let mut json_flag_set = false;
     let mut index = 0usize;
     while index < args.len() {
         let argument = &args[index];
+        if argument == "--json" {
+            json_flag_set = true;
+            format = CliErrorFormat::Json;
+            index += 1;
+            continue;
+        }
         if let Some(value) = argument.strip_prefix("--error-format=") {
-            return parse_error_format_value(value);
+            if !json_flag_set {
+                format = parse_error_format_value(value);
+            }
+            index += 1;
+            continue;
         }
         if argument == "--error-format" {
             if let Some(value) = args.get(index + 1) {
-                return parse_error_format_value(value);
+                if !json_flag_set {
+                    format = parse_error_format_value(value);
+                }
+                index += 2;
+                continue;
             }
-            return CliErrorFormat::Text;
+            return format;
         }
         index += 1;
     }
-    CliErrorFormat::Text
+    format
 }
 
 fn parse_error_format_value(value: &str) -> CliErrorFormat {
@@ -496,7 +556,7 @@ fn is_autorun_safe_command(corrected_args: &[String]) -> bool {
         .map(String::as_str)
         .unwrap_or_default();
     match command {
-        "help" | "version" | "ver" | "explain" | "list" | "ls" | "audit" | "tui" | "ui" => true,
+        "help" | "explain" | "list" | "ls" | "audit" | "tui" | "ui" => true,
         "secrets" => matches!(
             corrected_args.get(command_index + 1).map(String::as_str),
             Some("help" | "get" | "status")
@@ -578,6 +638,12 @@ mod unit_tests {
     #[test]
     fn parse_error_format_detects_json_equals_form() {
         let format = parse_error_format_from_args(&["--error-format=json".to_owned()]);
+        assert_eq!(format, CliErrorFormat::Json);
+    }
+
+    #[test]
+    fn parse_error_format_detects_json_shorthand_flag() {
+        let format = parse_error_format_from_args(&["--json".to_owned(), "init".to_owned()]);
         assert_eq!(format, CliErrorFormat::Json);
     }
 

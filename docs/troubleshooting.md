@@ -79,7 +79,8 @@ If your policy is strict, set `vault.mode = "required"` and run `gloves config v
 ## Diagnostics Toolkit
 
 ```bash
-gloves version --json
+gloves --json --version
+gloves --error-format json --version
 gloves config validate
 gloves verify
 gloves audit --limit 50

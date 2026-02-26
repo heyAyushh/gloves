@@ -399,6 +399,23 @@ fn cli_version_flag_prints_installed_version() {
 }
 
 #[test]
+fn cli_version_flag_respects_error_format_json() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--error-format", "json", "--version"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["name"], "gloves");
+    assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(payload["default_root"], ".openclaw/secrets");
+    assert_eq!(payload["default_agent"], "default-agent");
+    assert!(payload["config_schema_version"].is_u64());
+}
+
+#[test]
 fn cli_help_lists_tui_and_error_format_option() {
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .arg("--help")
@@ -407,6 +424,7 @@ fn cli_help_lists_tui_and_error_format_option() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("tui"));
     assert!(stdout.contains("--error-format"));
+    assert!(stdout.contains("--json"));
 }
 
 #[test]
@@ -468,9 +486,9 @@ fn cli_tui_accepts_bootstrap_args_before_command_path() {
 }
 
 #[test]
-fn cli_version_command_prints_helpful_metadata() {
+fn cli_version_flag_prints_helpful_metadata() {
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .arg("version")
+        .arg("--version")
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
@@ -495,10 +513,16 @@ fn cli_help_tui_includes_controls() {
     assert!(stdout.contains("r or F5"));
     assert!(stdout.contains("/ : filter"));
     assert!(stdout.contains("collapse/expand command groups"));
-    assert!(stdout.contains("horizontal scroll in output pane"));
-    assert!(stdout.contains("Shift+Left/Shift+Right or H/L"));
+    assert!(stdout.contains("in output they pan horizontally"));
+    assert!(stdout.contains("Shift+Left/Shift+Right"));
+    assert!(stdout.contains("Mouse wheel left/right (or Shift+wheel)"));
+    assert!(stdout.contains("Mouse wheel up/down: vertical scroll in command tree and output pane"));
+    assert!(stdout.contains("o or O: focus execution output pane"));
     assert!(stdout.contains("toggle fullscreen for focused pane"));
-    assert!(stdout.contains("cycle commands -> global flags -> command fields -> run -> commands"));
+    assert!(stdout.contains(
+        "split view cycles commands -> global flags -> command fields -> run -> commands"
+    ));
+    assert!(stdout.contains("fullscreen keeps current pane focus"));
     assert!(stdout.contains("? : run `gloves help`"));
     assert!(stdout.contains("Ctrl+C: cancel active run"));
     assert!(stdout.contains("Home or g"));
@@ -526,7 +550,7 @@ fn cli_help_recursive_topic_path_renders_leaf_help() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
-    assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
+    assert!(stdout.contains("gloves requests approve [OPTIONS] <REQUEST_ID>"));
     assert!(stdout.contains("Request UUID from `gloves requests list`"));
 }
 
@@ -538,7 +562,7 @@ fn cli_subcommand_help_renders_nested_leaf_help() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
-    assert!(stdout.contains("gloves requests approve <REQUEST_ID>"));
+    assert!(stdout.contains("gloves requests approve [OPTIONS] <REQUEST_ID>"));
     assert!(stdout.contains("Request UUID from `gloves requests list`"));
 }
 
@@ -550,7 +574,7 @@ fn cli_help_legacy_shortcut_topic_still_works() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
-    assert!(stdout.contains("gloves approve <REQUEST_ID>"));
+    assert!(stdout.contains("gloves approve [OPTIONS] <REQUEST_ID>"));
     assert!(stdout.contains("gloves requests approve <request-id>"));
 }
 
@@ -603,15 +627,109 @@ fn cli_error_format_json_reports_parse_error_shape() {
 }
 
 #[test]
+fn cli_error_format_json_applies_to_success_output() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--error-format",
+            "json",
+            "init",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "init");
+    assert_eq!(payload["result"]["message"], "initialized");
+}
+
+#[test]
+fn cli_json_flag_alias_applies_to_success_output() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--json",
+            "init",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "init");
+    assert_eq!(payload["result"]["message"], "initialized");
+}
+
+#[test]
+fn cli_error_format_json_applies_to_help_output() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--error-format", "json", "help", "requests", "approve"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "help");
+    assert_eq!(payload["result"]["topic"], "requests approve");
+    assert!(payload["result"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("USAGE:")));
+}
+
+#[test]
+fn cli_error_format_json_applies_to_help_flag_output() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--error-format", "json", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "help");
+    assert_eq!(payload["result"]["topic"], "");
+    assert!(payload["result"]["content"]
+        .as_str()
+        .is_some_and(|content| content.contains("Usage:")));
+}
+
+#[test]
+fn cli_error_format_json_applies_to_version_flag_output() {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--error-format", "json", "--version"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["name"], "gloves");
+    assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
 fn cli_autorun_suggestion_executes_safe_command_when_enabled() {
+    let temp_dir = tempfile::tempdir().unwrap();
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .env(SUGGEST_AUTORUN_ENV_VAR, "1")
-        .args(["versoin"])
+        .args(["--root", temp_dir.path().to_str().unwrap(), "lits"])
         .assert()
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
-    assert!(stdout.contains(&format!("gloves {}", env!("CARGO_PKG_VERSION"))));
+    assert!(stdout.contains("["));
     assert!(stderr.contains("auto-run: executing corrected command"));
 }
 
@@ -627,9 +745,9 @@ fn cli_autorun_suggestion_blocks_risky_command_by_default() {
 }
 
 #[test]
-fn cli_version_command_json_is_machine_readable() {
+fn cli_version_flag_json_is_machine_readable() {
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["version", "--json"])
+        .args(["--error-format", "json", "--version"])
         .assert()
         .success()
         .get_output()
@@ -820,21 +938,23 @@ operations = ["read", "list"]
 
     let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
+            "--json",
             "--config",
             config_path.to_str().unwrap(),
             "access",
             "paths",
             "--agent",
             "default-agent",
-            "--json",
         ])
         .assert()
         .success();
     let output = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     let payload: serde_json::Value = serde_json::from_str(&output).unwrap();
 
-    assert_eq!(payload["agent"], "default-agent");
-    assert_eq!(payload["paths"][0]["alias"], "runtime_root");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "access-paths");
+    assert_eq!(payload["result"]["agent"], "default-agent");
+    assert_eq!(payload["result"]["paths"][0]["alias"], "runtime_root");
 }
 
 #[test]
@@ -4172,14 +4292,16 @@ fn cli_audit_json_includes_command_events() {
         .success();
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
-        .args(["--root", root, "audit", "--json", "--limit", "20"])
+        .args(["--root", root, "--json", "audit", "--limit", "20"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let entries: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let entries = entries.as_array().unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "audit");
+    let entries = payload["result"]["entries"].as_array().unwrap();
     assert!(entries.iter().any(|entry| {
         entry["event"] == "command_executed"
             && entry["command"] == "list"

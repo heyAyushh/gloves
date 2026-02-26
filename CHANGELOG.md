@@ -6,6 +6,35 @@
 
 - No unreleased changes yet.
 
+## 0.5.6
+
+### Minor Changes
+
+- Unified machine-readable output controls:
+  - Added global `--json` output mode for command results.
+  - Kept `--error-format json` support and made it equivalent to `--json` for JSON command output.
+- Switched version reporting to flag-first CLI flow:
+  - `gloves --version` is the canonical path.
+  - JSON version output works with both `gloves --json --version` and `gloves --error-format json --version`.
+- Upgraded TUI interaction model for heavy operator use:
+  - Added mouse capture with pane-aware vertical and horizontal scrolling.
+  - Added `o`/`O` shortcut to focus execution output pane directly.
+  - Added horizontal-scroll clamping so panning cannot run past content width.
+
+### Patch Changes
+
+- Fixed JSON consistency for top-level help/version parse paths and success responses so automation receives stable JSON envelopes.
+- Fixed `gloves tui` bootstrap handling to support both `--json` and `--error-format=json` before startup commands.
+- Refined fullscreen `Enter` behavior in TUI:
+  - Enter no longer cycles panes in fullscreen.
+  - Pane behavior is now context-aware (commands select/toggle, fields execute while staying focused, output/globals remain focused).
+- Updated TUI key/help text and docs to match shipped controls and output semantics.
+- Added regression coverage for:
+  - JSON alias parity (`--json` vs `--error-format json`)
+  - `--version` JSON behavior
+  - fullscreen Enter behavior
+  - pane-focused mouse/horizontal scrolling and clamp behavior
+
 ## 0.5.5
 
 ### Minor Changes

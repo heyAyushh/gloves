@@ -1,5 +1,13 @@
 # gloves-cli-usage
 
+## 0.2.7
+
+### Patch Changes
+
+- Updated command reference to flag-first version flow (`gloves --version`, `gloves --json --version`) and removed deprecated `gloves version` examples.
+- Documented dual JSON controls for automation (`--json` and `--error-format json`) and clarified they are equivalent for machine-readable command output.
+- Updated TUI usage guidance for current controls (output focus key, fullscreen Enter behavior, and scrolling semantics).
+
 ## 0.2.6
 
 ### Patch Changes

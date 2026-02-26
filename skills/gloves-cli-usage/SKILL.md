@@ -1,6 +1,6 @@
 ---
 name: gloves-cli-usage
-description: Operate and troubleshoot the gloves CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to run or explain grouped CLI operations (`secrets`, `request`, `requests`, `vault`, `config`, `access`, `gpg`, `daemon`, `audit`, `verify`, `version`, `explain`, `tui`) and command behavior from implementation/tests. Use `gloves-setup-migrate` for bootstrap or migration playbooks.
+description: Operate and troubleshoot the gloves CLI for OpenClaw-style and other multi-agent runtimes. Use when asked to run or explain grouped CLI operations (`secrets`, `request`, `requests`, `vault`, `config`, `access`, `gpg`, `daemon`, `audit`, `verify`, `--version`, `explain`, `tui`) and command behavior from implementation/tests. Use `gloves-setup-migrate` for bootstrap or migration playbooks.
 ---
 
 # Gloves CLI Usage
@@ -116,7 +116,7 @@ Command reference:
 3. Review audit stream:
    ```bash
    gloves --root <root> audit --limit 50
-   gloves --root <root> audit --json --limit 200
+   gloves --root <root> --json audit --limit 200
    ```
 
 ### Sidecar Daemon (TCP)
@@ -138,7 +138,7 @@ Command reference:
    ```
 2. Show one agent's configured private-path visibility:
    ```bash
-   gloves --root <root> access paths --agent <agent-id> --json
+   gloves --root <root> --json access paths --agent <agent-id>
    ```
 
 ### Agent GPG Operations
@@ -159,9 +159,13 @@ Command reference:
    gloves --root <root> tui
    ```
 2. Key navigation:
-   - `Enter`: command -> global flags -> command fields -> run -> command tree
+   - `Enter` (split view): command -> global flags -> command fields -> run -> command tree
+   - `Enter` (fullscreen): stay in current pane (`fields` executes selected command)
+   - `o` or `O`: focus execution output pane
    - `e`: edit selected text field
    - `f`: toggle focused pane fullscreen
+   - `Shift+Left/Shift+Right`: horizontal pan for focused pane
+   - `mouse wheel left/right` (or `Shift+wheel`): horizontal pan for hovered pane
    - `Ctrl+C`: cancel active run
 
 ## Guardrails
@@ -187,7 +191,7 @@ Command reference:
 - `integrity check failed`: ciphertext checksum mismatch.
 - `gpg denied`: `pass`/GPG access denied for human backend.
 - Use `gloves explain <code>` for stable error remediation.
-- Use `--error-format json` for automation-friendly diagnostics.
+- Use `--json` (or `--error-format json`) for automation-friendly diagnostics.
 
 ## Verification
 

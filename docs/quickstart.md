@@ -12,7 +12,8 @@ This quickstart covers local setup plus the basic agent and human workflows.
 
 ```bash
 gloves --version
-gloves version --json
+gloves --json --version
+gloves --error-format json --version
 ```
 
 ## 2) Initialize runtime layout

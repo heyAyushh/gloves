@@ -76,13 +76,21 @@ pub(crate) fn run_vault_command(
     paths: &SecretsPaths,
     command: VaultCommand,
     defaults: &VaultCommandDefaults,
+    json_output: bool,
 ) -> Result<Option<i32>> {
     match command {
         VaultCommand::Help { .. } => {}
         VaultCommand::Init { name, owner } => {
             let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             manager.init(&name, owner.into())?;
-            emit_stdout_line("initialized")?;
+            emit_text_or_json(
+                "initialized",
+                serde_json::json!({
+                    "status": "initialized",
+                    "vault": name,
+                }),
+                json_output,
+            )?;
         }
         VaultCommand::Mount {
             name,
@@ -95,7 +103,14 @@ pub(crate) fn run_vault_command(
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
             let manager = vault_manager_for_paths(paths, defaults, &mounted_by)?;
             manager.mount(&name, ttl_duration, mountpoint, mounted_by)?;
-            emit_stdout_line("mounted")?;
+            emit_text_or_json(
+                "mounted",
+                serde_json::json!({
+                    "status": "mounted",
+                    "vault": name,
+                }),
+                json_output,
+            )?;
         }
         VaultCommand::Exec {
             name,
@@ -136,7 +151,14 @@ pub(crate) fn run_vault_command(
             let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
             manager.unmount(&name, "explicit", mounted_by)?;
-            emit_stdout_line("unmounted")?;
+            emit_text_or_json(
+                "unmounted",
+                serde_json::json!({
+                    "status": "unmounted",
+                    "vault": name,
+                }),
+                json_output,
+            )?;
         }
         VaultCommand::Status => {
             let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
@@ -164,7 +186,15 @@ pub(crate) fn run_vault_command(
                 AgentId::new(&trusted_agent)?,
                 reason,
             )?;
-            emit_stdout_line(&prompt)?;
+            emit_text_or_json(
+                &prompt,
+                serde_json::json!({
+                    "vault": name,
+                    "file": file,
+                    "prompt": prompt,
+                }),
+                json_output,
+            )?;
         }
     }
     Ok(None)
@@ -174,6 +204,14 @@ fn emit_stdout_line(line: &str) -> Result<()> {
     match output::stdout_line(line) {
         Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
         Err(error) => Err(GlovesError::Io(error)),
+    }
+}
+
+fn emit_text_or_json(text: &str, payload: serde_json::Value, json_output: bool) -> Result<()> {
+    if json_output {
+        emit_stdout_line(&serde_json::to_string_pretty(&payload)?)
+    } else {
+        emit_stdout_line(text)
     }
 }
 
