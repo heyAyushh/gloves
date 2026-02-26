@@ -4,6 +4,12 @@
 
 ### Minor Changes
 
+- No unreleased changes yet.
+
+## 0.5.5
+
+### Minor Changes
+
 - Upgraded `gloves tui` startup flow to auto-load and auto-run a command path passed after `tui`, opening directly in fullscreen output for immediate operator feedback.
 - Added horizontal panning support in TUI panes:
   - Output pane supports left/right panning in both split and fullscreen views.
