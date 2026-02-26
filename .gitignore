@@ -26,3 +26,6 @@ target
 /target
 
 examples/
+
+# Local runtime secret state
+.openclaw/
