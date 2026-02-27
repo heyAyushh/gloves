@@ -74,3 +74,26 @@ cargo doc --no-deps
 - Keep commit subjects imperative and specific.
 - PR titles should follow `<type>: <summary>`.
 - Include a short test plan in PR descriptions.
+
+## Cursor Cloud specific instructions
+
+### Overview
+
+`gloves` is a Rust CLI (single binary) with two workspace crates (`gloves-core`, `gloves-config`). No external services, databases, or Docker containers are required. All data is local-filesystem-based. The full test suite uses mocks for external binaries (`gocryptfs`, `pass`, `fusermount`), so `cargo test` works without them.
+
+### Rust toolchain
+
+The default VM Rust (1.83) is too old — transitive dependencies require `edition2024` support. The update script runs `rustup update stable && rustup default stable` to ensure a sufficiently recent toolchain (≥1.85).
+
+### Verification gate
+
+See the "Testing and Quality Gates" section above. The four commands (`cargo fmt`, `cargo clippy`, `cargo test`, `cargo doc`) are the full gate.
+
+### Running the CLI
+
+Build with `cargo build --all-features --locked`, then use `target/debug/gloves`. The `--root <path>` flag sets the secrets directory (default `.openclaw/secrets`). Use `gloves init` to bootstrap the layout before any other command. See `README.md` Quick Example for the basic workflow.
+
+### Gotchas
+
+- `gloves secrets get` refuses to write secret bytes to non-tty stdout. In non-interactive contexts, use `--pipe-to <cmd>` and set `GLOVES_GET_PIPE_ALLOWLIST=<cmd>` or use `--json` output.
+- The `tui` feature (default-on) requires a real terminal; do not launch `gloves tui` in non-interactive CI/agent shells.
