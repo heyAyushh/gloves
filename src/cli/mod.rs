@@ -1,5 +1,6 @@
 mod commands;
 mod daemon;
+#[cfg(feature = "tui")]
 mod navigator;
 mod output;
 mod runtime;
@@ -157,6 +158,7 @@ const EXPLAIN_COMMAND_AFTER_HELP: &str = r#"Examples:
 Tip:
   Error codes are shown in stderr output, for example `error[E102]: ...`.
 "#;
+#[cfg(feature = "tui")]
 const TUI_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves tui
   gloves tui --config /etc/gloves/prod.gloves.toml audit --limit 100
@@ -264,6 +266,7 @@ pub enum Command {
         code: String,
     },
     /// Opens an interactive command navigator.
+    #[cfg(feature = "tui")]
     #[command(visible_alias = "ui", after_help = TUI_COMMAND_AFTER_HELP)]
     Tui {
         /// Optional TUI startup arguments: global overrides first, then command path and fields.
@@ -1008,6 +1011,7 @@ mod unit_tests {
         assert_eq!(cli.error_format, ErrorFormatArg::Json);
     }
 
+    #[cfg(feature = "tui")]
     #[test]
     fn cli_tui_accepts_trailing_bootstrap_args() {
         let cli = Cli::try_parse_from([

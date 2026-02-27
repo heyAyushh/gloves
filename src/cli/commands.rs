@@ -25,8 +25,10 @@ use crate::{
     vault::gocryptfs::{GocryptfsDriver, EXTPASS_AGENT_ENV_VAR, EXTPASS_ROOT_ENV_VAR},
 };
 
+#[cfg(feature = "tui")]
+use super::navigator;
 use super::{
-    daemon, navigator,
+    daemon,
     output::{self, OutputStatus},
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
@@ -62,12 +64,19 @@ const CLI_HELP_HINT: &str = "gloves --help";
 const CLI_COMMAND_HELP_HINT: &str = "gloves help [topic...]";
 const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves requests list";
 const SECRET_LOOKUP_COMMAND: &str = "gloves list";
+#[cfg(feature = "tui")]
 const TUI_FLAG_ROOT: &str = "--root";
+#[cfg(feature = "tui")]
 const TUI_FLAG_AGENT: &str = "--agent";
+#[cfg(feature = "tui")]
 const TUI_FLAG_CONFIG: &str = "--config";
+#[cfg(feature = "tui")]
 const TUI_FLAG_NO_CONFIG: &str = "--no-config";
+#[cfg(feature = "tui")]
 const TUI_FLAG_VAULT_MODE: &str = "--vault-mode";
+#[cfg(feature = "tui")]
 const TUI_FLAG_ERROR_FORMAT: &str = "--error-format";
+#[cfg(feature = "tui")]
 const TUI_FLAG_JSON: &str = "--json";
 
 #[derive(Debug, Clone)]
@@ -86,6 +95,7 @@ struct EffectiveCliState {
     vault_mode: VaultMode,
 }
 
+#[cfg(feature = "tui")]
 #[derive(Debug, Clone, Default)]
 struct TuiBootstrapArgs {
     root: Option<PathBuf>,
@@ -175,7 +185,9 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         return run_extpass_get(name);
     }
 
+    #[cfg(feature = "tui")]
     let tui_bootstrap = prepare_tui_bootstrap(&mut cli)?;
+    #[cfg(feature = "tui")]
     let tui_launch_options = tui_bootstrap
         .as_ref()
         .map(|bootstrap| navigator_launch_options(&cli, bootstrap));
@@ -214,6 +226,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 Some(normalized_code),
             );
         }
+        #[cfg(feature = "tui")]
         Command::Tui { .. } => {
             let launch_options =
                 tui_launch_options.unwrap_or_else(navigator::NavigatorLaunchOptions::default);
@@ -735,6 +748,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
     Ok(0)
 }
 
+#[cfg(feature = "tui")]
 fn prepare_tui_bootstrap(cli: &mut Cli) -> Result<Option<TuiBootstrapArgs>> {
     let args = match &cli.command {
         Command::Tui { args } => args.clone(),
@@ -768,6 +782,7 @@ fn prepare_tui_bootstrap(cli: &mut Cli) -> Result<Option<TuiBootstrapArgs>> {
     Ok(Some(bootstrap))
 }
 
+#[cfg(feature = "tui")]
 fn parse_tui_bootstrap_args(args: &[String]) -> Result<TuiBootstrapArgs> {
     let mut bootstrap = TuiBootstrapArgs::default();
     let mut index = 0usize;
@@ -884,6 +899,7 @@ fn parse_tui_bootstrap_args(args: &[String]) -> Result<TuiBootstrapArgs> {
     Ok(bootstrap)
 }
 
+#[cfg(feature = "tui")]
 fn parse_vault_mode_arg_for_tui(value: &str) -> Result<VaultModeArg> {
     match value {
         "auto" => Ok(VaultModeArg::Auto),
@@ -895,6 +911,7 @@ fn parse_vault_mode_arg_for_tui(value: &str) -> Result<VaultModeArg> {
     }
 }
 
+#[cfg(feature = "tui")]
 fn parse_error_format_arg_for_tui(value: &str) -> Result<ErrorFormatArg> {
     match value {
         "text" => Ok(ErrorFormatArg::Text),
@@ -905,6 +922,7 @@ fn parse_error_format_arg_for_tui(value: &str) -> Result<ErrorFormatArg> {
     }
 }
 
+#[cfg(feature = "tui")]
 fn split_long_option_token(token: &str) -> (&str, Option<&str>) {
     if let Some((flag, value)) = token.split_once('=') {
         (flag, Some(value))
@@ -913,6 +931,7 @@ fn split_long_option_token(token: &str) -> (&str, Option<&str>) {
     }
 }
 
+#[cfg(feature = "tui")]
 fn navigator_launch_options(
     cli: &Cli,
     bootstrap: &TuiBootstrapArgs,
