@@ -901,6 +901,7 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "ed25519-dalek",
+ "gloves-config",
  "gloves-core",
  "hex",
  "hkdf",
@@ -920,6 +921,15 @@ dependencies = [
  "trybuild",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "gloves-config"
+version = "0.5.6"
+dependencies = [
+ "gloves-core",
+ "serde",
+ "toml 1.0.1+spec-1.1.0",
 ]
 
 [[package]]

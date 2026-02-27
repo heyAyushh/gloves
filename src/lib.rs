@@ -1,6 +1,7 @@
 #![deny(missing_docs)]
 //! Gloves provides a dual-backend secrets manager.
 
+pub use gloves_config::*;
 pub use gloves_core::*;
 
 /// Agent backend modules.
@@ -9,8 +10,7 @@ pub mod agent;
 pub mod audit;
 /// Command-line interface.
 pub mod cli;
-/// Bootstrap config parsing and validation.
-pub mod config;
+
 /// Secure filesystem helpers.
 pub mod fs_secure;
 /// Human backend modules.

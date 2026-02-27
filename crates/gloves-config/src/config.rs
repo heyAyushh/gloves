@@ -9,10 +9,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    error::{GlovesError, Result},
-    types::{AgentId, SecretId},
-};
+use gloves_core::error::{GlovesError, Result};
+use gloves_core::types::{AgentId, SecretId};
 
 const CONFIG_VERSION_V1: u32 = 1;
 const DEFAULT_ROOT: &str = ".openclaw/secrets";
