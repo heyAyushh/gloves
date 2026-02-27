@@ -33,10 +33,24 @@ Apply these rules by default when touching Rust:
 - Collections pre-allocated when size is known.
 - Tests and doc examples cover edge cases.
 
+## Sub-Skills
+
+Load these for focused guidance on specific topics:
+
+| Skill | When to Use |
+|-------|-------------|
+| `ownership` | Ownership/borrow errors (E0382, E0597), lifetime design |
+| `error-handling` | Result vs Option, anyhow vs thiserror, custom error types |
+| `concurrency` | Send/Sync errors, threads vs async, shared state design |
+| `zero-cost-abstractions` | Generics vs dyn Trait, object safety, dispatch choice |
+| `type-driven-design` | Newtypes, type state, PhantomData, invalid states |
+| `performance` | Profiling, allocation reduction, cache, parallelism |
+| `anti-patterns` | Code review, clone/unwrap overuse, idiomatic rewrites |
+| `coding-guidelines` | Naming, style, modern crate recommendations |
+
 ## Local Resources
 
-Use the always-applied rule file in this folder:
-- `rust.mdc` (authoritative Rust guidance; read and apply the full rule text)
+- `rust.mdc` — authoritative Rust rule file (always applied)
 
 ## Code Organization
 
@@ -48,7 +62,6 @@ Use the always-applied rule file in this folder:
 - **Newtype for type safety**: Wrap primitives to avoid ID/value mixups
 - **Builder for complex construction**: Use builders for many optional fields
 - **Minimal generic bounds**: Put bounds on `impl`/functions, not the type
-  - Favor `struct Foo<T> { ... }` with bounds on `impl Foo<T>` or methods
 
 ## Performance Guidance
 
@@ -65,67 +78,3 @@ Use the always-applied rule file in this folder:
 
 - Prefer unit tests with `#[test]` in a `tests` module
 - Use `rustdoc` examples for public APIs to keep docs executable
-
-## Examples
-
-**Example 1: Newtype for IDs**
-
-Input: "Function accepts multiple `u64` IDs"
-Output:
-```rust
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct UserId(u64);
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct AccountId(u64);
-
-fn process_transaction(user_id: UserId, account_id: AccountId) { /* ... */ }
-```
-
-**Example 2: Documenting `unsafe`**
-
-Input: "Need to write through a raw pointer"
-Output:
-```rust
-let mut vec = vec![0];
-let ptr = vec.as_mut_ptr();
-// SAFETY: `ptr` is valid for `vec[0]` and we write a valid value.
-unsafe { *ptr = 42; }
-```
-
-**Example 3: Builder for optional config**
-
-Input: "Many optional config fields with defaults"
-Output:
-```rust
-pub struct Config { pub timeout: u64, pub retries: u8 }
-
-#[derive(Default)]
-pub struct ConfigBuilder { timeout: Option<u64>, retries: Option<u8> }
-
-impl Config {
-    pub fn builder() -> ConfigBuilder { ConfigBuilder::default() }
-}
-
-impl ConfigBuilder {
-    pub fn timeout(mut self, timeout: u64) -> Self { self.timeout = Some(timeout); self }
-    pub fn retries(mut self, retries: u8) -> Self { self.retries = Some(retries); self }
-    pub fn build(self) -> Config {
-        Config {
-            timeout: self.timeout.unwrap_or(1000),
-            retries: self.retries.unwrap_or(3),
-        }
-    }
-}
-```
-
-**Example 4: Pre-allocate collection capacity**
-
-Input: "Known item count during collection building"
-Output:
-```rust
-let mut items = Vec::with_capacity(1000);
-for i in 0..1000 {
-    items.push(i);
-}
-```
