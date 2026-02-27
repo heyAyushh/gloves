@@ -40,6 +40,7 @@ const SET_INPUT_MODE_GENERATE_INDEX: usize = 0;
 const SET_INPUT_MODE_VALUE_INDEX: usize = 1;
 const SET_INPUT_MODE_STDIN_INDEX: usize = 2;
 const EMPTY_FILTER_PLACEHOLDER: &str = "<no matching commands>";
+const STATUS_RUN_IN_PROGRESS: &str = "Run in progress — press Ctrl+C to cancel, then q to quit";
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NavigatorLaunchOptions {
@@ -643,7 +644,7 @@ const VAULT_MOUNT_FIELDS: &[FieldSpec] = &[
     },
     FieldSpec {
         id: "agent",
-        label: "Mount Agent",
+        label: "Agent",
         help: "--agent for vault subcommand",
         required: false,
         kind: FieldKind::Text,
@@ -690,7 +691,7 @@ const VAULT_EXEC_FIELDS: &[FieldSpec] = &[
     },
     FieldSpec {
         id: "agent",
-        label: "Exec Agent",
+        label: "Agent",
         help: "--agent for vault subcommand",
         required: false,
         kind: FieldKind::Text,
@@ -726,7 +727,7 @@ const VAULT_UNMOUNT_FIELDS: &[FieldSpec] = &[
     },
     FieldSpec {
         id: "agent",
-        label: "Unmount Agent",
+        label: "Agent",
         help: "--agent for vault subcommand",
         required: false,
         kind: FieldKind::Text,
@@ -1013,7 +1014,6 @@ const SAFE_COMMAND_IDS: &[&str] = &[
     "access_paths",
     "gpg_fingerprint",
 ];
-const ENTRIES_LIST_TREE_PATH: &[&str] = &["entries", "list"];
 const SECRETS_SET_TREE_PATH: &[&str] = &["secrets", "set"];
 const SECRETS_GET_TREE_PATH: &[&str] = &["secrets", "get"];
 const SECRETS_GRANT_TREE_PATH: &[&str] = &["secrets", "grant"];
@@ -1022,7 +1022,7 @@ const SECRETS_STATUS_TREE_PATH: &[&str] = &["secrets", "status"];
 
 fn command_tree_path(command_spec: &CommandSpec) -> Option<&'static [&'static str]> {
     match command_spec.id {
-        "list" => Some(ENTRIES_LIST_TREE_PATH),
+        "list" => Some(&["list"]),
         "set" => Some(SECRETS_SET_TREE_PATH),
         "get" => Some(SECRETS_GET_TREE_PATH),
         "grant" => Some(SECRETS_GRANT_TREE_PATH),
@@ -1820,19 +1820,16 @@ impl TuiApp {
                 if self.fullscreen_enabled {
                     self.fullscreen_enabled = false;
                     self.focus = FocusPane::Commands;
-                    self.status_line =
-                        "Fullscreen disabled; focus reset to command tree".to_owned();
+                    self.status_line = "Fullscreen off — focus returned to commands".to_owned();
                 } else if self.active_run.is_some() {
-                    self.status_line =
-                        "Run in progress. Press Ctrl+C to cancel before quitting.".to_owned();
+                    self.status_line = STATUS_RUN_IN_PROGRESS.to_owned();
                 } else {
                     self.should_quit = true;
                 }
             }
             KeyCode::Char('q') => {
                 if self.active_run.is_some() {
-                    self.status_line =
-                        "Run in progress. Press Ctrl+C to cancel before quitting.".to_owned();
+                    self.status_line = STATUS_RUN_IN_PROGRESS.to_owned();
                 } else {
                     self.should_quit = true;
                 }
@@ -1854,14 +1851,14 @@ impl TuiApp {
                 self.run_history.clear();
                 self.output_scroll = 0;
                 self.follow_tail = true;
-                self.status_line = "Output cleared".to_owned();
+                self.status_line = "History cleared".to_owned();
             }
             KeyCode::Char('/') => {
                 self.input_mode = InputMode::Edit;
                 self.editing_target = Some(EditingTarget::CommandFilter);
                 self.editing_buffer = self.command_filter.clone();
                 self.editing_original_buffer = self.command_filter.clone();
-                self.status_line = "Editing command filter".to_owned();
+                self.status_line = "Filter: type to search commands".to_owned();
             }
             KeyCode::Char('f') if key.modifiers.is_empty() => {
                 self.toggle_fullscreen();
@@ -1870,7 +1867,7 @@ impl TuiApp {
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 self.focus = FocusPane::Output;
-                self.status_line = "Focus -> execution output".to_owned();
+                self.status_line = "Focus: output".to_owned();
             }
             KeyCode::Char('?') => {
                 self.execute_selected_help()?;
@@ -2162,7 +2159,7 @@ impl TuiApp {
                     self.focus = FocusPane::Commands;
                 } else {
                     self.focus = FocusPane::Fields;
-                    self.status_line = "Cycle -> command fields".to_owned();
+                    self.status_line = "Cycle: command fields".to_owned();
                 }
             }
             FocusPane::Fields => {
@@ -2171,7 +2168,7 @@ impl TuiApp {
             }
             FocusPane::Output => {
                 self.focus = FocusPane::Commands;
-                self.status_line = "Cycle reset to command tree".to_owned();
+                self.status_line = "Cycle: commands".to_owned();
             }
         }
         Ok(())
@@ -2523,7 +2520,7 @@ impl TuiApp {
             return;
         };
         let FieldValue::Text(current_value) = &field_state.value else {
-            self.status_line = "Field is not text-editable (use space/left/right)".to_owned();
+            self.status_line = "Use Space or ←→ to toggle this field".to_owned();
             return;
         };
         self.input_mode = InputMode::Edit;
@@ -3070,9 +3067,9 @@ impl TuiApp {
         }
 
         let footer_text = if self.input_mode == InputMode::Edit {
-            "Edit: type, Enter=save, Esc=cancel"
+            "Edit: type | Enter save | Esc cancel"
         } else {
-            "Navigate: Tab switch pane, o output focus, f fullscreen toggle, / filter, Up/Down move, Left/Right expand/collapse tree (or cycle choices in field panes), Shift+Left/Right horizontal pan, mouse wheel left/right or Shift+wheel horizontal pan, Space toggle bool, e edit text, Enter cycles only in split view (fullscreen keeps pane focus), ? help, r/F5 run, Ctrl+C cancel active run, Home/g top, End/G tail, x/X reset field, c clear output, q quit"
+            "Move: ↑↓jk or mouse | Tab/Shift+Tab switch pane | Enter cycle | f fullscreen | e edit | Space toggle | r/F5 run | ? help | / filter | c clear | q quit"
         };
         let footer = Paragraph::new(footer_text)
             .wrap(Wrap { trim: true })
@@ -3947,16 +3944,13 @@ mod unit_tests {
     }
 
     #[test]
-    fn command_tree_routes_top_level_list_through_entries_group() {
+    fn command_tree_has_list_as_top_level_leaf() {
         let tree = build_command_tree();
-        assert!(tree.iter().all(|node| node.label != "list"));
-        let entries = node_by_label(&tree, "entries");
-        let list_leaf = entries
-            .children
+        let list_leaf = tree
             .iter()
             .find(|node| node.label == "list")
-            .expect("entries/list exists");
-        let list_command_index = list_leaf.command_index.expect("entries/list is executable");
+            .expect("list exists at top level");
+        let list_command_index = list_leaf.command_index.expect("list is executable");
         assert_eq!(COMMAND_SPECS[list_command_index].id, "list");
         assert_eq!(COMMAND_SPECS[list_command_index].path, &["list"]);
     }
@@ -4454,7 +4448,7 @@ mod unit_tests {
             .expect("focus output");
 
         assert_eq!(app.focus, FocusPane::Output);
-        assert_eq!(app.status_line, "Focus -> execution output");
+        assert_eq!(app.status_line, "Focus: output");
     }
 
     #[test]
