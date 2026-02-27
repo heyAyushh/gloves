@@ -1595,7 +1595,7 @@ fn run_grant_command(
     }
     if metadata.created_by != granter {
         return Err(GlovesError::InvalidInput(format!(
-            "secret `{}` can only be granted by its creator `{}`\nRetry with `gloves --agent {} grant {} --to {}`",
+            "secret `{}` can only be granted by its creator `{}`\nRetry with `gloves --agent {} secrets grant {} --to {}`",
             secret_id.as_str(),
             metadata.created_by.as_str(),
             metadata.created_by.as_str(),
