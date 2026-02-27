@@ -189,7 +189,16 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         Command::Init => {
             runtime::init_layout(&state.paths)?;
             log_command_executed(&state.paths, &state.default_agent_id, "init", None);
-            if let Some(code) = emit_command_message_or_json("init", "initialized", json_output)? {
+            let root_path = state.paths.root().display().to_string();
+            if let Some(code) = emit_command_json_or_text(
+                "init",
+                serde_json::json!({
+                    "status": "initialized",
+                    "root": root_path,
+                }),
+                &format!("initialized {}", root_path),
+                json_output,
+            )? {
                 return Ok(code);
             }
         }
@@ -235,6 +244,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 let secret_name = secret_id.as_str().to_owned();
                 ensure_secret_acl_allowed(&state, SecretAclOperation::Write, Some(&secret_id))?;
                 let creator = state.default_agent_id.clone();
+                let creator_str = creator.as_str().to_owned();
                 let recipient =
                     runtime::load_or_create_recipient_for_agent(&state.paths, &creator)?;
                 let mut recipients = HashSet::new();
@@ -261,9 +271,12 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "secrets-set",
                     serde_json::json!({
                         "secret": secret_name,
-                        "status": "ok",
+                        "status": "created",
+                        "ttl_days": ttl_days,
+                        "owner": "agent",
+                        "created_by": creator_str,
                     }),
-                    "ok",
+                    &format!("secret {} created (TTL: {} days)", secret_name, ttl_days),
                     json_output,
                 )? {
                     return Ok(code);
@@ -447,7 +460,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
             let requester = state.default_agent_id.clone();
             let signing_key =
                 runtime::load_or_create_signing_key_for_agent(&state.paths, &requester)?;
-            manager.request(
+            let pending_request = manager.request(
                 secret_id,
                 requester,
                 reason,
@@ -465,8 +478,10 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 serde_json::json!({
                     "secret": name,
                     "status": "pending",
+                    "request_id": pending_request.id,
+                    "expires_at": pending_request.expires_at,
                 }),
-                "pending",
+                &format!("request {} created for secret {}", pending_request.id, name),
                 json_output,
             )? {
                 return Ok(code);
@@ -554,7 +569,11 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 &manager.audit_log,
             )?;
             log_command_executed(&state.paths, &state.default_agent_id, "verify", None);
-            if let Some(code) = emit_command_message_or_json("verify", "ok", json_output)? {
+            if let Some(code) = emit_command_message_or_json(
+                "verify",
+                "verified and reaped expired entries",
+                json_output,
+            )? {
                 return Ok(code);
             }
         }
@@ -627,9 +646,20 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     "config-validate",
                     None,
                 );
-                if let Some(code) =
-                    emit_command_message_or_json("config-validate", "ok", json_output)?
-                {
+                let config_info = state
+                    .loaded_config
+                    .as_ref()
+                    .map(|c| format!("valid ({})", c.source_path.display()))
+                    .unwrap_or_else(|| "valid (no config file)".to_owned());
+                if let Some(code) = emit_command_json_or_text(
+                    "config-validate",
+                    serde_json::json!({
+                        "status": "ok",
+                        "config_path": state.loaded_config.as_ref().map(|c| c.source_path.display().to_string()),
+                    }),
+                    &config_info,
+                    json_output,
+                )? {
                     return Ok(code);
                 }
             }

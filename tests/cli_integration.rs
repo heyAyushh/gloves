@@ -645,7 +645,8 @@ fn cli_error_format_json_applies_to_success_output() {
     let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["command"], "init");
-    assert_eq!(payload["result"]["message"], "initialized");
+    assert_eq!(payload["result"]["status"], "initialized");
+    assert!(payload["result"]["root"].as_str().is_some());
 }
 
 #[test]
@@ -666,7 +667,8 @@ fn cli_json_flag_alias_applies_to_success_output() {
     let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(payload["command"], "init");
-    assert_eq!(payload["result"]["message"], "initialized");
+    assert_eq!(payload["result"]["status"], "initialized");
+    assert!(payload["result"]["root"].as_str().is_some());
 }
 
 #[test]
@@ -855,7 +857,7 @@ fn cli_config_validate_success() {
         ])
         .assert()
         .success()
-        .stdout(predicates::str::contains("ok"));
+        .stdout(predicates::str::contains("valid"));
 }
 
 #[test]
