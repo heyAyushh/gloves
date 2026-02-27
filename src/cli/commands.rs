@@ -1525,7 +1525,7 @@ fn pending_request_for_id(
         .find(|request| request.id == request_id)
         .ok_or_else(|| {
             GlovesError::InvalidInput(format!(
-                "request id `{request_id}` was not found in pending requests\nRun `{PENDING_REQUEST_LOOKUP_COMMAND}` and retry with `gloves {action} <request-id>`"
+                "request id `{request_id}` was not found in pending requests\nRun `{PENDING_REQUEST_LOOKUP_COMMAND}` and retry with `gloves requests {action} <request-id>`"
             ))
         })
 }
