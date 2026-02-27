@@ -69,30 +69,42 @@ const REQUEST_COMMAND_AFTER_HELP: &str = r#"Examples:
 const REQUESTS_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves requests list
   gloves requests approve <request-id>
+  gloves requests deny <request-id>
+
+Aliases:
+  gloves req list
+  gloves req approve <request-id>
   gloves req deny <request-id>
 
 Tip:
   Use this command group when you want noun-first navigation.
 "#;
 const APPROVE_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves requests list
-  gloves requests approve <request-id>
   gloves approve <request-id>
+  gloves --agent human-ops approve <request-id>
 
-Tip:
-  `<request-id>` must be a UUID from `gloves requests list`.
+Find request IDs:
+  gloves requests list
+
+See also:
+  gloves requests approve  (preferred form)
 "#;
 const DENY_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves requests list
-  gloves requests deny <request-id>
   gloves deny <request-id>
+  gloves --agent human-ops deny <request-id>
 
-Tip:
-  `<request-id>` must be a UUID from `gloves requests list`.
+Find request IDs:
+  gloves requests list
+
+See also:
+  gloves requests deny  (preferred form)
 "#;
 const LIST_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves list
-  gloves requests list
+  gloves list --pending
+
+See also:
+  gloves requests list  (alias: list only pending requests)
 "#;
 const GRANT_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves secrets grant service/token --to agent-b
@@ -616,7 +628,9 @@ pub enum RequestsCommand {
         topic: Vec<String>,
     },
     /// Lists only pending request entries.
-    #[command(after_help = LIST_COMMAND_AFTER_HELP)]
+    #[command(
+        after_help = "Examples:\n  gloves requests list\n  gloves req list\n\nSee also:\n  gloves list  (shows secrets and pending requests)\n"
+    )]
     List,
     /// Approves a pending request by id.
     #[command(after_help = APPROVE_COMMAND_AFTER_HELP)]

@@ -6,17 +6,6 @@ Agent instructions for the `gloves` repository.
 
 These rules apply to all changes in this repository.
 
-## Coding Philosophy (Karpathy Guidelines)
-
-All changes should follow the [Karpathy Guidelines](.codex/skills/karpathy-guidelines/SKILL.md) to reduce common LLM coding mistakes:
-
-1. **Think Before Coding** - Don't assume. Surface tradeoffs. Ask when unclear.
-2. **Simplicity First** - Minimum code that solves the problem. No speculative features.
-3. **Surgical Changes** - Touch only what you must. Match existing style.
-4. **Goal-Driven Execution** - Define success criteria. Verify each step.
-
-For any non-trivial task, explicitly state your plan and assumptions before implementing.
-
 ## Engineering Rules
 
 - Use Rust 2021 edition and keep code simple and explicit.
@@ -24,7 +13,6 @@ For any non-trivial task, explicitly state your plan and assumptions before impl
 - Prefer composition and clear interfaces over deeply nested conditionals.
 - Keep comments focused on intent and security rationale.
 - Leave touched code cleaner than you found it.
-- Follow Karpathy Guidelines for surgical, minimal changes (see .codex/skills/karpathy-guidelines/SKILL.md)
 
 ## Security Rules
 

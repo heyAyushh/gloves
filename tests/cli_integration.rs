@@ -575,7 +575,7 @@ fn cli_help_legacy_shortcut_topic_still_works() {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(stdout.contains("USAGE:"));
     assert!(stdout.contains("gloves approve [OPTIONS] <REQUEST_ID>"));
-    assert!(stdout.contains("gloves requests approve <request-id>"));
+    assert!(stdout.contains("gloves requests approve"));
 }
 
 #[test]

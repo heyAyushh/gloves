@@ -5,17 +5,6 @@ description: Provides Rust coding best practices for structure, patterns, perfor
 
 # Rust Best Practices
 
-## Philosophy
-
-Apply [Karpathy Guidelines](../karpathy-guidelines/SKILL.md) when writing Rust:
-
-1. **Think Before Coding** - Understand the module structure before implementing
-2. **Simplicity First** - Prefer explicit code over clever abstractions
-3. **Surgical Changes** - Match existing style; don't refactor unrelated code
-4. **Goal-Driven Execution** - Define success criteria (tests, benchmarks)
-
-Rust's type system enables fearless refactoring, but avoid unnecessary changes.
-
 ## Quick Start
 
 Apply these rules by default when touching Rust:
