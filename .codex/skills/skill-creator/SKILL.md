@@ -44,6 +44,17 @@ Match the level of specificity to the task's fragility and variability:
 
 Think of Claude as exploring a path: a narrow bridge with cliffs needs specific guardrails (low freedom), while an open field allows many routes (high freedom).
 
+### Follow Karpathy Guidelines
+
+When creating skills, follow the [Karpathy Guidelines](../karpathy-guidelines/SKILL.md) for surgical, minimal changes:
+
+1. **Think Before Coding** - Understand the skill's purpose and usage patterns before writing
+2. **Simplicity First** - Keep skills focused on one domain; don't over-engineer
+3. **Surgical Changes** - Only include what's necessary; avoid auxiliary documentation
+4. **Goal-Driven Execution** - Define what success looks like for the skill
+
+Skills should be concise and focused. Challenge every line: "Does Claude really need this?"
+
 ### Anatomy of a Skill
 
 Every skill consists of a required SKILL.md file and optional bundled resources:
@@ -300,6 +311,7 @@ Any example files and directories not needed for the skill should be deleted. Th
 #### Update SKILL.md
 
 **Writing Guidelines:** Always use imperative/infinitive form.
+- Follow Karpathy Guidelines for minimal, focused content
 
 ##### Frontmatter
 
