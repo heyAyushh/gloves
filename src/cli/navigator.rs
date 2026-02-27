@@ -874,7 +874,7 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "list",
-        title: "list",
+        title: "entries list",
         summary: "List all entries",
         path: &["list"],
         fields: LIST_FIELDS,

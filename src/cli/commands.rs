@@ -1725,9 +1725,9 @@ fn run_explain_command(code: &str, json_output: bool) -> Result<Option<i32>> {
     }
     let normalized_code = normalize_error_code(code);
     Err(GlovesError::InvalidInput(format!(
-        "unknown error code `{normalized_code}`\nKnown codes: {}\nUse `gloves help explain` for usage",
-        known_error_codes().join(", ")
-    )))
+            "unknown error code `{normalized_code}`\nKnown codes: {}\nTry `gloves help explain` for usage",
+            known_error_codes().join(", ")
+        )))
 }
 
 fn run_help_command(topic: &[String], json_output: bool) -> Result<Option<i32>> {

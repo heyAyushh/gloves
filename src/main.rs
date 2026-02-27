@@ -17,7 +17,7 @@ const CLI_GLOBAL_HELP_HINT: &str =
 const CLI_TTL_HINT: &str = "hint: use a positive day count, for example `--ttl 1`";
 const CLI_FORBIDDEN_HINT: &str = "hint: this action is blocked by policy. check ACLs with `gloves access paths --agent <id> --json` and review `.gloves.toml`";
 const CLI_NOT_FOUND_HINT: &str =
-    "hint: check existing entries with `gloves list` or pending requests with `gloves requests list`";
+    "hint: check existing secrets with `gloves list` or pending requests with `gloves requests list`";
 const CLI_ALREADY_EXISTS_HINT: &str =
     "hint: entry already exists. choose a new name or remove the old one with `gloves secrets revoke <name>`";
 const CLI_UNAUTHORIZED_HINT: &str = "hint: this caller is not authorized for the operation. check `--agent` and request/approval state";
