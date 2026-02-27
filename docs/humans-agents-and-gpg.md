@@ -32,8 +32,8 @@ Repeat for each reviewer identity that will handle human workflows.
 This is the pattern you described (human seed -> default agent -> other agents):
 
 1. Human stores canonical secret in `pass`.
-2. Default agent requests access using `gloves request`.
-3. Human approves via `gloves requests approve`.
+2. Default agent requests access using `gloves --agent <id> request <secret>`.
+3. Human approves via `gloves --agent <id> requests approve <request-id>`.
 4. Default agent reads and re-publishes as agent-owned secret (`gloves secrets set ...`).
 5. Default agent grants to specific agents (`gloves secrets grant ... --to ...`).
 

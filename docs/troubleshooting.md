@@ -80,7 +80,6 @@ If your policy is strict, set `vault.mode = "required"` and run `gloves config v
 
 ```bash
 gloves --json --version
-gloves --error-format json --version
 gloves config validate
 gloves verify
 gloves audit --limit 50

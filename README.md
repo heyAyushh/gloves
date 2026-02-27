@@ -98,7 +98,7 @@ cargo install --path .
 - Use least-privilege agent access in `.gloves.toml`
 - Prefer `gloves secrets get --pipe-to <command>` over raw stdout in automation
 - Keep secrets root and config permissions private
-- Use `gloves audit --json` for machine-readable audit export
+- Use `gloves audit --json --limit 100` for machine-readable audit export
 
 Details:
 
