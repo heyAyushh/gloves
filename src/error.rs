@@ -132,7 +132,7 @@ The operation is blocked by ACL or configured policy rules.
 Recovery:
   gloves access paths --agent <id> --json
   gloves help request
-  gloves help approve"#;
+  gloves help requests approve"#;
 const ERROR_EXPLANATION_E201: &str = r#"E201 unauthorized caller
 
 The current caller identity is not allowed for the requested operation.
@@ -145,8 +145,8 @@ const ERROR_EXPLANATION_E300: &str = r#"E300 resource not found
 The referenced secret/request/key could not be located.
 
 Recovery:
-  gloves list
-  gloves requests list"#;
+  gloves list              (check existing secrets)
+  gloves requests list     (check pending requests)"#;
 const ERROR_EXPLANATION_E301: &str = r#"E301 resource already exists
 
 The target name is already present and overwrite is not allowed.
