@@ -158,6 +158,27 @@ Built by `SecretsPaths` in `src/paths.rs`:
 - `<root>/store/` encrypted `*.age` ciphertext
 - `<root>/meta/` per-secret metadata JSON
 - `<root>/pending.json` request records
-- `<root>/audit.jsonl` append-only audit events
-- `<root>/default-agent.agekey` generated default age identity
-- `<root>/default-agent.signing.key` generated signing key
+
+### Vault Exec with Environment Secrets
+
+Run a command with secrets injected as environment variables:
+
+```bash
+# Basic usage - inject secret as env var
+gloves --root .openclaw/secrets vault exec myvault --env-secrets API_KEY=github/token -- npx mcp-server
+
+# Shorthand - if env var name matches secret name
+gloves --root .openclaw/secrets vault exec myvault --env-secrets github/token -- ./server.sh
+
+# Multiple secrets
+gloves --root .openclaw/secrets vault exec myvault --env-secrets API_KEY=github/token,LINEAR_KEY=linear/api-key -- ./server
+
+# Custom TTL
+gloves --root .openclaw/secrets vault exec myvault --ttl 30m --env-secrets DB_PASS=shared/db-pass -- ./app
+```
+
+Syntax: `--env-secrets KEY=secret-name` or `--env-secrets secret-name` (shorthand)
+
+The command mounts the vault, injects secrets as env vars, runs the command, then automatically unmounts.
+
+See also: `docs/vault-exec.md`
