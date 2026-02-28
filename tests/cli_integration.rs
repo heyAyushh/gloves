@@ -5618,3 +5618,230 @@ fn cli_daemon_set_rejects_non_positive_ttl() {
     let status = child.wait().unwrap();
     assert!(status.success());
 }
+
+// Tests for --env-secrets feature (SHP-116)
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_injects_secret_as_env_var() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+
+    // Initialize vault
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "vault", "init", "agent_data", "--owner", "agent"])
+        .assert()
+        .success();
+
+    // Create a secret
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "secrets", "set", "test/secret",
+            "--value", "super-secret-value",
+            "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    // Create a script that prints the env var
+    let print_env_script = temp_dir.path().join("print-env.sh");
+    std::fs::write(
+        &print_env_script,
+        r#"#!/bin/bash
+echo "MY_SECRET=$MY_SECRET"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&print_env_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Run vault exec with --env-secrets
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "vault", "exec", "agent_data",
+            "--env-secrets", "MY_SECRET=test/secret",
+            "--",
+            print_env_script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("super-secret-value"),
+        "Expected secret value in output, got: {}",
+        stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_injects_multiple_secrets_as_env_vars() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+
+    // Initialize vault
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "vault", "init", "agent_data", "--owner", "agent"])
+        .assert()
+        .success();
+
+    // Create secrets
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "secrets", "set", "api/key", "--value", "key-123", "--ttl", "1"])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "secrets", "set", "api/token", "--value", "token-456", "--ttl", "1"])
+        .assert()
+        .success();
+
+    // Create a script that prints both env vars
+    let print_env_script = temp_dir.path().join("print-multi-env.sh");
+    std::fs::write(
+        &print_env_script,
+        r#"#!/bin/bash
+echo "API_KEY=$API_KEY"
+echo "API_TOKEN=$API_TOKEN"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&print_env_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Run vault exec with multiple --env-secrets
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "vault", "exec", "agent_data",
+            "--env-secrets", "API_KEY=api/key",
+            "--env-secrets", "API_TOKEN=api/token",
+            "--",
+            print_env_script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("key-123"),
+        "Expected API_KEY in output, got: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("token-456"),
+        "Expected API_TOKEN in output, got: {}",
+        stdout
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_env_secrets_missing_secret_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+
+    // Initialize vault
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "vault", "init", "agent_data", "--owner", "agent"])
+        .assert()
+        .success();
+
+    // Create a script that prints the env var
+    let print_env_script = temp_dir.path().join("print-env.sh");
+    std::fs::write(&print_env_script, "#!/bin/bash\necho \"MY_SECRET=$MY_SECRET\"\n").unwrap();
+    std::fs::set_permissions(&print_env_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Run vault exec with --env-secrets pointing to non-existent secret
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "vault", "exec", "agent_data",
+            "--env-secrets", "MY_SECRET=nonexistent/secret",
+            "--",
+            print_env_script.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    // Should fail because secret doesn't exist
+    assert!(
+        !output.status.success(),
+        "Expected failure for missing secret, but command succeeded"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_vault_exec_secrets_not_leaked_in_audit_logs() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let fake_bin = temp_dir.path().join("fake-bin");
+    install_fake_vault_binaries(&fake_bin);
+    let root = temp_dir.path().to_str().unwrap();
+
+    // Initialize vault
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args(["--root", root, "vault", "init", "agent_data", "--owner", "agent"])
+        .assert()
+        .success();
+
+    // Create a secret with a unique value we can search for
+    let secret_value = "unique-secret-value-12345";
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "secrets", "set", "leak-test/secret",
+            "--value", secret_value,
+            "--ttl", "1",
+        ])
+        .assert()
+        .success();
+
+    // Create a simple script that runs without output
+    let noop_script = temp_dir.path().join("noop.sh");
+    std::fs::write(&noop_script, "#!/bin/bash\ntrue\n").unwrap();
+    std::fs::set_permissions(&noop_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Run vault exec with --env-secrets
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env("PATH", with_fake_path(&fake_bin))
+        .args([
+            "--root", root,
+            "vault", "exec", "agent_data",
+            "--env-secrets", "MY_SECRET=leak-test/secret",
+            "--",
+            noop_script.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Check the audit.jsonl - secret values should NOT appear there
+    let audit_log_path = temp_dir.path().join("audit.jsonl");
+    let audit_content = std::fs::read_to_string(&audit_log_path).unwrap();
+    
+    // The secret value should not appear in the audit.jsonl
+    assert!(
+        !audit_content.contains(secret_value),
+        "Secret value should not leak into audit.jsonls. Audit content: {}",
+        audit_content
+    );
+}
