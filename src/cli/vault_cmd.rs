@@ -117,21 +117,44 @@ pub(crate) fn run_vault_command(
             ttl,
             mountpoint,
             agent,
+            env_secrets,
             command,
         } => {
             let ttl_literal = ttl.unwrap_or_else(|| defaults.mount_ttl.clone());
             let ttl_duration = secret_input::parse_duration_value(&ttl_literal, "--ttl")?;
             let mounted_by = resolve_agent_id(agent, &defaults.agent_id)?;
-            let manager = vault_manager_for_paths(paths, defaults, &mounted_by)?;
-            manager.mount(&name, ttl_duration, mountpoint, mounted_by.clone())?;
+            let vault_manager = vault_manager_for_paths(paths, defaults, &mounted_by)?;
+            vault_manager.mount(&name, ttl_duration, mountpoint, mounted_by.clone())?;
 
-            let command_exit_code = run_vault_exec_command(&command);
+            // Resolve env_secrets to actual values using SecretsManager
+            let env_vars = if let Some(secrets) = env_secrets {
+                let secrets_manager = runtime::manager_for_paths(paths)?;
+                let mut vars = std::collections::HashMap::new();
+                for secret_arg in secrets {
+                    // Get secret value from secrets manager
+                    let secret_id = crate::types::SecretId::new(&secret_arg.secret_name)
+                        .map_err(|e| GlovesError::InvalidInput(format!("Invalid secret name '{}': {}", secret_arg.secret_name, e)))?;
+                    // Get the identity file for the agent
+                    let identity_file = paths.identity_file_for_agent(mounted_by.as_str());
+                    let secret_value = secrets_manager.get(&secret_id, &mounted_by, Some(&identity_file))?;
+                    let secret_str = secret_value.expose(|bytes| {
+                        String::from_utf8(bytes.to_vec())
+                            .map_err(|e| GlovesError::InvalidInput(format!("Secret is not valid UTF-8: {}", e)))
+                    })?;
+                    vars.insert(secret_arg.env_var, secret_str);
+                }
+                Some(vars)
+            } else {
+                None
+            };
+
+            let command_exit_code = run_vault_exec_command(&command, env_vars);
             let unmount_reason = if command_exit_code.is_ok() {
                 "exec-complete"
             } else {
                 "exec-error"
             };
-            let unmount_result = manager.unmount(&name, unmount_reason, mounted_by);
+            let unmount_result = vault_manager.unmount(&name, unmount_reason, mounted_by);
             match (command_exit_code, unmount_result) {
                 (Ok(exit_code), Ok(())) => return Ok(Some(exit_code)),
                 (Ok(exit_code), Err(unmount_error)) => {
@@ -215,7 +238,10 @@ fn emit_text_or_json(text: &str, payload: serde_json::Value, json_output: bool) 
     }
 }
 
-fn run_vault_exec_command(command: &[String]) -> Result<i32> {
+fn run_vault_exec_command(
+    command: &[String],
+    env_vars: Option<std::collections::HashMap<String, String>>,
+) -> Result<i32> {
     if command.is_empty() {
         return Err(GlovesError::InvalidInput(
             "vault exec requires a command after '--'".to_owned(),
@@ -223,19 +249,26 @@ fn run_vault_exec_command(command: &[String]) -> Result<i32> {
     }
 
     let executable = &command[0];
-    let status = ProcessCommand::new(executable)
-        .args(&command[1..])
+    let mut cmd = ProcessCommand::new(executable);
+    cmd.args(&command[1..])
         .env_remove(EXTPASS_ROOT_ENV_VAR)
         .env_remove(EXTPASS_AGENT_ENV_VAR)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| {
-            GlovesError::InvalidInput(format!(
-                "failed to start vault exec command '{executable}': {error}"
-            ))
-        })?;
+        .stderr(Stdio::inherit());
+
+    // Inject secret environment variables
+    if let Some(vars) = env_vars {
+        for (key, value) in vars {
+            cmd.env(&key, value);
+        }
+    }
+
+    let status = cmd.status().map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "failed to start vault exec command '{executable}': {error}"
+        ))
+    })?;
     match status.code() {
         Some(code) => Ok(code),
         None => Err(GlovesError::InvalidInput(format!(

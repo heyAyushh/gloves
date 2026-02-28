@@ -440,6 +440,31 @@ impl From<VaultModeArg> for VaultMode {
     }
 }
 
+/// Environment secret argument for vault exec --env-secrets.
+#[derive(Debug, Clone)]
+pub struct EnvSecretArg {
+    /// Environment variable name.
+    pub env_var: String,
+    /// Secret name in the store.
+    pub secret_name: String,
+}
+
+/// Parse env_secrets argument: accepts KEY=NAME or just NAME (KEY=NAME).
+fn parse_env_secrets(s: &str) -> std::result::Result<EnvSecretArg, String> {
+    if s.contains('=') {
+        let parts: Vec<&str> = s.splitn(2, '=').collect();
+        Ok(EnvSecretArg {
+            env_var: parts[0].to_string(),
+            secret_name: parts[1].to_string(),
+        })
+    } else {
+        Ok(EnvSecretArg {
+            env_var: s.to_string(),
+            secret_name: s.to_string(),
+        })
+    }
+}
+
 /// Supported vault subcommands.
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
@@ -485,6 +510,9 @@ pub enum VaultCommand {
         /// Agent identity for this exec session.
         #[arg(long)]
         agent: Option<String>,
+        /// Secret names to inject as environment variables (comma-separated KEY=NAME or just NAME).
+        #[arg(long, value_parser = parse_env_secrets)]
+        env_secrets: Option<Vec<EnvSecretArg>>,
         /// Command and arguments to execute after mount.
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
