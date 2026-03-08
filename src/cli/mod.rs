@@ -194,6 +194,26 @@ const GPG_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent agent-main gpg create
   gloves --agent agent-main gpg fingerprint
 "#;
+const SET_IDENTITY_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves set-identity --agent devy
+  gloves set-identity --agent devy --force
+"#;
+const TOP_LEVEL_SET_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves --agent devy set agents/devy/api-keys/anthropic --stdin
+  gloves --agent main set shared/database-url --value postgres://localhost
+"#;
+const TOP_LEVEL_GET_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves --agent devy get agents/devy/api-keys/anthropic --format raw
+  gloves --agent devy get agents/devy/api-keys/anthropic --format json
+"#;
+const SHOW_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves show agents/devy/api-keys/anthropic --redacted
+  gloves show agents/devy/api-keys/anthropic --format json
+"#;
+const UPDATEKEYS_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves updatekeys
+  gloves updatekeys --path shared --dry-run
+"#;
 const GPG_CREATE_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent agent-main gpg create
 
@@ -258,6 +278,68 @@ pub struct Cli {
 pub enum Command {
     /// Initializes directory tree.
     Init,
+    /// Creates an age identity for one OpenClaw agent namespace.
+    #[command(after_help = SET_IDENTITY_COMMAND_AFTER_HELP)]
+    SetIdentity {
+        /// Agent identifier.
+        #[arg(long)]
+        agent: String,
+        /// Replace an existing identity, preserving it as revoked.
+        #[arg(long)]
+        force: bool,
+        /// Reserved for future post-quantum identities.
+        #[arg(long, hide = true)]
+        post_quantum: bool,
+    },
+    /// Stores a namespaced secret using `.gloves.yaml` creation rules.
+    #[command(after_help = TOP_LEVEL_SET_COMMAND_AFTER_HELP)]
+    Set {
+        /// Secret path.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        path: String,
+        /// Inline secret value (prefer `--stdin`).
+        #[arg(long)]
+        value: Option<String>,
+        /// Read the secret value from stdin.
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Reads a namespaced secret.
+    #[command(after_help = TOP_LEVEL_GET_COMMAND_AFTER_HELP)]
+    Get {
+        /// Secret path.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        path: String,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = SecretReadFormatArg::Raw)]
+        format: SecretReadFormatArg,
+    },
+    /// Shows namespaced secret metadata without revealing the value.
+    #[command(after_help = SHOW_COMMAND_AFTER_HELP)]
+    Show {
+        /// Secret path.
+        #[arg(help = SECRET_NAME_ARG_HELP)]
+        path: String,
+        /// Show only redacted metadata.
+        #[arg(long, default_value_t = true)]
+        redacted: bool,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = SecretShowFormatArg::Text)]
+        format: SecretShowFormatArg,
+    },
+    /// Re-encrypts namespaced secrets using current creation rules and recipients.
+    #[command(after_help = UPDATEKEYS_COMMAND_AFTER_HELP)]
+    Updatekeys {
+        /// Optional path prefix filter.
+        #[arg(long)]
+        path: Option<String>,
+        /// Report changes without modifying files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Explicit identity file used for decryption.
+        #[arg(long)]
+        identity: Option<PathBuf>,
+    },
     /// Explains a stable error code with recovery guidance.
     #[command(after_help = EXPLAIN_COMMAND_AFTER_HELP)]
     Explain {
@@ -660,6 +742,24 @@ pub enum ErrorFormatArg {
     Json,
 }
 
+/// Output format for top-level `get`.
+#[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
+pub enum SecretReadFormatArg {
+    /// Emit only the secret value bytes.
+    Raw,
+    /// Emit structured JSON with metadata.
+    Json,
+}
+
+/// Output format for top-level `show`.
+#[derive(Debug, Clone, Copy, ValueEnum, Eq, PartialEq)]
+pub enum SecretShowFormatArg {
+    /// Emit text lines.
+    Text,
+    /// Emit structured JSON.
+    Json,
+}
+
 /// Supported GPG subcommands.
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
@@ -701,7 +801,8 @@ mod unit_tests {
             validate_ttl_days,
         },
         secret_input::{parse_duration_value, resolve_secret_input},
-        ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand, SecretsCommand,
+        ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand, SecretReadFormatArg,
+        SecretShowFormatArg, SecretsCommand,
     };
     use crate::error::GlovesError;
     use crate::paths::SecretsPaths;
@@ -898,10 +999,60 @@ mod unit_tests {
     }
 
     #[test]
-    fn cli_top_level_set_is_not_supported() {
-        let error =
-            Cli::try_parse_from(["gloves", "set", "service/token", "--generate"]).unwrap_err();
-        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    fn cli_top_level_set_parses_namespaced_path() {
+        let cli =
+            Cli::try_parse_from(["gloves", "set", "agents/devy/api-keys/anthropic", "--stdin"])
+                .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Set { path, stdin, value }
+                if path == "agents/devy/api-keys/anthropic" && stdin && value.is_none()
+        ));
+    }
+
+    #[test]
+    fn cli_top_level_get_accepts_format_flag() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "get",
+            "agents/devy/api-keys/anthropic",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Get { path, format }
+                if path == "agents/devy/api-keys/anthropic"
+                    && format == SecretReadFormatArg::Json
+        ));
+    }
+
+    #[test]
+    fn cli_show_accepts_json_format_flag() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "show",
+            "agents/devy/api-keys/anthropic",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Show { path, format, .. }
+                if path == "agents/devy/api-keys/anthropic"
+                    && format == SecretShowFormatArg::Json
+        ));
+    }
+
+    #[test]
+    fn cli_set_identity_requires_agent() {
+        let cli = Cli::try_parse_from(["gloves", "set-identity", "--agent", "devy"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::SetIdentity { agent, force, .. } if agent == "devy" && !force
+        ));
     }
 
     #[test]

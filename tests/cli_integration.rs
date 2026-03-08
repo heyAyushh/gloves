@@ -438,8 +438,11 @@ fn cli_help_command_index_hides_legacy_request_shortcuts() {
     assert!(stdout.contains("\n  secrets "));
     assert!(!stdout.contains("\n  approve "));
     assert!(!stdout.contains("\n  deny "));
-    assert!(!stdout.contains("\n  set "));
-    assert!(!stdout.contains("\n  get "));
+    assert!(stdout.contains("\n  set "));
+    assert!(stdout.contains("\n  get "));
+    assert!(stdout.contains("\n  show "));
+    assert!(stdout.contains("\n  updatekeys "));
+    assert!(stdout.contains("\n  set-identity "));
     assert!(!stdout.contains("\n  grant "));
     assert!(!stdout.contains("\n  revoke "));
     assert!(!stdout.contains("\n  status "));

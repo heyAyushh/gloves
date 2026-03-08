@@ -39,6 +39,8 @@ const OUTPUT_TAB_EXPANSION: &str = "    ";
 const SET_INPUT_MODE_GENERATE_INDEX: usize = 0;
 const SET_INPUT_MODE_VALUE_INDEX: usize = 1;
 const SET_INPUT_MODE_STDIN_INDEX: usize = 2;
+const NAMESPACED_SET_INPUT_MODE_VALUE_INDEX: usize = 0;
+const NAMESPACED_SET_INPUT_MODE_STDIN_INDEX: usize = 1;
 const EMPTY_FILTER_PLACEHOLDER: &str = "<no matching commands>";
 const STATUS_RUN_IN_PROGRESS: &str = "Run in progress — press Ctrl+C to cancel, then q to quit";
 
@@ -234,6 +236,9 @@ struct RunRecord {
 const GLOBAL_VAULT_MODE_CHOICES: &[&str] = &["<unset>", "auto", "required", "disabled"];
 const GLOBAL_ERROR_FORMAT_CHOICES: &[&str] = &["text", "json"];
 const SET_INPUT_MODE_CHOICES: &[&str] = &["generate", "value", "stdin"];
+const NAMESPACED_SET_INPUT_MODE_CHOICES: &[&str] = &["value", "stdin"];
+const SECRET_READ_FORMAT_CHOICES: &[&str] = &["raw", "json"];
+const SECRET_SHOW_FORMAT_CHOICES: &[&str] = &["text", "json"];
 const VAULT_OWNER_CHOICES: &[&str] = &["agent", "human"];
 
 const GLOBAL_FIELDS: &[FieldSpec] = &[
@@ -366,6 +371,42 @@ const SET_FIELDS: &[FieldSpec] = &[
     },
 ];
 
+const NAMESPACED_SET_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "path",
+        label: "Path",
+        help: "Secret path",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::Positional,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "input_mode",
+        label: "Input Mode",
+        help: "value or stdin",
+        required: true,
+        kind: FieldKind::Choice(NAMESPACED_SET_INPUT_MODE_CHOICES),
+        arg: FieldArg::None,
+        default_text: "",
+        default_bool: false,
+        default_choice: NAMESPACED_SET_INPUT_MODE_VALUE_INDEX,
+    },
+    FieldSpec {
+        id: "value",
+        label: "Input Value",
+        help: "Secret payload when mode=value or mode=stdin",
+        required: false,
+        kind: FieldKind::Text,
+        arg: FieldArg::None,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
 const GET_FIELDS: &[FieldSpec] = &[
     FieldSpec {
         id: "name",
@@ -396,6 +437,117 @@ const GET_FIELDS: &[FieldSpec] = &[
         required: false,
         kind: FieldKind::Text,
         arg: FieldArg::OptionValue("--pipe-to-args"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
+const NAMESPACED_GET_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "path",
+        label: "Path",
+        help: "Secret path",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::Positional,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "format",
+        label: "Format",
+        help: "--format raw|json",
+        required: true,
+        kind: FieldKind::Choice(SECRET_READ_FORMAT_CHOICES),
+        arg: FieldArg::OptionValue("--format"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
+const SHOW_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "path",
+        label: "Path",
+        help: "Secret path",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::Positional,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "format",
+        label: "Format",
+        help: "--format text|json",
+        required: true,
+        kind: FieldKind::Choice(SECRET_SHOW_FORMAT_CHOICES),
+        arg: FieldArg::OptionValue("--format"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
+const SET_IDENTITY_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "agent",
+        label: "Agent",
+        help: "--agent id",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::OptionValue("--agent"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "force",
+        label: "Force",
+        help: "--force",
+        required: false,
+        kind: FieldKind::Bool,
+        arg: FieldArg::Flag("--force"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
+const UPDATEKEYS_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "path",
+        label: "Path Prefix",
+        help: "--path prefix",
+        required: false,
+        kind: FieldKind::Text,
+        arg: FieldArg::OptionValue("--path"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "dry_run",
+        label: "Dry Run",
+        help: "--dry-run",
+        required: false,
+        kind: FieldKind::Bool,
+        arg: FieldArg::Flag("--dry-run"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "identity",
+        label: "Identity",
+        help: "--identity file",
+        required: false,
+        kind: FieldKind::Text,
+        arg: FieldArg::OptionValue("--identity"),
         default_text: "",
         default_bool: false,
         default_choice: 0,
@@ -824,6 +976,41 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         fields: EXPLAIN_FIELDS,
     },
     CommandSpec {
+        id: "set_identity",
+        title: "set-identity",
+        summary: "Create an age identity for one agent",
+        path: &["set-identity"],
+        fields: SET_IDENTITY_FIELDS,
+    },
+    CommandSpec {
+        id: "ns_set",
+        title: "set",
+        summary: "Store a namespaced secret",
+        path: &["set"],
+        fields: NAMESPACED_SET_FIELDS,
+    },
+    CommandSpec {
+        id: "ns_get",
+        title: "get",
+        summary: "Read a namespaced secret",
+        path: &["get"],
+        fields: NAMESPACED_GET_FIELDS,
+    },
+    CommandSpec {
+        id: "show",
+        title: "show",
+        summary: "Show redacted secret metadata",
+        path: &["show"],
+        fields: SHOW_FIELDS,
+    },
+    CommandSpec {
+        id: "updatekeys",
+        title: "updatekeys",
+        summary: "Re-encrypt secrets using current recipients",
+        path: &["updatekeys"],
+        fields: UPDATEKEYS_FIELDS,
+    },
+    CommandSpec {
         id: "set",
         title: "secrets set",
         summary: "Store an agent secret",
@@ -1002,6 +1189,8 @@ const COMMAND_SPECS: &[CommandSpec] = &[
 
 const SAFE_COMMAND_IDS: &[&str] = &[
     "explain",
+    "ns_get",
+    "show",
     "get",
     "env",
     "requests_list",
@@ -1076,7 +1265,7 @@ fn normalize_launch_command_args(args: &[String]) -> Vec<String> {
             normalized[0] = "requests".to_owned();
             normalized.insert(1, "deny".to_owned());
         }
-        "set" | "get" | "grant" | "revoke" | "status" => {
+        "grant" | "revoke" | "status" => {
             normalized.insert(0, "secrets".to_owned());
         }
         _ => {}
@@ -3486,6 +3675,10 @@ fn build_invocation_args(
         append_set_args(&mut args, command_fields)?;
         return Ok(args);
     }
+    if command_spec.id == "ns_set" {
+        append_namespaced_set_args(&mut args, command_fields)?;
+        return Ok(args);
+    }
     if command_spec.id == "vault_exec" {
         append_generic_fields(&mut args, command_fields)?;
         append_vault_exec_command_line(&mut args, command_fields)?;
@@ -3499,11 +3692,16 @@ fn stdin_payload_for_command(
     command_spec: &CommandSpec,
     fields: &[FieldState],
 ) -> std::result::Result<Option<Vec<u8>>, String> {
-    if command_spec.id != "set" {
+    if command_spec.id != "set" && command_spec.id != "ns_set" {
         return Ok(None);
     }
     let input_mode_index = choice_index_field(fields, "input_mode")?;
-    if input_mode_index != SET_INPUT_MODE_STDIN_INDEX {
+    let stdin_mode_index = if command_spec.id == "set" {
+        SET_INPUT_MODE_STDIN_INDEX
+    } else {
+        NAMESPACED_SET_INPUT_MODE_STDIN_INDEX
+    };
+    if input_mode_index != stdin_mode_index {
         return Ok(None);
     }
     let value = required_text_field(fields, "value")?;
@@ -3648,6 +3846,29 @@ fn append_set_args(
         args.push(ttl.to_owned());
     }
     Ok(())
+}
+
+fn append_namespaced_set_args(
+    args: &mut Vec<String>,
+    fields: &[FieldState],
+) -> std::result::Result<(), String> {
+    let path = required_text_field(fields, "path")?;
+    args.push(path.to_owned());
+
+    let input_mode_index = choice_index_field(fields, "input_mode")?;
+    if input_mode_index == NAMESPACED_SET_INPUT_MODE_VALUE_INDEX {
+        let value = required_text_field(fields, "value")?;
+        args.push("--value".to_owned());
+        args.push(value.to_owned());
+        return Ok(());
+    }
+    if input_mode_index == NAMESPACED_SET_INPUT_MODE_STDIN_INDEX {
+        let _ = required_text_field(fields, "value")?;
+        args.push("--stdin".to_owned());
+        return Ok(());
+    }
+
+    Err("`Input Mode` selection is invalid".to_owned())
 }
 
 fn append_vault_exec_command_line(
@@ -3958,8 +4179,12 @@ mod unit_tests {
     #[test]
     fn command_tree_routes_secret_commands_through_secrets_group() {
         let tree = build_command_tree();
-        for label in ["set", "get", "grant", "revoke", "status"] {
+        for label in ["grant", "revoke", "status"] {
             assert!(tree.iter().all(|node| node.label != label));
+        }
+
+        for label in ["set", "get", "show", "updatekeys", "set-identity"] {
+            assert!(tree.iter().any(|node| node.label == label));
         }
 
         let secrets = node_by_label(&tree, "secrets");
@@ -3985,17 +4210,19 @@ mod unit_tests {
     #[test]
     fn launch_command_normalization_maps_legacy_shortcuts() {
         let legacy_secret = normalize_launch_command_args(&[
-            "set".to_owned(),
+            "grant".to_owned(),
             "service/token".to_owned(),
-            "--generate".to_owned(),
+            "--to".to_owned(),
+            "agent-b".to_owned(),
         ]);
         assert_eq!(
             legacy_secret,
             vec![
                 "secrets".to_owned(),
-                "set".to_owned(),
+                "grant".to_owned(),
                 "service/token".to_owned(),
-                "--generate".to_owned()
+                "--to".to_owned(),
+                "agent-b".to_owned()
             ]
         );
 

@@ -19,6 +19,7 @@ use crate::{
     error::{explain_error_code, known_error_codes, normalize_error_code, GlovesError, Result},
     fs_secure::ensure_private_dir,
     manager::ListItem,
+    namespaced_store::NamespacedStore,
     paths::SecretsPaths,
     reaper::TtlReaper,
     types::{AgentId, Owner, SecretId, SecretValue},
@@ -33,9 +34,9 @@ use super::{
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
     AccessCommand, Cli, Command, ConfigCommand, ErrorFormatArg, GpgCommand, RequestsCommand,
-    SecretsCommand, VaultModeArg, DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND,
-    DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR,
-    DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
+    SecretReadFormatArg, SecretShowFormatArg, SecretsCommand, VaultModeArg, DEFAULT_AGENT_ID,
+    DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES,
+    DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
     DEFAULT_VAULT_SECRET_TTL_DAYS,
 };
 
@@ -211,6 +212,131 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 &format!("initialized {}", root_path),
                 json_output,
             )? {
+                return Ok(code);
+            }
+        }
+        Command::SetIdentity {
+            agent,
+            force,
+            post_quantum,
+        } => {
+            if post_quantum {
+                return Err(GlovesError::InvalidInput(
+                    "--post-quantum is not supported yet".to_owned(),
+                ));
+            }
+            let agent_id = AgentId::new(&agent)?;
+            let store = NamespacedStore::new(state.paths.root());
+            let result = store.create_identity(&agent_id, force)?;
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "set-identity",
+                Some(agent.clone()),
+            );
+            let line = format!(
+                "Identity created: {}\nPublic key: {}\nRecipients file updated: {}",
+                result.identity_path.display(),
+                result.public_key,
+                result.recipients_file.display()
+            );
+            if let Some(code) = stdout_line_or_exit(&line)? {
+                return Ok(code);
+            }
+        }
+        Command::Set { path, value, stdin } => {
+            let store = NamespacedStore::new(state.paths.root());
+            let agent = state.default_agent_id.clone();
+            let secret_id = SecretId::new(&path)?;
+            let bytes = secret_input::resolve_secret_input(false, value, stdin)?;
+            let result = store.set_secret(&secret_id, &agent, &bytes)?;
+            log_command_executed(&state.paths, &state.default_agent_id, "set", Some(path));
+            let line = format!(
+                "stored {} for {} ({} recipients)",
+                result.name,
+                result.agent,
+                result.encrypted_to.len()
+            );
+            if let Some(code) = stdout_line_or_exit(&line)? {
+                return Ok(code);
+            }
+        }
+        Command::Get { path, format } => {
+            let store = NamespacedStore::new(state.paths.root());
+            let agent = state.default_agent_id.clone();
+            let secret_id = SecretId::new(&path)?;
+            let result = store.get_secret(&secret_id, &agent)?;
+            log_command_executed(&state.paths, &state.default_agent_id, "get", Some(path));
+            match format {
+                SecretReadFormatArg::Raw => {
+                    if let Some(code) = stdout_bytes_or_exit(result.value.as_bytes())? {
+                        return Ok(code);
+                    }
+                }
+                SecretReadFormatArg::Json => {
+                    if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&result)?)? {
+                        return Ok(code);
+                    }
+                }
+            }
+        }
+        Command::Show {
+            path,
+            redacted: _,
+            format,
+        } => {
+            let store = NamespacedStore::new(state.paths.root());
+            let secret_id = SecretId::new(&path)?;
+            let result = store.show_secret(&secret_id)?;
+            log_command_executed(&state.paths, &state.default_agent_id, "show", Some(path));
+            match format {
+                SecretShowFormatArg::Text => {
+                    let encrypted_to = if result.encrypted_to.is_empty() {
+                        String::new()
+                    } else {
+                        result.encrypted_to.join(", ")
+                    };
+                    let line = format!(
+                        "name: {}\nexists: {}\nlength: {}\nagent: {}\nencrypted_to: {}\ncreated: {}\nmodified: {}\nlast_rotated: {}\nfile_size: {} bytes",
+                        result.name,
+                        result.exists,
+                        result.length,
+                        result.agent,
+                        encrypted_to,
+                        result.created.to_rfc3339(),
+                        result.modified.to_rfc3339(),
+                        result.last_rotated.to_rfc3339(),
+                        result.file_size
+                    );
+                    if let Some(code) = stdout_line_or_exit(&line)? {
+                        return Ok(code);
+                    }
+                }
+                SecretShowFormatArg::Json => {
+                    if let Some(code) = stdout_line_or_exit(&serde_json::to_string(&result)?)? {
+                        return Ok(code);
+                    }
+                }
+            }
+        }
+        Command::Updatekeys {
+            path,
+            dry_run,
+            identity,
+        } => {
+            let store = NamespacedStore::new(state.paths.root());
+            let result = store.update_keys(path.as_deref(), identity.as_deref(), dry_run)?;
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "updatekeys",
+                path.clone(),
+            );
+            let line = format!(
+                "updated: {}\nunchanged: {}\nskipped: {}\ndry_run: {}",
+                result.updated, result.unchanged, result.skipped, result.dry_run
+            );
+            if let Some(code) = stdout_line_or_exit(&line)? {
                 return Ok(code);
             }
         }
