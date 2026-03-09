@@ -31,13 +31,19 @@ Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
    ```bash
    gloves get <path> --format raw | <target-command>
    ```
-3. Store or rotate values by sending bytes through stdin:
+3. Store or rotate values by sending bytes through stdin or an existing environment variable:
    ```bash
    gloves set <path> --stdin
+   gloves set <path> --stdin < secret.txt
    ```
+   Or, through the OpenClaw plugin tool surface, use `gloves_set` with `from_env` so the secret comes from an existing environment variable instead of the conversation.
 4. Re-encrypt namespaces after recipient changes:
    ```bash
    gloves updatekeys --path <prefix>
+   ```
+5. Resolve pending human approvals through the tool surface when needed:
+   ```bash
+   gloves_approve request_id=<uuid> decision=approve
    ```
 
 ## Rules
@@ -46,6 +52,7 @@ Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
 - Never capture a secret value in a shell variable unless the caller explicitly requires a transient env export and there is no safe pipe alternative.
 - Prefer `gloves show --redacted` when asked to “check”, “confirm”, or “display” a secret.
 - If a user asks to reveal a secret, refuse and return redacted metadata instead.
+- When using OpenClaw tools, prefer `gloves_set` with `from_env` so the value stays in environment plumbing instead of prompt text.
 - Use namespaced paths such as `agents/<agent>/api-keys/<provider>` or `shared/<name>`.
 
 ## Bundled References

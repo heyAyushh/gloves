@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
-import { createInterface } from "node:readline";
+import { readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { Socket, createConnection } from "node:net";
 import { basename } from "node:path";
 
 export interface GlovesClientConfig {
@@ -8,6 +8,7 @@ export interface GlovesClientConfig {
   agentId: string;
   mcpConfigPath: string;
   tokenPath: string;
+  socketPath?: string;
   glovesBin?: string;
   glovesMcpBin?: string;
   cwd?: string;
@@ -41,8 +42,16 @@ type ToolResponse = {
 };
 
 type JsonRpcResponse = {
+  id?: unknown;
+  method?: string;
+  params?: Record<string, unknown>;
   result?: ToolResponse | Record<string, unknown>;
   error?: { code: number; message: string; data?: unknown };
+};
+
+type SessionResponse = {
+  response: JsonRpcResponse;
+  secretValue?: string;
 };
 
 type SessionConfig = GlovesClientConfig & {
@@ -54,6 +63,7 @@ const INITIALIZE_METHOD = "initialize";
 const INITIALIZED_NOTIFICATION = "notifications/initialized";
 const TOOLS_LIST_METHOD = "tools/list";
 const TOOLS_CALL_METHOD = "tools/call";
+const SECRET_NOTIFICATION_METHOD = "gloves/secret";
 
 export class GlovesClient {
   private readonly config: Required<Omit<GlovesClientConfig, "cwd" | "glovesBin" | "glovesMcpBin" | "timeoutMs">> &
@@ -77,6 +87,7 @@ export class GlovesClient {
       agentId: config.agentId,
       mcpConfigPath: config.mcpConfigPath,
       tokenPath: config.tokenPath,
+      socketPath: config.socketPath,
       glovesBin: config.glovesBin ?? "gloves",
       glovesMcpBin: config.glovesMcpBin ?? "gloves-mcp",
       cwd: config.cwd,
@@ -85,7 +96,7 @@ export class GlovesClient {
   }
 
   async list(prefix?: string): Promise<string[]> {
-    const response = await this.callTool("gloves_list", prefix ? { prefix } : {});
+    const { response } = await this.callTool("gloves_list", prefix ? { prefix } : {});
     const secrets = response.structuredContent?.secrets;
     if (!Array.isArray(secrets)) {
       throw new Error("gloves_list did not return a secret list");
@@ -94,18 +105,20 @@ export class GlovesClient {
   }
 
   async show(path: string): Promise<SecretMetadata> {
-    const response = await this.callTool("gloves_show", { path });
+    const { response } = await this.callTool("gloves_show", { path });
     return normalizeMetadata(response.structuredContent);
   }
 
   async get(path: string): Promise<GetSecretResult> {
     const startedAt = performance.now();
     const mcpResponse = await this.callTool("gloves_get", { path });
-    const value = this.runGlovesRaw(["--agent", this.config.agentId, "get", path, "--format", "raw"]);
+    if (typeof mcpResponse.secretValue !== "string") {
+      throw new Error("gloves_get did not deliver a secret side-channel payload");
+    }
     const metadata = await this.show(path);
-    const approvalStatus = normalizeApprovalStatus(mcpResponse.structuredContent?.approval_status);
+    const approvalStatus = normalizeApprovalStatus(mcpResponse.response.structuredContent?.approval_status);
     return {
-      value,
+      value: mcpResponse.secretValue,
       metadata,
       approvalStatus,
       approvalLatencyMs: Number((performance.now() - startedAt).toFixed(3)),
@@ -115,6 +128,10 @@ export class GlovesClient {
   async set(path: string, value: string): Promise<void> {
     const envName = createSetEnvName(path);
     await this.callTool("gloves_set", { path, from_env: envName }, { [envName]: value });
+  }
+
+  async delete(path: string): Promise<void> {
+    await this.callTool("gloves_delete", { path });
   }
 
   async rotate(agentId = this.config.agentId): Promise<void> {
@@ -135,13 +152,14 @@ export class GlovesClient {
     name: string,
     argumentsValue: Record<string, unknown>,
     envOverrides?: Record<string, string>,
-  ): Promise<ToolResponse> {
+  ): Promise<{ response: ToolResponse; secretValue?: string }> {
     const session = await McpSession.start({
       ...this.config,
       env: envOverrides,
+      socketPath: envOverrides ? undefined : this.config.socketPath,
     });
     try {
-      const response = await session.request({
+      const sessionResponse = await session.request({
         jsonrpc: "2.0",
         id: 2,
         method: TOOLS_CALL_METHOD,
@@ -150,58 +168,65 @@ export class GlovesClient {
           arguments: argumentsValue,
         },
       });
-      if (response.error) {
-        throw new Error(`${response.error.message} (${response.error.code})`);
+      if (sessionResponse.response.error) {
+        throw new Error(`${sessionResponse.response.error.message} (${sessionResponse.response.error.code})`);
       }
-      return response.result as ToolResponse;
+      return {
+        response: sessionResponse.response.result as ToolResponse,
+        secretValue: sessionResponse.secretValue,
+      };
     } finally {
       await session.close();
     }
   }
-
-  private runGlovesRaw(args: string[]): string {
-    const command = spawnSync(
-      this.config.glovesBin,
-      ["--root", this.config.root, ...args],
-      {
-        cwd: this.config.cwd,
-        encoding: "utf8",
-      },
-    );
-    if (command.status !== 0) {
-      throw new Error(command.stderr || `gloves ${args.join(" ")} failed`);
-    }
-    return command.stdout;
-  }
 }
 
 class McpSession {
-  private readonly child: ReturnType<typeof spawn>;
-  private readonly lineReader: ReturnType<typeof createInterface>;
+  private readonly child: ReturnType<typeof spawn> | null;
+  private readonly socket: Socket | null;
+  private readonly output: NodeJS.WritableStream;
+  private readonly lineReader: BufferedLineReader;
   private readonly stderrChunks: string[] = [];
   private readonly config: SessionConfig;
+  private readonly sessionTokenOverridePath?: string;
 
-  private constructor(child: ReturnType<typeof spawn>, config: SessionConfig) {
-    if (!child.stdout || !child.stdin || !child.stderr) {
-      throw new Error("gloves-mcp did not expose stdio streams");
-    }
-    this.child = child;
-    this.config = config;
-    this.lineReader = createInterface({ input: child.stdout });
-    child.stderr.on("data", (chunk) => {
+  private constructor(options: {
+    child?: ReturnType<typeof spawn>;
+    socket?: Socket;
+    input: NodeJS.ReadableStream;
+    output: NodeJS.WritableStream;
+    stderr?: NodeJS.ReadableStream | null;
+    config: SessionConfig;
+    sessionTokenOverridePath?: string;
+  }) {
+    this.child = options.child ?? null;
+    this.socket = options.socket ?? null;
+    this.output = options.output;
+    this.config = options.config;
+    this.sessionTokenOverridePath = options.sessionTokenOverridePath;
+    this.lineReader = new BufferedLineReader(options.input);
+    options.stderr?.on("data", (chunk) => {
       this.stderrChunks.push(Buffer.from(chunk).toString("utf8"));
     });
   }
 
   static async start(config: SessionConfig): Promise<McpSession> {
-    const previousToken = readTokenFile(config.tokenPath);
-    const child = spawn(config.glovesMcpBin, ["--config", config.mcpConfigPath, "--agent", config.agentId], {
-      cwd: config.cwd,
-      env: { ...process.env, ...(config.env ?? {}) },
-      stdio: ["pipe", "pipe", "pipe"],
+    if (config.socketPath) {
+      return await McpSession.startSocket(config);
+    }
+    return await McpSession.startStdio(config);
+  }
+
+  private static async startSocket(config: SessionConfig): Promise<McpSession> {
+    const socket = createConnection(config.socketPath);
+    await waitForSocketConnection(socket, config.timeoutMs);
+    const session = new McpSession({
+      socket,
+      input: socket,
+      output: socket,
+      config,
     });
-    const session = new McpSession(child, config);
-    const token = await waitForFreshToken(config.tokenPath, previousToken, config.timeoutMs);
+    const token = await waitForToken(config.tokenPath, config.timeoutMs);
     const initializeResponse = await session.request({
       jsonrpc: "2.0",
       id: 1,
@@ -223,9 +248,9 @@ class McpSession {
         },
       },
     });
-    if (initializeResponse.error) {
+    if (initializeResponse.response.error) {
       await session.close();
-      throw new Error(`${initializeResponse.error.message} (${initializeResponse.error.code})`);
+      throw new Error(`${initializeResponse.response.error.message} (${initializeResponse.response.error.code})`);
     }
     session.write({
       jsonrpc: "2.0",
@@ -235,32 +260,121 @@ class McpSession {
     return session;
   }
 
-  async request(payload: Record<string, unknown>): Promise<JsonRpcResponse> {
+  private static async startStdio(config: SessionConfig): Promise<McpSession> {
+    const sessionTokenOverridePath = createStdioTokenPath(config.tokenPath);
+    const previousToken = readTokenFile(sessionTokenOverridePath);
+    const childArguments = ["--config", config.mcpConfigPath, "--agent", config.agentId, "--stdio"];
+    const child = spawn(config.glovesMcpBin, childArguments, {
+      cwd: config.cwd,
+      env: {
+        ...process.env,
+        ...(config.env ?? {}),
+        GLOVES_SESSION_TOKEN_PATH: sessionTokenOverridePath,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    if (!child.stdout || !child.stdin || !child.stderr) {
+      throw new Error("gloves-mcp did not expose stdio streams");
+    }
+    const session = new McpSession({
+      child,
+      input: child.stdout,
+      output: child.stdin,
+      stderr: child.stderr,
+      config,
+      sessionTokenOverridePath,
+    });
+    const token = await waitForFreshToken(sessionTokenOverridePath, previousToken, config.timeoutMs);
+    const initializeResponse = await session.request({
+      jsonrpc: "2.0",
+      id: 1,
+      method: INITIALIZE_METHOD,
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {
+          tools: {
+            listChanged: true,
+          },
+        },
+        clientInfo: {
+          name: "@gloves/client",
+          version: "0.1.0",
+        },
+        _meta: {
+          sessionToken: token,
+          agentId: config.agentId,
+        },
+      },
+    });
+    if (initializeResponse.response.error) {
+      await session.close();
+      throw new Error(`${initializeResponse.response.error.message} (${initializeResponse.response.error.code})`);
+    }
+    session.write({
+      jsonrpc: "2.0",
+      method: INITIALIZED_NOTIFICATION,
+      params: {},
+    });
+    return session;
+  }
+
+  async request(payload: Record<string, unknown>): Promise<SessionResponse> {
     this.write(payload);
-    return this.readResponse();
+    return this.readResponse(payload.id);
   }
 
   async close(): Promise<void> {
-    this.lineReader.close();
-    this.child.kill("SIGKILL");
-    await new Promise<void>((resolve) => {
-      this.child.once("exit", () => resolve());
-      setTimeout(resolve, 50);
-    });
+    this.lineReader.dispose();
+    if (this.child) {
+      this.child.kill("SIGKILL");
+      await new Promise<void>((resolve) => {
+        this.child?.once("exit", () => resolve());
+        setTimeout(resolve, 50);
+      });
+      if (this.sessionTokenOverridePath) {
+        rmSync(this.sessionTokenOverridePath, { force: true });
+      }
+      return;
+    }
+    if (this.socket) {
+      this.socket.end();
+      this.socket.destroy();
+    }
   }
 
   private write(payload: Record<string, unknown>): void {
-    this.child.stdin?.write(`${JSON.stringify(payload)}\n`);
+    this.output.write(`${JSON.stringify(payload)}\n`);
   }
 
-  private async readResponse(): Promise<JsonRpcResponse> {
-    const line = await readLine(this.lineReader, this.config.timeoutMs);
-    try {
-      return JSON.parse(line) as JsonRpcResponse;
-    } catch (error) {
-      throw new Error(formatSessionError(this.stderrChunks.join(""), error));
+  private async readResponse(requestId: unknown): Promise<SessionResponse> {
+    let secretValue: string | undefined;
+    while (true) {
+      const line = await readLine(this.lineReader, this.config.timeoutMs);
+      let message: JsonRpcResponse;
+      try {
+        message = JSON.parse(line) as JsonRpcResponse;
+      } catch (error) {
+        throw new Error(formatSessionError(this.stderrChunks.join(""), error));
+      }
+      if (message.method === SECRET_NOTIFICATION_METHOD) {
+        const params = message.params ?? {};
+        if (sameRequestId(params.requestId, requestId) && typeof params.value === "string") {
+          secretValue = params.value;
+        }
+        continue;
+      }
+      if (sameRequestId(message.id, requestId)) {
+        return {
+          response: message,
+          secretValue,
+        };
+      }
     }
   }
+}
+
+function sameRequestId(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function readTokenFile(tokenPath: string): string | null {
@@ -288,19 +402,35 @@ async function waitForFreshToken(
   throw new Error(`timed out waiting for session token at ${tokenPath}`);
 }
 
-async function readLine(
-  lineReader: ReturnType<typeof createInterface>,
-  timeoutMs: number,
-): Promise<string> {
-  return await Promise.race([
-    new Promise<string>((resolve, reject) => {
-      lineReader.once("line", resolve);
-      lineReader.once("close", () => reject(new Error("gloves-mcp closed before sending a response")));
+async function waitForToken(tokenPath: string, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const token = readTokenFile(tokenPath);
+    if (token) {
+      return token;
+    }
+    await Bun.sleep(25);
+  }
+  throw new Error(`timed out waiting for session token at ${tokenPath}`);
+}
+
+async function waitForSocketConnection(socket: Socket, timeoutMs: number): Promise<void> {
+  await Promise.race([
+    new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
     }),
-    new Promise<string>((_, reject) => {
-      setTimeout(() => reject(new Error("timed out waiting for gloves-mcp response")), timeoutMs);
+    new Promise<void>((_, reject) => {
+      setTimeout(() => reject(new Error("timed out connecting to gloves socket")), timeoutMs);
     }),
   ]);
+}
+
+async function readLine(
+  lineReader: BufferedLineReader,
+  timeoutMs: number,
+): Promise<string> {
+  return await lineReader.readLine(timeoutMs);
 }
 
 function normalizeMetadata(value: unknown): SecretMetadata {
@@ -328,8 +458,93 @@ function createSetEnvName(path: string): string {
   return `GLOVES_SET_${suffix}_${Date.now()}`;
 }
 
+function createStdioTokenPath(tokenPath: string): string {
+  return `${tokenPath}.stdio-${process.pid}-${Date.now()}`;
+}
+
 function formatSessionError(stderr: string, error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
   const details = stderr.trim();
   return details ? `${reason}: ${details}` : reason;
+}
+
+class BufferedLineReader {
+  private readonly input: NodeJS.ReadableStream;
+  private readonly lines: string[] = [];
+  private readonly waiters: Array<{
+    resolve: (line: string) => void;
+    reject: (error: Error) => void;
+  }> = [];
+  private buffer = "";
+  private closedError: Error | null = null;
+
+  constructor(input: NodeJS.ReadableStream) {
+    this.input = input;
+    input.on("data", this.handleData);
+    input.on("end", this.handleClose);
+    input.on("close", this.handleClose);
+    input.on("error", this.handleError);
+  }
+
+  async readLine(timeoutMs: number): Promise<string> {
+    if (this.lines.length > 0) {
+      return this.lines.shift()!;
+    }
+    if (this.closedError) {
+      throw this.closedError;
+    }
+
+    return await Promise.race([
+      new Promise<string>((resolve, reject) => {
+        this.waiters.push({ resolve, reject });
+      }),
+      new Promise<string>((_, reject) => {
+        setTimeout(() => reject(new Error("timed out waiting for gloves-mcp response")), timeoutMs);
+      }),
+    ]);
+  }
+
+  dispose(): void {
+    this.input.off("data", this.handleData);
+    this.input.off("end", this.handleClose);
+    this.input.off("close", this.handleClose);
+    this.input.off("error", this.handleError);
+  }
+
+  private readonly handleData = (chunk: string | Buffer): void => {
+    this.buffer += Buffer.from(chunk).toString("utf8");
+    while (this.buffer.includes("\n")) {
+      const newlineIndex = this.buffer.indexOf("\n");
+      const line = this.buffer.slice(0, newlineIndex).replace(/\r$/, "");
+      this.buffer = this.buffer.slice(newlineIndex + 1);
+      this.pushLine(line);
+    }
+  };
+
+  private readonly handleClose = (): void => {
+    this.closeWithError(new Error("gloves-mcp closed before sending a response"));
+  };
+
+  private readonly handleError = (error: Error): void => {
+    this.closeWithError(error);
+  };
+
+  private pushLine(line: string): void {
+    const waiter = this.waiters.shift();
+    if (waiter) {
+      waiter.resolve(line);
+      return;
+    }
+    this.lines.push(line);
+  }
+
+  private closeWithError(error: Error): void {
+    if (this.closedError) {
+      return;
+    }
+    this.closedError = error;
+    while (this.waiters.length > 0) {
+      this.waiters.shift()!.reject(error);
+    }
+  }
 }

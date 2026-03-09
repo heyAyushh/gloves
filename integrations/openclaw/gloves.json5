@@ -17,6 +17,7 @@
           gloves_get: { readOnlyHint: true, destructiveHint: false },
           gloves_set: { readOnlyHint: false, destructiveHint: false },
           gloves_delete: { readOnlyHint: false, destructiveHint: true },
+          gloves_approve: { readOnlyHint: false, destructiveHint: false },
           gloves_rotate: { readOnlyHint: false, destructiveHint: true }
         }
       }
@@ -29,6 +30,7 @@
         root: "~/.config/gloves",
         mcpConfigPath: "~/.config/gloves/gloves.toml",
         tokenPath: "~/.openclaw/gloves/session-token",
+        socketPath: "~/.openclaw/gloves/daemon.sock",
         injectMode: "env",
         tmpfsPath: "/run/secrets"
       }

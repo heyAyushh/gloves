@@ -24,7 +24,8 @@ describe("@gloves/client", () => {
       agentId: "devy",
       mcpConfigPath: fixture.mcpConfigPath,
       tokenPath: fixture.tokenPath,
-      glovesBin: fixture.glovesBin,
+      socketPath: fixture.socketPath,
+      glovesBin: "/definitely-unused-gloves-binary",
       glovesMcpBin: fixture.glovesMcpBin,
     });
 
@@ -48,6 +49,7 @@ describe("@gloves/client", () => {
       agentId: "devy",
       mcpConfigPath: fixture.mcpConfigPath,
       tokenPath: fixture.tokenPath,
+      socketPath: fixture.socketPath,
       glovesBin: fixture.glovesBin,
       glovesMcpBin: fixture.glovesMcpBin,
     });
@@ -65,7 +67,8 @@ describe("@gloves/client", () => {
       agentId: "devy",
       mcpConfigPath: fixture.mcpConfigPath,
       tokenPath: fixture.tokenPath,
-      glovesBin: fixture.glovesBin,
+      socketPath: fixture.socketPath,
+      glovesBin: "/definitely-unused-gloves-binary",
       glovesMcpBin: fixture.glovesMcpBin,
     });
 
@@ -73,5 +76,20 @@ describe("@gloves/client", () => {
     const secret = await client.get(fixture.secretPath);
     expect(secret.value).toBe(fixture.secretValue);
     expect(secret.metadata.agent).toBe("devy");
+  });
+
+  test("surfaces daemon policy errors for destructive delete requests", async () => {
+    fixture = createGlovesFixture();
+    const client = await GlovesClient.connect({
+      root: fixture.root,
+      agentId: "devy",
+      mcpConfigPath: fixture.mcpConfigPath,
+      tokenPath: fixture.tokenPath,
+      socketPath: fixture.socketPath,
+      glovesBin: "/definitely-unused-gloves-binary",
+      glovesMcpBin: fixture.glovesMcpBin,
+    });
+
+    await expect(client.delete(fixture.secretPath)).rejects.toThrow("Operation denied");
   });
 });

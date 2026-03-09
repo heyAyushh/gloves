@@ -16,8 +16,10 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
     assert!(contents.contains("root: \"~/.config/gloves\""));
     assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
+    assert!(contents.contains("socketPath: \"~/.openclaw/gloves/daemon.sock\""));
     assert!(contents.contains("GLOVES_SOCKET: \"/gloves.sock\""));
     assert!(contents.contains("GLOVES_TOKEN_PATH: \"/run/gloves/token\""));
+    assert!(contents.contains("gloves_approve"));
 }
 
 #[test]
@@ -27,6 +29,8 @@ fn gloves_openclaw_skill_teaches_redacted_and_pipe_first_workflow() {
     assert!(contents.contains("gloves show <path> --redacted"));
     assert!(contents.contains("gloves get <path> --format raw | <target-command>"));
     assert!(contents.contains("gloves set <path> --stdin"));
+    assert!(contents.contains("gloves_set"));
+    assert!(contents.contains("gloves_approve"));
     assert!(contents.contains("Never print, echo, or restate a secret value"));
 }
 

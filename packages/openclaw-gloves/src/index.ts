@@ -14,7 +14,10 @@ export interface PluginToolDefinition {
 export interface PluginAPI {
   agent: { id: string };
   sandbox: {
-    env: { set: (name: string, value: string) => void };
+    env: {
+      set: (name: string, value: string) => void;
+      get?: (name: string) => string | undefined;
+    };
     writeFile?: (path: string, contents: string, options?: { mode?: number }) => Promise<void> | void;
   };
   registerTool: (name: string, definition: PluginToolDefinition) => void;
@@ -94,6 +97,64 @@ export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin
         },
       });
 
+      api.registerTool("gloves_set", {
+        description: "Store a secret from an existing environment variable without exposing the value.",
+        parameters: {
+          path: { type: "string", required: true },
+          from_env: { type: "string", required: true },
+        },
+        handler: async ({ path, from_env }) => {
+          const secretPath = expectString(path, "path");
+          const envName = expectString(from_env, "from_env");
+          const secretValue = resolveSecretValue(api, envName);
+          await client.set(secretPath, secretValue);
+          return {
+            success: true,
+            stored: true,
+            path: secretPath,
+            from_env: envName,
+            length: secretValue.length,
+            message: `Secret '${secretPath}' stored from ${envName}`,
+          };
+        },
+      });
+
+      api.registerTool("gloves_approve", {
+        description: "Approve or deny a pending secret-access request.",
+        parameters: {
+          request_id: { type: "string", required: true },
+          decision: { type: "string", required: true },
+          reason: { type: "string", required: false },
+        },
+        handler: async ({ request_id, decision, reason }) => {
+          const requestId = expectString(request_id, "request_id");
+          const parsedDecision = expectDecision(decision);
+          const parsedReason = typeof reason === "string" && reason.length > 0 ? reason : undefined;
+          await client.approve(requestId, parsedDecision, parsedReason);
+          return {
+            success: true,
+            request_id: requestId,
+            decision: parsedDecision,
+          };
+        },
+      });
+
+      api.registerTool("gloves_delete", {
+        description: "Attempt to delete a secret. The daemon denies destructive operations by policy.",
+        parameters: {
+          path: { type: "string", required: true },
+        },
+        handler: async ({ path }) => {
+          const secretPath = expectString(path, "path");
+          await client.delete(secretPath);
+          return {
+            success: true,
+            deleted: true,
+            path: secretPath,
+          };
+        },
+      });
+
       api.registerTool("gloves_rotate", {
         description: "Rotate the current agent identity and re-encrypt affected secrets.",
         parameters: {
@@ -134,6 +195,30 @@ function expectString(value: unknown, fieldName: string): string {
     throw new Error(`tool argument '${fieldName}' must be a non-empty string`);
   }
   return value;
+}
+
+function expectDecision(value: unknown): "approve" | "deny" {
+  const decision = expectString(value, "decision");
+  if (decision === "approve" || decision === "deny") {
+    return decision;
+  }
+  throw new Error("tool argument 'decision' must be 'approve' or 'deny'");
+}
+
+function resolveSecretValue(api: PluginAPI, envName: string): string {
+  const sandboxValue = api.sandbox.env.get?.(envName);
+  if (typeof sandboxValue === "string") {
+    return sandboxValue;
+  }
+
+  const hostValue = process.env[envName];
+  if (typeof hostValue === "string") {
+    return hostValue;
+  }
+
+  throw new Error(
+    `secret source '${envName}' is not available via sandbox.env.get or process.env`,
+  );
 }
 
 function validatePluginConfig(config: GlovesPluginConfig, api: PluginAPI): void {

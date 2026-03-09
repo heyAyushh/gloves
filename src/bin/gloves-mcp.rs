@@ -1,13 +1,18 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
+    net::{TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     process::Command as ProcessCommand,
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration as StdDuration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::net::{UnixListener, UnixStream};
 
 use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
@@ -46,6 +51,7 @@ const TOOLS_LIST_METHOD: &str = "tools/list";
 const TOOLS_CALL_METHOD: &str = "tools/call";
 const INITIALIZE_METHOD: &str = "initialize";
 const INITIALIZED_NOTIFICATION_METHOD: &str = "notifications/initialized";
+const SECRET_NOTIFICATION_METHOD: &str = "gloves/secret";
 const GLOVES_LIST_TOOL: &str = "gloves_list";
 const GLOVES_SHOW_TOOL: &str = "gloves_show";
 const GLOVES_GET_TOOL: &str = "gloves_get";
@@ -59,6 +65,10 @@ const STORE_SECTION_DEFAULT: &str = "store";
 const IDENTITIES_SECTION_DEFAULT: &str = "identities";
 const AUDIT_SECTION_DEFAULT: &str = "audit";
 const GLOVES_BINARY_NAME: &str = "gloves";
+const DEFAULT_METRICS_BIND_ADDRESS: &str = "127.0.0.1:7789";
+const METRICS_RESPONSE_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+
+static METRICS_STATE: OnceLock<Arc<MetricsState>> = OnceLock::new();
 
 #[derive(Debug, Parser)]
 #[command(
@@ -73,6 +83,9 @@ struct Cli {
     /// Fallback agent id when initialize metadata omits `agentId`.
     #[arg(long)]
     agent: Option<String>,
+    /// Force stdio request handling even when daemon.socket_path is configured.
+    #[arg(long, default_value_t = false)]
+    stdio: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,6 +103,9 @@ struct McpConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct DaemonSection {
     session_token_path: Option<String>,
+    socket_path: Option<String>,
+    #[serde(default)]
+    metrics: DaemonMetricsSection,
     #[serde(default)]
     approval: DaemonApprovalSection,
 }
@@ -98,6 +114,12 @@ struct DaemonSection {
 struct DaemonApprovalSection {
     default_channel: Option<String>,
     timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DaemonMetricsSection {
+    enabled: Option<bool>,
+    bind: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -116,6 +138,8 @@ struct ResolvedConfig {
     identities_path: PathBuf,
     audit_path: PathBuf,
     session_token_path: PathBuf,
+    socket_path: Option<PathBuf>,
+    metrics_bind: Option<String>,
     approval_channel: ApprovalChannel,
     approval_timeout_seconds: u64,
 }
@@ -228,6 +252,12 @@ struct GetSecretResult {
     approval_status: &'static str,
 }
 
+#[derive(Debug)]
+struct DecryptedSecretResult {
+    metadata: GetSecretResult,
+    value: String,
+}
+
 #[derive(Debug, Serialize)]
 struct SetSecretResult {
     path: String,
@@ -261,6 +291,101 @@ struct AuditRecord<'a> {
     error: Option<&'a str>,
 }
 
+#[derive(Debug)]
+struct ToolExecutionResult {
+    payload: Value,
+    secret_value: Option<String>,
+    secret_path: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct MetricsSnapshot {
+    secret_access_totals: BTreeMap<(String, String, String), u64>,
+    approval_latency_observations: Vec<(String, String, f64)>,
+    encryption_ops_totals: BTreeMap<String, u64>,
+}
+
+#[derive(Debug)]
+struct MetricsState {
+    started_at: Instant,
+    snapshot: Mutex<MetricsSnapshot>,
+}
+
+impl MetricsState {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            snapshot: Mutex::new(MetricsSnapshot::default()),
+        }
+    }
+
+    fn record_secret_access(&self, agent: &str, path: &str, result: &str) {
+        let mut snapshot = self.snapshot.lock().expect("metrics mutex poisoned");
+        *snapshot
+            .secret_access_totals
+            .entry((agent.to_owned(), path.to_owned(), result.to_owned()))
+            .or_insert(0) += 1;
+    }
+
+    fn record_approval_latency(&self, agent: &str, channel: &str, latency_seconds: f64) {
+        let mut snapshot = self.snapshot.lock().expect("metrics mutex poisoned");
+        snapshot.approval_latency_observations.push((
+            agent.to_owned(),
+            channel.to_owned(),
+            latency_seconds,
+        ));
+    }
+
+    fn record_encryption_op(&self, operation: &str) {
+        let mut snapshot = self.snapshot.lock().expect("metrics mutex poisoned");
+        *snapshot
+            .encryption_ops_totals
+            .entry(operation.to_owned())
+            .or_insert(0) += 1;
+    }
+
+    fn render_prometheus(&self) -> String {
+        let snapshot = self.snapshot.lock().expect("metrics mutex poisoned");
+        let mut lines = Vec::new();
+        lines.push(
+            "# HELP gloves_secret_access_total Count of secret access attempts by outcome.\n# TYPE gloves_secret_access_total counter".to_owned(),
+        );
+        for ((agent, path, result), count) in &snapshot.secret_access_totals {
+            lines.push(format!(
+                "gloves_secret_access_total{{agent=\"{}\",path=\"{}\",result=\"{}\"}} {count}",
+                escape_metric_label(agent),
+                escape_metric_label(path),
+                escape_metric_label(result),
+            ));
+        }
+
+        lines.push(
+            "# HELP gloves_approval_latency_seconds Approval latency histogram.\n# TYPE gloves_approval_latency_seconds histogram".to_owned(),
+        );
+        append_approval_histogram_lines(&mut lines, &snapshot.approval_latency_observations);
+
+        lines.push(
+            "# HELP gloves_daemon_uptime_seconds Daemon uptime in seconds.\n# TYPE gloves_daemon_uptime_seconds gauge".to_owned(),
+        );
+        lines.push(format!(
+            "gloves_daemon_uptime_seconds {:.3}",
+            self.started_at.elapsed().as_secs_f64()
+        ));
+
+        lines.push(
+            "# HELP gloves_encryption_ops_total Count of encryption and decryption operations.\n# TYPE gloves_encryption_ops_total counter".to_owned(),
+        );
+        for (operation, count) in &snapshot.encryption_ops_totals {
+            lines.push(format!(
+                "gloves_encryption_ops_total{{operation=\"{}\"}} {count}",
+                escape_metric_label(operation),
+            ));
+        }
+
+        lines.join("\n") + "\n"
+    }
+}
+
 fn main() {
     if let Err(error) = run() {
         let _ = writeln!(io::stderr(), "{error}");
@@ -271,8 +396,12 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let config = ResolvedConfig::load(&cli.config)?;
+    let metrics_state = METRICS_STATE
+        .get_or_init(|| Arc::new(MetricsState::new()))
+        .clone();
     ensure_private_dir(&config.audit_path)?;
     let session_token = write_session_token(&config.session_token_path)?;
+    start_metrics_server_if_enabled(&config, metrics_state)?;
     append_audit_record(
         &config,
         AuditRecord {
@@ -286,6 +415,10 @@ fn run() -> Result<()> {
             error: None,
         },
     )?;
+
+    if config.socket_path.is_some() && !cli.stdio {
+        return run_socket_server(&config, &session_token, cli.agent.as_deref());
+    }
 
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -302,7 +435,7 @@ fn run() -> Result<()> {
         None => return Ok(()),
     };
 
-    serve_session(&mut reader, &mut writer, &config, &session)
+    serve_session(&mut reader, &mut writer, &config, &session, false)
 }
 
 impl ResolvedConfig {
@@ -339,6 +472,8 @@ impl ResolvedConfig {
             None,
             "daemon.session_token_path",
         )?;
+        let socket_path =
+            resolve_optional_config_path(parsed.daemon.socket_path.as_deref(), config_dir)?;
         let approval_channel = ApprovalChannel::parse(
             parsed
                 .daemon
@@ -352,16 +487,243 @@ impl ResolvedConfig {
             .approval
             .timeout_seconds
             .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECONDS);
+        let metrics_bind = if parsed.daemon.metrics.enabled.unwrap_or(false) {
+            Some(
+                parsed
+                    .daemon
+                    .metrics
+                    .bind
+                    .unwrap_or_else(|| DEFAULT_METRICS_BIND_ADDRESS.to_owned()),
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             store_path,
             identities_path,
             audit_path,
             session_token_path,
+            socket_path,
+            metrics_bind,
             approval_channel,
             approval_timeout_seconds,
         })
     }
+}
+
+#[cfg(unix)]
+fn run_socket_server(
+    config: &ResolvedConfig,
+    session_token: &str,
+    fallback_agent: Option<&str>,
+) -> Result<()> {
+    let socket_path = config.socket_path.as_ref().ok_or_else(|| {
+        GlovesError::InvalidInput("daemon.socket_path is required for socket mode".to_owned())
+    })?;
+    if let Some(parent) = socket_path.parent() {
+        ensure_private_dir(parent)?;
+    }
+    if socket_path.exists() {
+        fs::remove_file(socket_path)?;
+    }
+    let listener = UnixListener::bind(socket_path)?;
+    let fallback_agent = fallback_agent.map(str::to_owned);
+    for stream in listener.incoming() {
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => return Err(GlovesError::Io(error)),
+        };
+        let connection_config = config.clone();
+        let connection_token = session_token.to_owned();
+        let connection_agent = fallback_agent.clone();
+        thread::spawn(move || {
+            let _ = handle_socket_connection(
+                stream,
+                &connection_config,
+                &connection_token,
+                connection_agent.as_deref(),
+            );
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn run_socket_server(
+    _config: &ResolvedConfig,
+    _session_token: &str,
+    _fallback_agent: Option<&str>,
+) -> Result<()> {
+    Err(GlovesError::InvalidInput(
+        "daemon.socket_path is only supported on unix platforms".to_owned(),
+    ))
+}
+
+fn start_metrics_server_if_enabled(
+    config: &ResolvedConfig,
+    metrics_state: Arc<MetricsState>,
+) -> Result<()> {
+    let Some(bind_address) = config.metrics_bind.clone() else {
+        return Ok(());
+    };
+    thread::spawn(move || {
+        let listener = match TcpListener::bind(&bind_address) {
+            Ok(listener) => listener,
+            Err(error) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "failed to bind metrics endpoint at {bind_address}: {error}"
+                );
+                return;
+            }
+        };
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else {
+                continue;
+            };
+            if let Err(error) = write_metrics_response(&mut stream, &metrics_state) {
+                let _ = writeln!(io::stderr(), "failed to serve metrics: {error}");
+            }
+        }
+    });
+    Ok(())
+}
+
+fn write_metrics_response(stream: &mut TcpStream, metrics_state: &MetricsState) -> Result<()> {
+    let mut request_reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    request_reader.read_line(&mut request_line)?;
+    let status_line = if request_line.starts_with("GET /metrics ") {
+        "HTTP/1.1 200 OK"
+    } else {
+        "HTTP/1.1 404 Not Found"
+    };
+    let body = if status_line.ends_with("200 OK") {
+        metrics_state.render_prometheus()
+    } else {
+        "not found\n".to_owned()
+    };
+    write!(
+        stream,
+        "{status_line}\r\nContent-Type: {METRICS_RESPONSE_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn escape_metric_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+const APPROVAL_HISTOGRAM_BUCKETS: [f64; 8] = [0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 120.0];
+
+fn append_approval_histogram_lines(
+    lines: &mut Vec<String>,
+    observations: &[(String, String, f64)],
+) {
+    let mut grouped = BTreeMap::<(String, String), Vec<f64>>::new();
+    for (agent, channel, latency_seconds) in observations {
+        grouped
+            .entry((agent.clone(), channel.clone()))
+            .or_default()
+            .push(*latency_seconds);
+    }
+
+    for ((agent, channel), samples) in grouped {
+        let sum: f64 = samples.iter().sum();
+        for bucket in APPROVAL_HISTOGRAM_BUCKETS {
+            let cumulative_count = samples.iter().filter(|value| **value <= bucket).count();
+            lines.push(format!(
+                "gloves_approval_latency_seconds_bucket{{agent=\"{}\",channel=\"{}\",le=\"{}\"}} {}",
+                escape_metric_label(&agent),
+                escape_metric_label(&channel),
+                bucket,
+                cumulative_count,
+            ));
+        }
+        lines.push(format!(
+            "gloves_approval_latency_seconds_bucket{{agent=\"{}\",channel=\"{}\",le=\"+Inf\"}} {}",
+            escape_metric_label(&agent),
+            escape_metric_label(&channel),
+            samples.len(),
+        ));
+        lines.push(format!(
+            "gloves_approval_latency_seconds_sum{{agent=\"{}\",channel=\"{}\"}} {:.6}",
+            escape_metric_label(&agent),
+            escape_metric_label(&channel),
+            sum,
+        ));
+        lines.push(format!(
+            "gloves_approval_latency_seconds_count{{agent=\"{}\",channel=\"{}\"}} {}",
+            escape_metric_label(&agent),
+            escape_metric_label(&channel),
+            samples.len(),
+        ));
+    }
+}
+
+fn record_secret_access_metric(agent: &str, path: &str, result: &str) {
+    if let Some(metrics_state) = METRICS_STATE.get() {
+        metrics_state.record_secret_access(agent, path, result);
+    }
+}
+
+fn record_approval_latency_metric(agent: &str, channel: &str, latency_seconds: f64) {
+    if let Some(metrics_state) = METRICS_STATE.get() {
+        metrics_state.record_approval_latency(agent, channel, latency_seconds);
+    }
+}
+
+fn record_encryption_operation_metric(operation: &str) {
+    if let Some(metrics_state) = METRICS_STATE.get() {
+        metrics_state.record_encryption_op(operation);
+    }
+}
+
+fn secret_access_result_label(error: &GlovesError) -> &'static str {
+    match error {
+        GlovesError::Unauthorized => "denied",
+        GlovesError::NotFound => "not_found",
+        GlovesError::Forbidden => "denied",
+        GlovesError::Expired => "expired",
+        GlovesError::AlreadyExists => "error",
+        GlovesError::Validation(_)
+        | GlovesError::Io(_)
+        | GlovesError::Serde(_)
+        | GlovesError::Utf8(_)
+        | GlovesError::Crypto(_)
+        | GlovesError::InvalidInput(_)
+        | GlovesError::IntegrityViolation
+        | GlovesError::GpgDenied => "error",
+    }
+}
+
+#[cfg(unix)]
+fn handle_socket_connection(
+    stream: UnixStream,
+    config: &ResolvedConfig,
+    session_token: &str,
+    fallback_agent: Option<&str>,
+) -> Result<()> {
+    let reader_stream = stream.try_clone()?;
+    let mut reader = BufReader::new(reader_stream);
+    let mut writer = stream;
+    let session = match authenticate_session(
+        &mut reader,
+        &mut writer,
+        config,
+        session_token,
+        fallback_agent,
+    )? {
+        Some(session) => session,
+        None => return Ok(()),
+    };
+    serve_session(&mut reader, &mut writer, config, &session, true)
 }
 
 impl ApprovalChannel {
@@ -373,6 +735,14 @@ impl ApprovalChannel {
             other => Err(GlovesError::InvalidInput(format!(
                 "unsupported approval channel `{other}`"
             ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Tty => "tty",
+            Self::Webhook => "webhook",
         }
     }
 }
@@ -494,6 +864,7 @@ fn serve_session<R, W>(
     writer: &mut W,
     config: &ResolvedConfig,
     session: &SessionContext,
+    allow_secret_notifications: bool,
 ) -> Result<()>
 where
     R: BufRead,
@@ -519,7 +890,22 @@ where
             TOOLS_CALL_METHOD => {
                 let response = handle_tool_call(config, session, request.get("params"));
                 match response {
-                    Ok(result) => write_result_response(writer, request_id, result)?,
+                    Ok(result) => {
+                        if allow_secret_notifications {
+                            if let (Some(secret_value), Some(secret_path)) = (
+                                result.secret_value.as_deref(),
+                                result.secret_path.as_deref(),
+                            ) {
+                                write_secret_notification(
+                                    writer,
+                                    request_id.clone(),
+                                    secret_path,
+                                    secret_value,
+                                )?;
+                            }
+                        }
+                        write_result_response(writer, request_id, result.payload)?
+                    }
                     Err((code, message, data)) => {
                         write_error_response(writer, request_id, code, message, data)?
                     }
@@ -544,7 +930,7 @@ fn handle_tool_call(
     config: &ResolvedConfig,
     session: &SessionContext,
     params: Option<&Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let params = params
         .and_then(Value::as_object)
         .ok_or_else(|| invalid_params_error("tool call params must be an object"))?;
@@ -578,7 +964,7 @@ fn handle_list_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let prefix = optional_string_argument(arguments, "prefix")?;
     let secrets =
         list_visible_secret_names(config, session, prefix.as_deref()).map_err(map_runtime_error)?;
@@ -601,18 +987,22 @@ fn handle_list_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!("Listed {} visible secrets", payload.count),
-        serde_json::to_value(payload)
-            .map_err(|_| internal_error("failed to serialize list result"))?,
-    ))
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!("Listed {} visible secrets", payload.count),
+            serde_json::to_value(payload)
+                .map_err(|_| internal_error("failed to serialize list result"))?,
+        ),
+        secret_value: None,
+        secret_path: None,
+    })
 }
 
 fn handle_show_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let path = required_string_argument(arguments, "path")?;
     let show_result = show_secret(config, &path).map_err(map_runtime_error)?;
     append_audit_record(
@@ -630,21 +1020,39 @@ fn handle_show_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!("Metadata for `{path}` loaded"),
-        serde_json::to_value(show_result)
-            .map_err(|_| internal_error("failed to serialize show result"))?,
-    ))
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!("Metadata for `{path}` loaded"),
+            serde_json::to_value(show_result)
+                .map_err(|_| internal_error("failed to serialize show result"))?,
+        ),
+        secret_value: None,
+        secret_path: None,
+    })
 }
 
 fn handle_get_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let path = required_string_argument(arguments, "path")?;
     let approval = resolve_approval(config, session, GLOVES_GET_TOOL, &path)?;
-    let get_result = get_secret(config, session, &path, approval).map_err(map_runtime_error)?;
+    let get_result = match get_secret(config, session, &path, approval) {
+        Ok(result) => {
+            record_secret_access_metric(session.agent_id.as_str(), &path, "approved");
+            record_encryption_operation_metric("decrypt");
+            result
+        }
+        Err(error) => {
+            record_secret_access_metric(
+                session.agent_id.as_str(),
+                &path,
+                secret_access_result_label(&error),
+            );
+            return Err(map_runtime_error(error));
+        }
+    };
     append_audit_record(
         config,
         AuditRecord {
@@ -660,21 +1068,25 @@ fn handle_get_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!(
-            "Secret '{}' ({} chars) injected as {}",
-            get_result.path, get_result.secret_length, path
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!(
+                "Secret '{}' ({} chars) injected as {}",
+                get_result.metadata.path, get_result.metadata.secret_length, path
+            ),
+            serde_json::to_value(&get_result.metadata)
+                .map_err(|_| internal_error("failed to serialize get result"))?,
         ),
-        serde_json::to_value(get_result)
-            .map_err(|_| internal_error("failed to serialize get result"))?,
-    ))
+        secret_value: Some(get_result.value),
+        secret_path: Some(path),
+    })
 }
 
 fn handle_set_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let path = required_string_argument(arguments, "path")?;
     let from_env = required_string_argument(arguments, "from_env")?;
     let approval = resolve_approval(config, session, GLOVES_SET_TOOL, &path)?;
@@ -685,6 +1097,7 @@ fn handle_set_tool(
     })?;
     let set_result = set_secret_value(config, session, &path, secret_value.as_bytes(), approval)
         .map_err(map_runtime_error)?;
+    record_encryption_operation_metric("encrypt");
     append_audit_record(
         config,
         AuditRecord {
@@ -700,18 +1113,22 @@ fn handle_set_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!("Stored secret `{path}`"),
-        serde_json::to_value(set_result)
-            .map_err(|_| internal_error("failed to serialize set result"))?,
-    ))
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!("Stored secret `{path}`"),
+            serde_json::to_value(set_result)
+                .map_err(|_| internal_error("failed to serialize set result"))?,
+        ),
+        secret_value: None,
+        secret_path: None,
+    })
 }
 
 fn handle_delete_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let path = required_string_argument(arguments, "path")?;
     resolve_approval(config, session, GLOVES_DELETE_TOOL, &path)?;
     Err((
@@ -725,7 +1142,7 @@ fn handle_approve_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let request_id = required_string_argument(arguments, "request_id")?;
     let decision = required_string_argument(arguments, "decision")?;
     let parsed_request_id = request_id
@@ -765,22 +1182,26 @@ fn handle_approve_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!("Request `{request_id}` {decision}d"),
-        serde_json::to_value(ApprovalResult {
-            request_id,
-            decision,
-            reviewer: session.agent_id.as_str().to_owned(),
-        })
-        .map_err(|_| internal_error("failed to serialize approval result"))?,
-    ))
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!("Request `{request_id}` {decision}d"),
+            serde_json::to_value(ApprovalResult {
+                request_id,
+                decision,
+                reviewer: session.agent_id.as_str().to_owned(),
+            })
+            .map_err(|_| internal_error("failed to serialize approval result"))?,
+        ),
+        secret_value: None,
+        secret_path: None,
+    })
 }
 
 fn handle_rotate_tool(
     config: &ResolvedConfig,
     session: &SessionContext,
     arguments: &Map<String, Value>,
-) -> std::result::Result<Value, (i64, &'static str, Value)> {
+) -> std::result::Result<ToolExecutionResult, (i64, &'static str, Value)> {
     let agent_id = required_string_argument(arguments, "agent_id")?;
     if agent_id != session.agent_id.as_str() {
         return Err((
@@ -791,6 +1212,7 @@ fn handle_rotate_tool(
     }
     let approval = resolve_approval(config, session, GLOVES_ROTATE_TOOL, &agent_id)?;
     run_gloves_rotate(config, &agent_id).map_err(map_runtime_error)?;
+    record_encryption_operation_metric("rotate");
     append_audit_record(
         config,
         AuditRecord {
@@ -806,14 +1228,18 @@ fn handle_rotate_tool(
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
 
-    Ok(tool_success_response(
-        format!("Rotated identity `{agent_id}`"),
-        serde_json::to_value(RotateAgentResult {
-            agent: agent_id,
-            approval_status: approval.status,
-        })
-        .map_err(|_| internal_error("failed to serialize rotate result"))?,
-    ))
+    Ok(ToolExecutionResult {
+        payload: tool_success_response(
+            format!("Rotated identity `{agent_id}`"),
+            serde_json::to_value(RotateAgentResult {
+                agent: agent_id,
+                approval_status: approval.status,
+            })
+            .map_err(|_| internal_error("failed to serialize rotate result"))?,
+        ),
+        secret_value: None,
+        secret_path: None,
+    })
 }
 
 fn get_secret(
@@ -821,7 +1247,7 @@ fn get_secret(
     session: &SessionContext,
     path: &str,
     approval: ApprovalResolution,
-) -> Result<GetSecretResult> {
+) -> Result<DecryptedSecretResult> {
     let secret_id = SecretId::new(path)?;
     let mut metadata = read_secret_metadata(config, secret_id.as_str())?;
     if !metadata
@@ -836,17 +1262,21 @@ fn get_secret(
         &secret_ciphertext_path(config, secret_id.as_str()),
         &identity_path(config, &session.agent_id),
     )?;
+    let value = String::from_utf8(plaintext)?;
     let accessed_at = Utc::now();
     metadata.last_accessed = Some(accessed_at);
     write_secret_metadata(config, secret_id.as_str(), &metadata)?;
 
-    Ok(GetSecretResult {
-        path: secret_id.as_str().to_owned(),
-        agent: session.agent_id.as_str().to_owned(),
-        injected: true,
-        inject_method: "env",
-        secret_length: plaintext.len(),
-        approval_status: approval.status,
+    Ok(DecryptedSecretResult {
+        metadata: GetSecretResult {
+            path: secret_id.as_str().to_owned(),
+            agent: session.agent_id.as_str().to_owned(),
+            injected: true,
+            inject_method: "env",
+            secret_length: value.len(),
+            approval_status: approval.status,
+        },
+        value,
     })
 }
 
@@ -1021,6 +1451,7 @@ fn wait_for_external_approval(
     tool_name: &str,
     path: &str,
 ) -> std::result::Result<ApprovalResolution, (i64, &'static str, Value)> {
+    let requested_at = Instant::now();
     let store = pending_request_store(config).map_err(map_runtime_error)?;
     let signing_key = generate_signing_key();
     let request = store
@@ -1064,9 +1495,19 @@ fn wait_for_external_approval(
         if let Some(pending_request) = requests.into_iter().find(|entry| entry.id == request.id) {
             match pending_request.status {
                 RequestStatus::Fulfilled => {
+                    record_approval_latency_metric(
+                        session.agent_id.as_str(),
+                        config.approval_channel.as_str(),
+                        requested_at.elapsed().as_secs_f64(),
+                    );
                     return Ok(ApprovalResolution { status: "approved" });
                 }
                 RequestStatus::Denied => {
+                    record_approval_latency_metric(
+                        session.agent_id.as_str(),
+                        config.approval_channel.as_str(),
+                        requested_at.elapsed().as_secs_f64(),
+                    );
                     return Err((
                         APPROVAL_DENIED_CODE,
                         "Approval denied",
@@ -1074,6 +1515,11 @@ fn wait_for_external_approval(
                     ));
                 }
                 RequestStatus::Expired => {
+                    record_approval_latency_metric(
+                        session.agent_id.as_str(),
+                        config.approval_channel.as_str(),
+                        requested_at.elapsed().as_secs_f64(),
+                    );
                     return Err((
                         APPROVAL_TIMEOUT_CODE,
                         "Approval timeout",
@@ -1085,6 +1531,11 @@ fn wait_for_external_approval(
         }
 
         if Instant::now() >= deadline {
+            record_approval_latency_metric(
+                session.agent_id.as_str(),
+                config.approval_channel.as_str(),
+                requested_at.elapsed().as_secs_f64(),
+            );
             return Err((
                 APPROVAL_TIMEOUT_CODE,
                 "Approval timeout",
@@ -1375,6 +1826,15 @@ fn resolve_config_path(
     Ok(config_dir.join(path))
 }
 
+fn resolve_optional_config_path(
+    configured_value: Option<&str>,
+    config_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    configured_value
+        .map(|value| resolve_config_path(Some(value), config_dir, None, "optional.path"))
+        .transpose()
+}
+
 fn expand_tilde(value: &str) -> Result<String> {
     if value == "~" {
         return env::var(HOME_ENV_VAR)
@@ -1446,6 +1906,29 @@ where
             "jsonrpc": JSON_RPC_VERSION,
             "id": request_id,
             "result": result
+        }),
+    )
+}
+
+fn write_secret_notification<W>(
+    writer: &mut W,
+    request_id: Value,
+    path: &str,
+    value: &str,
+) -> Result<()>
+where
+    W: Write,
+{
+    write_json_line(
+        writer,
+        json!({
+            "jsonrpc": JSON_RPC_VERSION,
+            "method": SECRET_NOTIFICATION_METHOD,
+            "params": {
+                "requestId": request_id,
+                "path": path,
+                "value": value
+            }
         }),
     )
 }
@@ -1804,6 +2287,8 @@ mod tests {
                 identities_path: root.join("identities"),
                 audit_path: root.join("audit"),
                 session_token_path: temp.path().join("session-token"),
+                socket_path: None,
+                metrics_bind: None,
                 approval_channel: ApprovalChannel::Auto,
                 approval_timeout_seconds: DEFAULT_APPROVAL_TIMEOUT_SECONDS,
             };
@@ -1967,8 +2452,8 @@ mod tests {
             ApprovalResolution { status: "auto" },
         )
         .unwrap();
-        assert_eq!(get_result.path, TEST_SECRET_PATH);
-        assert_eq!(get_result.secret_length, TEST_SECRET_VALUE.len());
+        assert_eq!(get_result.metadata.path, TEST_SECRET_PATH);
+        assert_eq!(get_result.metadata.secret_length, TEST_SECRET_VALUE.len());
 
         let metadata = read_secret_metadata(&harness.config, TEST_SECRET_PATH).unwrap();
         assert!(metadata.last_accessed.is_some());
@@ -2007,7 +2492,7 @@ mod tests {
             })),
         )
         .unwrap();
-        assert_eq!(list_response["structuredContent"]["count"], 1);
+        assert_eq!(list_response.payload["structuredContent"]["count"], 1);
 
         let show_response = handle_tool_call(
             &harness.config,
@@ -2018,7 +2503,10 @@ mod tests {
             })),
         )
         .unwrap();
-        assert_eq!(show_response["structuredContent"]["name"], TEST_SECRET_PATH);
+        assert_eq!(
+            show_response.payload["structuredContent"]["name"],
+            TEST_SECRET_PATH
+        );
 
         let get_response = handle_tool_call(
             &harness.config,
@@ -2029,7 +2517,7 @@ mod tests {
             })),
         )
         .unwrap();
-        let content_text = get_response["content"][0]["text"].as_str().unwrap();
+        let content_text = get_response.payload["content"][0]["text"].as_str().unwrap();
         assert!(content_text.contains("injected"));
         assert!(!content_text.contains(TEST_SECRET_VALUE));
     }
