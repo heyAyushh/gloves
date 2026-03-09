@@ -1680,6 +1680,7 @@ fn post_json_over_https(url: &str, body: &[u8], signature: Option<&str>) -> Resu
     )))
 }
 
+#[derive(Debug)]
 struct ParsedHttpUrl {
     host: String,
     port: u16,
@@ -2722,6 +2723,133 @@ mod tests {
         assert!(args.contains("X-Gloves-Signature: sha256=test-signature"));
         assert!(args.contains("https://hooks.example.test/approve"));
         assert_eq!(fs::read(body_path).unwrap(), body);
+    }
+
+    #[test]
+    fn approval_tier_matches_current_tool_policy() {
+        assert_eq!(approval_tier_for_tool(GLOVES_LIST_TOOL), ApprovalTier::Auto);
+        assert_eq!(approval_tier_for_tool(GLOVES_SHOW_TOOL), ApprovalTier::Auto);
+        assert_eq!(
+            approval_tier_for_tool(GLOVES_APPROVE_TOOL),
+            ApprovalTier::Auto
+        );
+        assert_eq!(approval_tier_for_tool(GLOVES_GET_TOOL), ApprovalTier::Human);
+        assert_eq!(approval_tier_for_tool(GLOVES_SET_TOOL), ApprovalTier::Human);
+        assert_eq!(
+            approval_tier_for_tool(GLOVES_ROTATE_TOOL),
+            ApprovalTier::Human
+        );
+        assert_eq!(
+            approval_tier_for_tool(GLOVES_DELETE_TOOL),
+            ApprovalTier::Deny
+        );
+        assert_eq!(approval_tier_for_tool("gloves_unknown"), ApprovalTier::Deny);
+    }
+
+    #[test]
+    fn parse_http_url_supports_default_and_explicit_ports() {
+        let default_port = parse_http_url("http://localhost/path/to/hook").unwrap();
+        assert_eq!(default_port.host, "localhost");
+        assert_eq!(default_port.port, 80);
+        assert_eq!(default_port.path, "/path/to/hook");
+
+        let explicit_port = parse_http_url("http://127.0.0.1:7789/api/v1/approve").unwrap();
+        assert_eq!(explicit_port.host, "127.0.0.1");
+        assert_eq!(explicit_port.port, 7789);
+        assert_eq!(explicit_port.path, "/api/v1/approve");
+    }
+
+    #[test]
+    fn parse_http_url_rejects_https_scheme() {
+        let error = parse_http_url("https://hooks.example.test/approve").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("only http:// webhook urls are supported"));
+    }
+
+    #[test]
+    fn webhook_signature_handles_optional_secret() {
+        let body = br#"{"event":"approval_request"}"#;
+        assert_eq!(webhook_signature(None, body).unwrap(), "");
+
+        let signature = webhook_signature(Some("test-secret"), body).unwrap();
+        assert!(signature.starts_with("sha256="));
+        assert_eq!(signature.len(), "sha256=".len() + 64);
+    }
+
+    #[test]
+    fn metrics_state_renders_prometheus_series() {
+        let metrics = MetricsState::new();
+        metrics.record_secret_access(TEST_AGENT, TEST_SECRET_PATH, "approved");
+        metrics.record_approval_latency(TEST_AGENT, "webhook", 4.521);
+        metrics.record_encryption_op("decrypt");
+
+        let output = metrics.render_prometheus();
+        assert!(output.contains("gloves_secret_access_total"));
+        assert!(output.contains(&format!("agent=\"{TEST_AGENT}\"")));
+        assert!(output.contains(&format!("path=\"{TEST_SECRET_PATH}\"")));
+        assert!(output.contains("gloves_approval_latency_seconds_bucket"));
+        assert!(output.contains("channel=\"webhook\""));
+        assert!(output.contains("gloves_encryption_ops_total{operation=\"decrypt\"} 1"));
+    }
+
+    #[test]
+    fn webhook_callback_rejects_invalid_bearer_token() {
+        let harness = TestHarness::new();
+        let mut config = harness.config.clone();
+        config.webhook_callback_token = Some("expected-callback-token".to_owned());
+
+        let (status, body) = handle_webhook_callback(
+            &config,
+            "/api/v1/approve/00000000-0000-0000-0000-000000000000",
+            Some("Bearer wrong-token"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(status, "HTTP/1.1 401 Unauthorized");
+        assert_eq!(body, "unauthorized\n");
+    }
+
+    #[test]
+    fn webhook_callback_approves_pending_request() {
+        let harness = TestHarness::new();
+        let mut config = harness.config.clone();
+        config.webhook_callback_token = Some("expected-callback-token".to_owned());
+        let pending_store = pending_request_store(&config).unwrap();
+        let signing_key = generate_signing_key();
+        let request = pending_store
+            .create(
+                SecretId::new(TEST_SECRET_PATH).unwrap(),
+                harness.agent_id.clone(),
+                "integration approval".to_owned(),
+                Duration::seconds(30),
+                &signing_key,
+            )
+            .unwrap();
+
+        let (status, body) = handle_webhook_callback(
+            &config,
+            &format!("/api/v1/approve/{}", request.id),
+            Some("Bearer expected-callback-token"),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(body, "approved\n");
+
+        let stored_request = pending_store
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == request.id)
+            .unwrap();
+        assert_eq!(stored_request.status, RequestStatus::Fulfilled);
+        assert_eq!(
+            stored_request.approved_by.as_ref().map(AgentId::as_str),
+            Some(WEBHOOK_CALLBACK_APPROVER_AGENT_ID)
+        );
     }
 
     #[test]
