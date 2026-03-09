@@ -81,9 +81,7 @@ When approval is required, the server creates a pending request and blocks until
 
 The long-form implementation spec still calls for:
 
-- a long-lived daemon/socket transport for `gloves-mcp`
 - a native client transport instead of the CLI plaintext fallback
-- full webhook approval callbacks
 - the production Docker end-to-end integration suite
 
 Those items are not yet the architecture on disk today, so they are tracked as future work rather than described here as completed behavior.

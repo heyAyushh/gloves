@@ -68,8 +68,6 @@ The main threats addressed today are:
 The following protections are not complete yet:
 
 - A native side channel that completely removes the local CLI fallback during plugin reads.
-- A long-lived Unix-socket daemon mode for the TypeScript client.
-- Full webhook callback approval handling.
 - The production Docker end-to-end suite described in the implementation plan.
 
 Those gaps mean the project already enforces the brokered model at the tool-result boundary, but it is not yet at the final production architecture described in the long-form spec.

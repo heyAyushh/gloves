@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
     process::Command as ProcessCommand,
@@ -24,10 +24,12 @@ use gloves::{
     human::pending::PendingRequestStore,
     types::{AgentId, RequestStatus, SecretId},
 };
+use hmac::{Hmac, Mac};
 use rand::{Rng, RngExt};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sha2::Sha256;
 use uuid::Uuid;
 
 const JSON_RPC_VERSION: &str = "2.0";
@@ -67,6 +69,7 @@ const AUDIT_SECTION_DEFAULT: &str = "audit";
 const GLOVES_BINARY_NAME: &str = "gloves";
 const DEFAULT_METRICS_BIND_ADDRESS: &str = "127.0.0.1:7789";
 const METRICS_RESPONSE_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
+const WEBHOOK_CALLBACK_APPROVER_AGENT_ID: &str = "webhook";
 
 static METRICS_STATE: OnceLock<Arc<MetricsState>> = OnceLock::new();
 
@@ -114,6 +117,10 @@ struct DaemonSection {
 struct DaemonApprovalSection {
     default_channel: Option<String>,
     timeout_seconds: Option<u64>,
+    webhook_url: Option<String>,
+    webhook_secret: Option<String>,
+    callback_bind: Option<String>,
+    callback_token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -139,9 +146,13 @@ struct ResolvedConfig {
     audit_path: PathBuf,
     session_token_path: PathBuf,
     socket_path: Option<PathBuf>,
+    metrics_enabled: bool,
     metrics_bind: Option<String>,
     approval_channel: ApprovalChannel,
     approval_timeout_seconds: u64,
+    webhook_url: Option<String>,
+    webhook_secret: Option<String>,
+    webhook_callback_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -401,7 +412,7 @@ fn run() -> Result<()> {
         .clone();
     ensure_private_dir(&config.audit_path)?;
     let session_token = write_session_token(&config.session_token_path)?;
-    start_metrics_server_if_enabled(&config, metrics_state)?;
+    start_http_control_server(&config, metrics_state)?;
     append_audit_record(
         &config,
         AuditRecord {
@@ -487,12 +498,42 @@ impl ResolvedConfig {
             .approval
             .timeout_seconds
             .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECONDS);
-        let metrics_bind = if parsed.daemon.metrics.enabled.unwrap_or(false) {
+        let metrics_enabled = parsed.daemon.metrics.enabled.unwrap_or(false);
+        let webhook_url = parsed.daemon.approval.webhook_url.clone();
+        let webhook_secret = parsed.daemon.approval.webhook_secret.clone();
+        let webhook_callback_token = if approval_channel == ApprovalChannel::Webhook {
+            if webhook_url.is_none() {
+                return Err(GlovesError::InvalidInput(
+                    "daemon.approval.webhook_url is required when default_channel = \"webhook\""
+                        .to_owned(),
+                ));
+            }
+            Some(
+                parsed
+                    .daemon
+                    .approval
+                    .callback_token
+                    .unwrap_or_else(|| generate_hex_token(SESSION_TOKEN_BYTES)),
+            )
+        } else {
+            None
+        };
+        let metrics_bind = if metrics_enabled {
             Some(
                 parsed
                     .daemon
                     .metrics
                     .bind
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_METRICS_BIND_ADDRESS.to_owned()),
+            )
+        } else if approval_channel == ApprovalChannel::Webhook {
+            Some(
+                parsed
+                    .daemon
+                    .approval
+                    .callback_bind
+                    .clone()
                     .unwrap_or_else(|| DEFAULT_METRICS_BIND_ADDRESS.to_owned()),
             )
         } else {
@@ -505,9 +546,13 @@ impl ResolvedConfig {
             audit_path,
             session_token_path,
             socket_path,
+            metrics_enabled,
             metrics_bind,
             approval_channel,
             approval_timeout_seconds,
+            webhook_url,
+            webhook_secret,
+            webhook_callback_token,
         })
     }
 }
@@ -560,20 +605,21 @@ fn run_socket_server(
     ))
 }
 
-fn start_metrics_server_if_enabled(
+fn start_http_control_server(
     config: &ResolvedConfig,
     metrics_state: Arc<MetricsState>,
 ) -> Result<()> {
     let Some(bind_address) = config.metrics_bind.clone() else {
         return Ok(());
     };
+    let config = config.clone();
     thread::spawn(move || {
         let listener = match TcpListener::bind(&bind_address) {
             Ok(listener) => listener,
             Err(error) => {
                 let _ = writeln!(
                     io::stderr(),
-                    "failed to bind metrics endpoint at {bind_address}: {error}"
+                    "failed to bind control endpoint at {bind_address}: {error}"
                 );
                 return;
             }
@@ -582,27 +628,43 @@ fn start_metrics_server_if_enabled(
             let Ok(mut stream) = stream else {
                 continue;
             };
-            if let Err(error) = write_metrics_response(&mut stream, &metrics_state) {
-                let _ = writeln!(io::stderr(), "failed to serve metrics: {error}");
+            if let Err(error) = write_http_control_response(&mut stream, &config, &metrics_state) {
+                let _ = writeln!(io::stderr(), "failed to serve control request: {error}");
             }
         }
     });
     Ok(())
 }
 
-fn write_metrics_response(stream: &mut TcpStream, metrics_state: &MetricsState) -> Result<()> {
+fn write_http_control_response(
+    stream: &mut TcpStream,
+    config: &ResolvedConfig,
+    metrics_state: &MetricsState,
+) -> Result<()> {
     let mut request_reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     request_reader.read_line(&mut request_line)?;
-    let status_line = if request_line.starts_with("GET /metrics ") {
-        "HTTP/1.1 200 OK"
+    let request_path = request_line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let authorization_header = read_authorization_header(&mut request_reader)?;
+
+    let (status_line, body) = if request_line.starts_with("GET /metrics ") && config.metrics_enabled
+    {
+        ("HTTP/1.1 200 OK", metrics_state.render_prometheus())
+    } else if request_line.starts_with("POST /api/v1/approve/") {
+        handle_webhook_callback(config, &request_path, authorization_header.as_deref(), true)?
+    } else if request_line.starts_with("POST /api/v1/deny/") {
+        handle_webhook_callback(
+            config,
+            &request_path,
+            authorization_header.as_deref(),
+            false,
+        )?
     } else {
-        "HTTP/1.1 404 Not Found"
-    };
-    let body = if status_line.ends_with("200 OK") {
-        metrics_state.render_prometheus()
-    } else {
-        "not found\n".to_owned()
+        ("HTTP/1.1 404 Not Found", "not found\n".to_owned())
     };
     write!(
         stream,
@@ -611,6 +673,59 @@ fn write_metrics_response(stream: &mut TcpStream, metrics_state: &MetricsState) 
     )?;
     stream.flush()?;
     Ok(())
+}
+
+fn read_authorization_header<R>(reader: &mut R) -> Result<Option<String>>
+where
+    R: BufRead,
+{
+    let mut authorization = None;
+    loop {
+        let mut line = String::new();
+        let bytes = reader.read_line(&mut line)?;
+        if bytes == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("authorization") {
+                authorization = Some(value.trim().to_owned());
+            }
+        }
+    }
+    Ok(authorization)
+}
+
+fn handle_webhook_callback(
+    config: &ResolvedConfig,
+    request_path: &str,
+    authorization_header: Option<&str>,
+    approve: bool,
+) -> Result<(&'static str, String)> {
+    let expected_token = config.webhook_callback_token.as_deref().ok_or_else(|| {
+        GlovesError::InvalidInput("webhook callback token is not configured".to_owned())
+    })?;
+    let provided_token = authorization_header
+        .and_then(|header| header.strip_prefix("Bearer "))
+        .unwrap_or_default();
+    if provided_token != expected_token {
+        return Ok(("HTTP/1.1 401 Unauthorized", "unauthorized\n".to_owned()));
+    }
+
+    let request_id = request_path
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .parse::<Uuid>()
+        .map_err(|_| GlovesError::InvalidInput("invalid webhook request id".to_owned()))?;
+    let reviewer = AgentId::new(WEBHOOK_CALLBACK_APPROVER_AGENT_ID)?;
+    let store = pending_request_store(config)?;
+    if approve {
+        store.approve(request_id, reviewer)?;
+        Ok(("HTTP/1.1 200 OK", "approved\n".to_owned()))
+    } else {
+        store.deny(request_id, reviewer)?;
+        Ok(("HTTP/1.1 200 OK", "denied\n".to_owned()))
+    }
 }
 
 fn escape_metric_label(value: &str) -> String {
@@ -1436,6 +1551,111 @@ fn resolve_approval(
     }
 }
 
+fn send_webhook_approval_request(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    tool_name: &str,
+    path: &str,
+    request_id: Uuid,
+    requested_at: DateTime<Utc>,
+) -> Result<()> {
+    let webhook_url = config.webhook_url.as_deref().ok_or_else(|| {
+        GlovesError::InvalidInput("daemon.approval.webhook_url is required".to_owned())
+    })?;
+    let callback_bind = config.metrics_bind.as_deref().ok_or_else(|| {
+        GlovesError::InvalidInput("webhook callbacks require an HTTP bind address".to_owned())
+    })?;
+    let timeout_at = requested_at + Duration::seconds(config.approval_timeout_seconds as i64);
+    let payload = json!({
+        "version": 1,
+        "request_id": request_id.to_string(),
+        "event": "approval_request",
+        "agent_id": session.agent_id.as_str(),
+        "tool": tool_name,
+        "path": path,
+        "timestamp": requested_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "timeout_at": timeout_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "actions": {
+            "approve": format!("http://{callback_bind}/api/v1/approve/{request_id}"),
+            "deny": format!("http://{callback_bind}/api/v1/deny/{request_id}")
+        }
+    });
+    let body = serde_json::to_vec(&payload)?;
+    let signature = webhook_signature(config.webhook_secret.as_deref(), &body)?;
+    post_json(webhook_url, &body, Some(&signature))
+}
+
+fn webhook_signature(secret: Option<&str>, body: &[u8]) -> Result<String> {
+    let Some(secret) = secret else {
+        return Ok(String::new());
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| GlovesError::InvalidInput("invalid webhook secret".to_owned()))?;
+    mac.update(body);
+    Ok(format!(
+        "sha256={}",
+        hex_encode(&mac.finalize().into_bytes())
+    ))
+}
+
+fn post_json(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
+    let parsed = parse_http_url(url)?;
+    let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))?;
+    write!(
+        stream,
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        parsed.path,
+        parsed.host,
+        body.len()
+    )?;
+    if let Some(signature) = signature.filter(|value| !value.is_empty()) {
+        write!(stream, "X-Gloves-Signature: {signature}\r\n")?;
+    }
+    write!(stream, "\r\n")?;
+    stream.write_all(body)?;
+    stream.flush()?;
+
+    let mut response = String::new();
+    BufReader::new(stream).read_to_string(&mut response)?;
+    if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+        return Err(GlovesError::InvalidInput(format!(
+            "webhook returned non-success response: {}",
+            response.lines().next().unwrap_or("unknown")
+        )));
+    }
+    Ok(())
+}
+
+struct ParsedHttpUrl {
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_http_url(url: &str) -> Result<ParsedHttpUrl> {
+    let without_scheme = url.strip_prefix("http://").ok_or_else(|| {
+        GlovesError::InvalidInput("only http:// webhook urls are supported".to_owned())
+    })?;
+    let (authority, path) = match without_scheme.split_once('/') {
+        Some((authority, rest)) => (authority, format!("/{}", rest)),
+        None => (without_scheme, "/".to_owned()),
+    };
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (
+            host.to_owned(),
+            port.parse::<u16>()
+                .map_err(|_| GlovesError::InvalidInput("invalid webhook port".to_owned()))?,
+        ),
+        None => (authority.to_owned(), 80),
+    };
+    if host.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "webhook host must not be empty".to_owned(),
+        ));
+    }
+    Ok(ParsedHttpUrl { host, port, path })
+}
+
 fn approval_tier_for_tool(tool_name: &str) -> ApprovalTier {
     match tool_name {
         GLOVES_LIST_TOOL | GLOVES_SHOW_TOOL | GLOVES_APPROVE_TOOL => ApprovalTier::Auto,
@@ -1488,6 +1708,17 @@ fn wait_for_external_approval(
         },
     )
     .map_err(|_| internal_error("failed to write audit log"))?;
+    if config.approval_channel == ApprovalChannel::Webhook {
+        send_webhook_approval_request(
+            config,
+            session,
+            tool_name,
+            path,
+            request.id,
+            request.requested_at,
+        )
+        .map_err(map_runtime_error)?;
+    }
 
     let deadline = Instant::now() + StdDuration::from_secs(config.approval_timeout_seconds);
     loop {
@@ -1852,11 +2083,15 @@ fn write_session_token(token_path: &Path) -> Result<String> {
     if let Some(parent) = token_path.parent() {
         ensure_private_dir(parent)?;
     }
-    let mut bytes = [0_u8; SESSION_TOKEN_BYTES];
-    rand::rng().fill_bytes(&mut bytes);
-    let token = hex_encode(&bytes);
+    let token = generate_hex_token(SESSION_TOKEN_BYTES);
     write_private_file_atomic(token_path, token.as_bytes())?;
     Ok(token)
+}
+
+fn generate_hex_token(byte_count: usize) -> String {
+    let mut bytes = vec![0_u8; byte_count];
+    rand::rng().fill_bytes(&mut bytes);
+    hex_encode(&bytes)
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -2288,9 +2523,13 @@ mod tests {
                 audit_path: root.join("audit"),
                 session_token_path: temp.path().join("session-token"),
                 socket_path: None,
+                metrics_enabled: false,
                 metrics_bind: None,
                 approval_channel: ApprovalChannel::Auto,
                 approval_timeout_seconds: DEFAULT_APPROVAL_TIMEOUT_SECONDS,
+                webhook_url: None,
+                webhook_secret: None,
+                webhook_callback_token: None,
             };
             ensure_private_dir(&config.store_path).unwrap();
             ensure_private_dir(&config.identities_path).unwrap();

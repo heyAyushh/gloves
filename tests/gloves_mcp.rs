@@ -6,6 +6,7 @@ use std::{
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -104,6 +105,26 @@ fn append_metrics_config(config_path: &Path, bind: &str) {
     fs::write(config_path, config).unwrap();
 }
 
+fn append_webhook_config(
+    config_path: &Path,
+    webhook_url: &str,
+    callback_bind: &str,
+    callback_token: &str,
+    webhook_secret: &str,
+) {
+    let mut config = fs::read_to_string(config_path).unwrap();
+    let replacement = format!(
+        "[daemon.approval]\n\
+         webhook_url = {:?}\n\
+         webhook_secret = {:?}\n\
+         callback_bind = {:?}\n\
+         callback_token = {:?}\n",
+        webhook_url, webhook_secret, callback_bind, callback_token
+    );
+    config = config.replacen("[daemon.approval]\n", &replacement, 1);
+    fs::write(config_path, config).unwrap();
+}
+
 fn read_pending_request_id(root: &Path) -> String {
     let deadline = Instant::now() + PENDING_WAIT_TIMEOUT;
     let pending_path = root.join("store/.gloves-pending.json");
@@ -185,6 +206,66 @@ fn fetch_metrics(bind: &str) -> String {
         );
         thread::sleep(TOKEN_WAIT_INTERVAL);
     }
+}
+
+fn post_webhook_callback(url: &str, callback_token: &str, body: &str) -> String {
+    let (host, port, path) = parse_http_url(url);
+    let mut stream = TcpStream::connect((host.as_str(), port)).unwrap();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nAuthorization: Bearer {callback_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    response
+}
+
+fn parse_http_url(url: &str) -> (String, u16, String) {
+    let trimmed = url.strip_prefix("http://").unwrap();
+    let (authority, path) = match trimmed.split_once('/') {
+        Some((authority, rest)) => (authority, format!("/{}", rest)),
+        None => (trimmed, "/".to_owned()),
+    };
+    let (host, port) = authority.split_once(':').unwrap();
+    (host.to_owned(), port.parse::<u16>().unwrap(), path)
+}
+
+fn spawn_webhook_receiver() -> (String, mpsc::Receiver<(String, String)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let bind = listener.local_addr().unwrap().to_string();
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut ignored_request_line = String::new();
+        reader.read_line(&mut ignored_request_line).unwrap();
+        let mut signature = String::new();
+        let mut content_length = 0_usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("X-Gloves-Signature: ") {
+                signature = value.trim().to_owned();
+            }
+            if let Some(value) = line.strip_prefix("Content-Length: ") {
+                content_length = value.trim().parse::<usize>().unwrap();
+            }
+        }
+        let mut body_bytes = vec![0_u8; content_length];
+        reader.read_exact(&mut body_bytes).unwrap();
+        let body = String::from_utf8(body_bytes).unwrap();
+        sender.send((signature, body)).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{bind}/approve"), receiver)
 }
 
 struct McpSession {
@@ -830,6 +911,74 @@ fn metrics_endpoint_reports_secret_access_and_encryption_operations() {
     assert!(metrics.contains("result=\"approved\""));
     assert!(metrics.contains("gloves_daemon_uptime_seconds"));
     assert!(metrics.contains("gloves_encryption_ops_total{operation=\"decrypt\"} 1"));
+}
+
+#[test]
+fn webhook_approval_posts_request_and_callback_unblocks_secret_read() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let config_path = temp.path().join("gloves.toml");
+    let token_path = temp.path().join("session-token");
+    let socket_path = temp.path().join("gloves.sock");
+    let callback_bind = allocate_loopback_bind_address();
+    let callback_token = "callback-test-token";
+    let webhook_secret = "webhook-signing-secret";
+    let (webhook_url, webhook_receiver) = spawn_webhook_receiver();
+
+    set_identity(&root, "devy");
+    write_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(&root, "devy", SECRET_PATH, SECRET_VALUE);
+    write_mcp_config(
+        &config_path,
+        &root,
+        &token_path,
+        "webhook",
+        Some(&socket_path),
+    );
+    append_webhook_config(
+        &config_path,
+        &webhook_url,
+        &callback_bind,
+        callback_token,
+        webhook_secret,
+    );
+
+    let _daemon = DaemonChild::spawn(&config_path, Some("devy"));
+    let token = wait_for_token(&token_path);
+    let requester_socket = socket_path.clone();
+    let requester_token = token.clone();
+    let requester = thread::spawn(move || {
+        let mut session = SocketMcpSession::connect(&requester_socket);
+        let init_response = session.initialize(&requester_token, "devy");
+        assert!(init_response.get("result").is_some());
+        session.notify_initialized();
+        session.call_tool_with_secret(2, "gloves_get", json!({ "path": SECRET_PATH }))
+    });
+
+    let (signature, body) = webhook_receiver
+        .recv_timeout(TOKEN_WAIT_TIMEOUT)
+        .expect("expected webhook approval payload");
+    assert!(signature.starts_with("sha256="));
+    let payload: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(payload["event"], "approval_request");
+    assert_eq!(payload["agent_id"], "devy");
+    assert_eq!(payload["tool"], "gloves_get");
+    assert_eq!(payload["path"], SECRET_PATH);
+    let approve_url = payload["actions"]["approve"].as_str().unwrap();
+
+    let callback_response = post_webhook_callback(
+        approve_url,
+        callback_token,
+        r#"{"decision":"approve","approver":"integration-test"}"#,
+    );
+    assert!(callback_response.starts_with("HTTP/1.1 200 OK"));
+
+    let (request_response, secret) = requester.join().unwrap();
+    assert_eq!(secret, SECRET_VALUE);
+    assert_eq!(request_response["result"]["isError"], false);
 }
 
 #[test]
