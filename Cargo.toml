@@ -59,3 +59,7 @@ predicates = "3.1.4"
 [[bin]]
 name = "gloves"
 path = "src/main.rs"
+
+[[bin]]
+name = "gloves-mcp"
+path = "src/bin/gloves-mcp.rs"
