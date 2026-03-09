@@ -1,25 +1,34 @@
 use std::{
+    collections::BTreeSet,
     env,
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
+    thread,
+    time::{Duration as StdDuration, Instant},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
+use ed25519_dalek::SigningKey;
 use gloves::{
     agent::age_crypto,
     error::{GlovesError, Result},
     fs_secure::{ensure_private_dir, write_private_file_atomic},
-    types::{AgentId, SecretId},
+    human::pending::PendingRequestStore,
+    types::{AgentId, RequestStatus, SecretId},
 };
-use rand::Rng;
+use rand::{Rng, RngExt};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use uuid::Uuid;
 
 const JSON_RPC_VERSION: &str = "2.0";
 const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const AUTH_FAILED_CODE: i64 = -32001;
+const APPROVAL_DENIED_CODE: i64 = -32002;
+const APPROVAL_TIMEOUT_CODE: i64 = -32003;
 const SECRET_NOT_FOUND_CODE: i64 = -32004;
 const PERMISSION_DENIED_CODE: i64 = -32005;
 const IDENTITY_ERROR_CODE: i64 = -32008;
@@ -27,6 +36,11 @@ const CRYPTO_ERROR_CODE: i64 = -32009;
 const INVALID_PARAMS_CODE: i64 = -32602;
 const INTERNAL_ERROR_CODE: i64 = -32603;
 const SESSION_TOKEN_BYTES: usize = 32;
+const DEFAULT_APPROVAL_TIMEOUT_SECONDS: u64 = 120;
+const APPROVAL_POLL_INTERVAL_MILLIS: u64 = 25;
+const RULES_FILE_NAME: &str = ".gloves.yaml";
+const RECIPIENTS_FILE_NAME: &str = ".age-recipients";
+const PENDING_REQUESTS_FILE_NAME: &str = ".gloves-pending.json";
 const TOOLS_LIST_METHOD: &str = "tools/list";
 const TOOLS_CALL_METHOD: &str = "tools/call";
 const INITIALIZE_METHOD: &str = "initialize";
@@ -34,6 +48,9 @@ const INITIALIZED_NOTIFICATION_METHOD: &str = "notifications/initialized";
 const GLOVES_LIST_TOOL: &str = "gloves_list";
 const GLOVES_SHOW_TOOL: &str = "gloves_show";
 const GLOVES_GET_TOOL: &str = "gloves_get";
+const GLOVES_SET_TOOL: &str = "gloves_set";
+const GLOVES_DELETE_TOOL: &str = "gloves_delete";
+const GLOVES_APPROVE_TOOL: &str = "gloves_approve";
 const SESSION_TOKEN_ENV_VAR: &str = "GLOVES_SESSION_TOKEN_PATH";
 const HOME_ENV_VAR: &str = "HOME";
 const STORE_SECTION_DEFAULT: &str = "store";
@@ -70,6 +87,14 @@ struct McpConfigFile {
 #[derive(Debug, Default, Deserialize)]
 struct DaemonSection {
     session_token_path: Option<String>,
+    #[serde(default)]
+    approval: DaemonApprovalSection,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DaemonApprovalSection {
+    default_channel: Option<String>,
+    timeout_seconds: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,12 +113,33 @@ struct ResolvedConfig {
     identities_path: PathBuf,
     audit_path: PathBuf,
     session_token_path: PathBuf,
+    approval_channel: ApprovalChannel,
+    approval_timeout_seconds: u64,
 }
 
 #[derive(Debug, Clone)]
 struct SessionContext {
     agent_id: AgentId,
     agent_recipient: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalChannel {
+    Auto,
+    Tty,
+    Webhook,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalTier {
+    Auto,
+    Human,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ApprovalResolution {
+    status: &'static str,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,6 +152,47 @@ struct SecretMetadataRecord {
     last_accessed: Option<DateTime<Utc>>,
     agent: String,
     encrypted_to: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreationRulesFile {
+    #[serde(default, rename = "version")]
+    _version: Option<u32>,
+    #[serde(default)]
+    creation_rules: Vec<CreationRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CreationRule {
+    path_regex: String,
+    #[serde(default)]
+    age: Option<RecipientList>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RecipientList {
+    Csv(String),
+    List(Vec<String>),
+}
+
+impl RecipientList {
+    fn values(&self) -> Vec<String> {
+        match self {
+            Self::Csv(value) => value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            Self::List(values) => values
+                .iter()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -136,6 +223,21 @@ struct GetSecretResult {
     inject_method: &'static str,
     secret_length: usize,
     approval_status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct SetSecretResult {
+    path: String,
+    agent: String,
+    recipient_count: usize,
+    approval_status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalResult {
+    request_id: String,
+    decision: String,
+    reviewer: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -228,13 +330,41 @@ impl ResolvedConfig {
             None,
             "daemon.session_token_path",
         )?;
+        let approval_channel = ApprovalChannel::parse(
+            parsed
+                .daemon
+                .approval
+                .default_channel
+                .as_deref()
+                .unwrap_or("auto"),
+        )?;
+        let approval_timeout_seconds = parsed
+            .daemon
+            .approval
+            .timeout_seconds
+            .unwrap_or(DEFAULT_APPROVAL_TIMEOUT_SECONDS);
 
         Ok(Self {
             store_path,
             identities_path,
             audit_path,
             session_token_path,
+            approval_channel,
+            approval_timeout_seconds,
         })
+    }
+}
+
+impl ApprovalChannel {
+    fn parse(value: &str) -> Result<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "tty" => Ok(Self::Tty),
+            "webhook" => Ok(Self::Webhook),
+            other => Err(GlovesError::InvalidInput(format!(
+                "unsupported approval channel `{other}`"
+            ))),
+        }
     }
 }
 
@@ -423,6 +553,9 @@ fn handle_tool_call(
         GLOVES_LIST_TOOL => handle_list_tool(config, session, &arguments),
         GLOVES_SHOW_TOOL => handle_show_tool(config, session, &arguments),
         GLOVES_GET_TOOL => handle_get_tool(config, session, &arguments),
+        GLOVES_SET_TOOL => handle_set_tool(config, session, &arguments),
+        GLOVES_DELETE_TOOL => handle_delete_tool(config, session, &arguments),
+        GLOVES_APPROVE_TOOL => handle_approve_tool(config, session, &arguments),
         _ => Err((
             INTERNAL_ERROR_CODE,
             "Unsupported tool",
@@ -500,7 +633,8 @@ fn handle_get_tool(
     arguments: &Map<String, Value>,
 ) -> std::result::Result<Value, (i64, &'static str, Value)> {
     let path = required_string_argument(arguments, "path")?;
-    let get_result = get_secret(config, session, &path).map_err(map_runtime_error)?;
+    let approval = resolve_approval(config, session, GLOVES_GET_TOOL, &path)?;
+    let get_result = get_secret(config, session, &path, approval).map_err(map_runtime_error)?;
     append_audit_record(
         config,
         AuditRecord {
@@ -526,10 +660,117 @@ fn handle_get_tool(
     ))
 }
 
+fn handle_set_tool(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    arguments: &Map<String, Value>,
+) -> std::result::Result<Value, (i64, &'static str, Value)> {
+    let path = required_string_argument(arguments, "path")?;
+    let from_env = required_string_argument(arguments, "from_env")?;
+    let approval = resolve_approval(config, session, GLOVES_SET_TOOL, &path)?;
+    let secret_value = env::var(&from_env).map_err(|_| {
+        invalid_params_error(&format!(
+            "environment variable `{from_env}` is not set for `gloves_set`"
+        ))
+    })?;
+    let set_result = set_secret_value(config, session, &path, secret_value.as_bytes(), approval)
+        .map_err(map_runtime_error)?;
+    append_audit_record(
+        config,
+        AuditRecord {
+            version: 1,
+            timestamp: Utc::now(),
+            event_type: "secret_write",
+            agent_id: Some(session.agent_id.as_str()),
+            tool: Some(GLOVES_SET_TOOL),
+            path: Some(&path),
+            result: "approved",
+            error: None,
+        },
+    )
+    .map_err(|_| internal_error("failed to write audit log"))?;
+
+    Ok(tool_success_response(
+        format!("Stored secret `{path}`"),
+        serde_json::to_value(set_result)
+            .map_err(|_| internal_error("failed to serialize set result"))?,
+    ))
+}
+
+fn handle_delete_tool(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    arguments: &Map<String, Value>,
+) -> std::result::Result<Value, (i64, &'static str, Value)> {
+    let path = required_string_argument(arguments, "path")?;
+    resolve_approval(config, session, GLOVES_DELETE_TOOL, &path)?;
+    Err((
+        APPROVAL_DENIED_CODE,
+        "Operation denied",
+        json!({ "reason": "destructive_operations_denied" }),
+    ))
+}
+
+fn handle_approve_tool(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    arguments: &Map<String, Value>,
+) -> std::result::Result<Value, (i64, &'static str, Value)> {
+    let request_id = required_string_argument(arguments, "request_id")?;
+    let decision = required_string_argument(arguments, "decision")?;
+    let parsed_request_id = request_id
+        .parse::<Uuid>()
+        .map_err(|_| invalid_params_error("`request_id` must be a valid UUID"))?;
+    let store = pending_request_store(config).map_err(map_runtime_error)?;
+    match decision.as_str() {
+        "approve" => {
+            store
+                .approve(parsed_request_id, session.agent_id.clone())
+                .map_err(map_runtime_error)?;
+        }
+        "deny" => {
+            store
+                .deny(parsed_request_id, session.agent_id.clone())
+                .map_err(map_runtime_error)?;
+        }
+        _ => {
+            return Err(invalid_params_error(
+                "`decision` must be `approve` or `deny`",
+            ))
+        }
+    }
+
+    append_audit_record(
+        config,
+        AuditRecord {
+            version: 1,
+            timestamp: Utc::now(),
+            event_type: "approval_decision",
+            agent_id: Some(session.agent_id.as_str()),
+            tool: Some(GLOVES_APPROVE_TOOL),
+            path: Some(&request_id),
+            result: decision.as_str(),
+            error: None,
+        },
+    )
+    .map_err(|_| internal_error("failed to write audit log"))?;
+
+    Ok(tool_success_response(
+        format!("Request `{request_id}` {decision}d"),
+        serde_json::to_value(ApprovalResult {
+            request_id,
+            decision,
+            reviewer: session.agent_id.as_str().to_owned(),
+        })
+        .map_err(|_| internal_error("failed to serialize approval result"))?,
+    ))
+}
+
 fn get_secret(
     config: &ResolvedConfig,
     session: &SessionContext,
     path: &str,
+    approval: ApprovalResolution,
 ) -> Result<GetSecretResult> {
     let secret_id = SecretId::new(path)?;
     let mut metadata = read_secret_metadata(config, secret_id.as_str())?;
@@ -555,7 +796,54 @@ fn get_secret(
         injected: true,
         inject_method: "env",
         secret_length: plaintext.len(),
-        approval_status: "auto",
+        approval_status: approval.status,
+    })
+}
+
+fn set_secret_value(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    path: &str,
+    value: &[u8],
+    approval: ApprovalResolution,
+) -> Result<SetSecretResult> {
+    ensure_private_dir(&config.store_path)?;
+    ensure_private_dir(&metadata_root(config))?;
+
+    let secret_id = SecretId::new(path)?;
+    let namespace = namespace_for_secret_path(secret_id.as_str())?;
+    let recipients = resolve_recipients(config, secret_id.as_str(), &namespace)?;
+    write_namespace_recipients(config, &namespace, &recipients, false)?;
+
+    let ciphertext = age_crypto::encrypt_for_recipients(value, &recipients)?;
+    write_private_file_atomic(
+        &secret_ciphertext_path(config, secret_id.as_str()),
+        &ciphertext,
+    )?;
+
+    let now = Utc::now();
+    let created = match read_secret_metadata(config, secret_id.as_str()) {
+        Ok(existing) => existing.created,
+        Err(GlovesError::NotFound) => now,
+        Err(error) => return Err(error),
+    };
+    let metadata = SecretMetadataRecord {
+        name: secret_id.as_str().to_owned(),
+        length: value.len(),
+        created,
+        modified: now,
+        last_rotated: now,
+        last_accessed: None,
+        agent: scope_agent(secret_id.as_str()),
+        encrypted_to: recipients.clone(),
+    };
+    write_secret_metadata(config, secret_id.as_str(), &metadata)?;
+
+    Ok(SetSecretResult {
+        path: secret_id.as_str().to_owned(),
+        agent: session.agent_id.as_str().to_owned(),
+        recipient_count: recipients.len(),
+        approval_status: approval.status,
     })
 }
 
@@ -628,6 +916,290 @@ fn list_visible_secret_names(
 
     secrets.sort();
     Ok(secrets)
+}
+
+fn resolve_approval(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    tool_name: &str,
+    path: &str,
+) -> std::result::Result<ApprovalResolution, (i64, &'static str, Value)> {
+    match approval_tier_for_tool(tool_name) {
+        ApprovalTier::Auto => Ok(ApprovalResolution { status: "auto" }),
+        ApprovalTier::Deny => {
+            append_audit_record(
+                config,
+                AuditRecord {
+                    version: 1,
+                    timestamp: Utc::now(),
+                    event_type: "approval_denied",
+                    agent_id: Some(session.agent_id.as_str()),
+                    tool: Some(tool_name),
+                    path: Some(path),
+                    result: "denied",
+                    error: Some("destructive_operations_denied"),
+                },
+            )
+            .map_err(|_| internal_error("failed to write audit log"))?;
+            Err((
+                APPROVAL_DENIED_CODE,
+                "Operation denied",
+                json!({ "reason": "destructive_operations_denied" }),
+            ))
+        }
+        ApprovalTier::Human => match config.approval_channel {
+            ApprovalChannel::Auto => Ok(ApprovalResolution { status: "auto" }),
+            ApprovalChannel::Tty | ApprovalChannel::Webhook => {
+                wait_for_external_approval(config, session, tool_name, path)
+            }
+        },
+    }
+}
+
+fn approval_tier_for_tool(tool_name: &str) -> ApprovalTier {
+    match tool_name {
+        GLOVES_LIST_TOOL | GLOVES_SHOW_TOOL | GLOVES_APPROVE_TOOL => ApprovalTier::Auto,
+        GLOVES_GET_TOOL | GLOVES_SET_TOOL => ApprovalTier::Human,
+        GLOVES_DELETE_TOOL => ApprovalTier::Deny,
+        _ => ApprovalTier::Deny,
+    }
+}
+
+fn wait_for_external_approval(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    tool_name: &str,
+    path: &str,
+) -> std::result::Result<ApprovalResolution, (i64, &'static str, Value)> {
+    let store = pending_request_store(config).map_err(map_runtime_error)?;
+    let signing_key = generate_signing_key();
+    let request = store
+        .create(
+            SecretId::new(path)
+                .map_err(GlovesError::from)
+                .map_err(map_runtime_error)?,
+            session.agent_id.clone(),
+            format!("{tool_name}:{path}"),
+            Duration::seconds(config.approval_timeout_seconds as i64),
+            &signing_key,
+        )
+        .map_err(map_runtime_error)?;
+
+    let _ = writeln!(
+        io::stderr(),
+        "approval required: request_id={} tool={} agent={} path={}",
+        request.id,
+        tool_name,
+        session.agent_id.as_str(),
+        path
+    );
+    append_audit_record(
+        config,
+        AuditRecord {
+            version: 1,
+            timestamp: Utc::now(),
+            event_type: "approval_requested",
+            agent_id: Some(session.agent_id.as_str()),
+            tool: Some(tool_name),
+            path: Some(path),
+            result: "pending",
+            error: None,
+        },
+    )
+    .map_err(|_| internal_error("failed to write audit log"))?;
+
+    let deadline = Instant::now() + StdDuration::from_secs(config.approval_timeout_seconds);
+    loop {
+        let requests = store.load_all().map_err(map_runtime_error)?;
+        if let Some(pending_request) = requests.into_iter().find(|entry| entry.id == request.id) {
+            match pending_request.status {
+                RequestStatus::Fulfilled => {
+                    return Ok(ApprovalResolution { status: "approved" });
+                }
+                RequestStatus::Denied => {
+                    return Err((
+                        APPROVAL_DENIED_CODE,
+                        "Approval denied",
+                        json!({ "reason": "request_denied", "request_id": request.id.to_string() }),
+                    ));
+                }
+                RequestStatus::Expired => {
+                    return Err((
+                        APPROVAL_TIMEOUT_CODE,
+                        "Approval timeout",
+                        json!({ "reason": "request_expired", "request_id": request.id.to_string() }),
+                    ));
+                }
+                RequestStatus::Pending => {}
+            }
+        }
+
+        if Instant::now() >= deadline {
+            return Err((
+                APPROVAL_TIMEOUT_CODE,
+                "Approval timeout",
+                json!({ "reason": "approval_timeout", "request_id": request.id.to_string() }),
+            ));
+        }
+        thread::sleep(StdDuration::from_millis(APPROVAL_POLL_INTERVAL_MILLIS));
+    }
+}
+
+fn pending_request_store(config: &ResolvedConfig) -> Result<PendingRequestStore> {
+    PendingRequestStore::new(pending_requests_path(config))
+}
+
+fn pending_requests_path(config: &ResolvedConfig) -> PathBuf {
+    config.store_path.join(PENDING_REQUESTS_FILE_NAME)
+}
+
+fn generate_signing_key() -> SigningKey {
+    let mut key_bytes = [0_u8; 32];
+    rand::rng().fill(&mut key_bytes);
+    SigningKey::from_bytes(&key_bytes)
+}
+
+fn resolve_recipients(
+    config: &ResolvedConfig,
+    secret_path: &str,
+    namespace: &Path,
+) -> Result<Vec<String>> {
+    let rules = load_creation_rules(config)?;
+    let explicit_recipients = rules
+        .creation_rules
+        .into_iter()
+        .find_map(|rule| {
+            let regex = Regex::new(&rule.path_regex).ok()?;
+            regex
+                .is_match(secret_path)
+                .then(|| rule.age.map(|entry| entry.values()).unwrap_or_default())
+        })
+        .ok_or_else(|| {
+            GlovesError::InvalidInput(format!("no matching creation rule for path {secret_path}"))
+        })?;
+    let namespace_recipients = read_namespace_recipients(config, namespace)?;
+    Ok(explicit_recipients
+        .into_iter()
+        .chain(namespace_recipients)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+fn load_creation_rules(config: &ResolvedConfig) -> Result<CreationRulesFile> {
+    let rules_path = config.store_path.join(RULES_FILE_NAME);
+    let raw = fs::read_to_string(&rules_path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            GlovesError::InvalidInput(format!(
+                "creation rules not found: {}",
+                rules_path.display()
+            ))
+        } else {
+            GlovesError::Io(error)
+        }
+    })?;
+    serde_yaml::from_str(&raw)
+        .map_err(|error| GlovesError::InvalidInput(format!("invalid creation rules: {error}")))
+}
+
+fn write_namespace_recipients(
+    config: &ResolvedConfig,
+    namespace: &Path,
+    recipients: &[String],
+    replace: bool,
+) -> Result<()> {
+    let existing = if replace {
+        Vec::new()
+    } else {
+        read_namespace_recipients(config, namespace)?
+    };
+    let merged = existing
+        .into_iter()
+        .chain(recipients.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let contents = if merged.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", merged.join("\n"))
+    };
+    write_private_file_atomic(
+        &namespace_recipients_file(config, namespace),
+        contents.as_bytes(),
+    )
+}
+
+fn read_namespace_recipients(config: &ResolvedConfig, namespace: &Path) -> Result<Vec<String>> {
+    let raw = fs::read_to_string(namespace_recipients_file(config, namespace)).unwrap_or_default();
+    Ok(raw
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect())
+}
+
+fn namespace_recipients_file(config: &ResolvedConfig, namespace: &Path) -> PathBuf {
+    config.store_path.join(namespace).join(RECIPIENTS_FILE_NAME)
+}
+
+fn namespace_for_secret_path(secret_path: &str) -> Result<PathBuf> {
+    let relative_path = validated_relative_path(secret_path)?;
+    let mut components = relative_path.components();
+    let first = match components.next() {
+        Some(Component::Normal(value)) => value.to_string_lossy().to_string(),
+        _ => {
+            return Err(GlovesError::InvalidInput(
+                "secret path must not be empty".to_owned(),
+            ))
+        }
+    };
+    if first == "agents" {
+        let second = match components.next() {
+            Some(Component::Normal(value)) => value.to_string_lossy().to_string(),
+            _ => {
+                return Err(GlovesError::InvalidInput(format!(
+                    "agent namespace is missing in {secret_path}"
+                )))
+            }
+        };
+        return Ok(PathBuf::from(first).join(second));
+    }
+    Ok(PathBuf::from(first))
+}
+
+fn validated_relative_path(secret_path: &str) -> Result<PathBuf> {
+    let secret_id = SecretId::new(secret_path)?;
+    let relative_path = PathBuf::from(secret_id.as_str());
+    if relative_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err(GlovesError::InvalidInput(format!(
+            "path traversal is not allowed: {secret_path}"
+        )));
+    }
+    Ok(relative_path)
+}
+
+fn scope_agent(secret_path: &str) -> String {
+    let parts = Path::new(secret_path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.first().map(String::as_str) == Some("agents") && parts.len() >= 2 {
+        return parts[1].clone();
+    }
+    parts
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_owned())
 }
 
 fn load_agent_recipient(config: &ResolvedConfig, agent_id: &AgentId) -> Result<String> {
@@ -1007,6 +1579,79 @@ fn tool_definitions() -> Vec<Value> {
                 "openWorldHint": false
             }
         }),
+        json!({
+            "name": GLOVES_SET_TOOL,
+            "description": "Store a new secret by reading its value from a process environment variable",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Secret path relative to the store root"
+                    },
+                    "from_env": {
+                        "type": "string",
+                        "description": "Environment variable containing the secret value"
+                    }
+                },
+                "required": ["path", "from_env"]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": GLOVES_DELETE_TOOL,
+            "description": "Delete a secret. This operation is intentionally denied by server policy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Secret path relative to the store root"
+                    }
+                },
+                "required": ["path"]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
+        json!({
+            "name": GLOVES_APPROVE_TOOL,
+            "description": "Approve or deny a pending secret access request",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": "string",
+                        "description": "Pending request identifier"
+                    },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["approve", "deny"],
+                        "description": "Approval decision"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional operator reason"
+                    }
+                },
+                "required": ["request_id", "decision"]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false
+            }
+        }),
     ]
 }
 
@@ -1043,6 +1688,8 @@ mod tests {
                 identities_path: root.join("identities"),
                 audit_path: root.join("audit"),
                 session_token_path: temp.path().join("session-token"),
+                approval_channel: ApprovalChannel::Auto,
+                approval_timeout_seconds: DEFAULT_APPROVAL_TIMEOUT_SECONDS,
             };
             ensure_private_dir(&config.store_path).unwrap();
             ensure_private_dir(&config.identities_path).unwrap();
@@ -1113,6 +1760,11 @@ mod tests {
         assert_eq!(resolved.identities_path, identities_path);
         assert_eq!(resolved.audit_path, audit_path);
         assert_eq!(resolved.session_token_path, token_path);
+        assert_eq!(resolved.approval_channel, ApprovalChannel::Auto);
+        assert_eq!(
+            resolved.approval_timeout_seconds,
+            DEFAULT_APPROVAL_TIMEOUT_SECONDS
+        );
     }
 
     #[test]
@@ -1192,7 +1844,13 @@ mod tests {
         assert_eq!(shown.name, TEST_SECRET_PATH);
         assert_eq!(shown.length, TEST_SECRET_VALUE.len());
 
-        let get_result = get_secret(&harness.config, &session, TEST_SECRET_PATH).unwrap();
+        let get_result = get_secret(
+            &harness.config,
+            &session,
+            TEST_SECRET_PATH,
+            ApprovalResolution { status: "auto" },
+        )
+        .unwrap();
         assert_eq!(get_result.path, TEST_SECRET_PATH);
         assert_eq!(get_result.secret_length, TEST_SECRET_VALUE.len());
 
@@ -1207,7 +1865,13 @@ mod tests {
         harness.write_secret(TEST_SECRET_PATH, &[recipient], TEST_SECRET_VALUE);
         let other_session = harness.session_for(&harness.other_agent_id);
 
-        let error = get_secret(&harness.config, &other_session, TEST_SECRET_PATH).unwrap_err();
+        let error = get_secret(
+            &harness.config,
+            &other_session,
+            TEST_SECRET_PATH,
+            ApprovalResolution { status: "auto" },
+        )
+        .unwrap_err();
         assert!(matches!(error, GlovesError::Unauthorized));
     }
 
@@ -1339,7 +2003,14 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             names,
-            vec![GLOVES_LIST_TOOL, GLOVES_SHOW_TOOL, GLOVES_GET_TOOL]
+            vec![
+                GLOVES_LIST_TOOL,
+                GLOVES_SHOW_TOOL,
+                GLOVES_GET_TOOL,
+                GLOVES_SET_TOOL,
+                GLOVES_DELETE_TOOL,
+                GLOVES_APPROVE_TOOL,
+            ]
         );
     }
 
