@@ -14,6 +14,7 @@ It provides:
 - access/audit controls
 - vault and daemon operations
 - an interactive TUI navigator
+- a Bun OpenClaw client/plugin bridge for brokered secret injection
 
 ## Documentation
 
@@ -22,6 +23,8 @@ Start here: [Documentation Index](docs/INDEX.md)
 Fast links:
 
 - [Quickstart](docs/quickstart.md)
+- [Architecture](ARCHITECTURE.md)
+- [Security](SECURITY.md)
 - [Concepts and Parts](docs/concepts-and-parts.md)
 - [Secrets and Requests](docs/secrets-and-requests.md)
 - [Humans, Agents, and GPG](docs/humans-agents-and-gpg.md)
@@ -71,6 +74,17 @@ gloves --root .openclaw/secrets list
 
 For complete setup and human/agent workflows, use [Quickstart](docs/quickstart.md).
 
+## OpenClaw Integration
+
+The repository now includes:
+
+- `gloves-mcp` for redacted MCP tool access
+- `@gloves/client` as the Bun/TypeScript bridge
+- `@openclaw/gloves` as the OpenClaw plugin package
+- `integrations/openclaw/gloves.json5` as the reference config snippet
+
+Current plugin reads keep secret values out of the MCP result body and inject them into the sandbox environment or tmpfs instead.
+
 ## Install
 
 ### From release binaries (recommended)
@@ -102,6 +116,8 @@ cargo install --path .
 
 Details:
 
+- [Architecture](ARCHITECTURE.md)
+- [Security](SECURITY.md)
 - [Configuration Guide](docs/configuration.md)
 - [Security Hardening](docs/security-hardening.md)
 - [GLOVES Config Spec](GLOVES_CONFIG_SPEC.md)

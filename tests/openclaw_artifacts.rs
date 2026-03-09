@@ -101,3 +101,16 @@ fn bun_benchmark_reports_latency_summary_for_namespaced_get() {
     assert!(payload["avg_ms"].as_f64().unwrap() >= 0.0);
     assert_eq!(payload["samples_ms"].as_array().unwrap().len(), 3);
 }
+
+#[test]
+fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
+    let security = fs::read_to_string(repo_path("SECURITY.md")).unwrap();
+    let architecture = fs::read_to_string(repo_path("ARCHITECTURE.md")).unwrap();
+    let readme = fs::read_to_string(repo_path("README.md")).unwrap();
+
+    assert!(security.contains("never appear in the LLM context"));
+    assert!(security.contains("brokered"));
+    assert!(architecture.contains("gloves-mcp"));
+    assert!(architecture.contains("@openclaw/gloves"));
+    assert!(readme.contains("@openclaw/gloves"));
+}
