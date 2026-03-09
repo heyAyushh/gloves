@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -25,10 +25,12 @@ const SECRET_VALUE = "sk-ant-api03-plugin-test";
 const DEFAULT_APPROVAL_CHANNEL = "auto";
 const GLOVES_CONFIG_NAME = "gloves.toml";
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
+const GLOVES_CLIENT_PACKAGE_ROOT = resolve(import.meta.dir, "..");
 const FIXTURE_WAIT_TIMEOUT_MS = 5_000;
 const FIXTURE_WAIT_INTERVAL_MS = 25;
 
 let cachedBinaries: BinaryPaths | null = null;
+let nativeAddonReady = false;
 
 export function ensureGlovesBinaries(): BinaryPaths {
   if (cachedBinaries) {
@@ -94,6 +96,27 @@ export function createGlovesFixture(options?: { approvalChannel?: string }): Glo
       rmSync(tempRoot, { recursive: true, force: true });
     },
   };
+}
+
+export function ensureNativeAddon(): string {
+  if (nativeAddonReady) {
+    return nativeAddonPath();
+  }
+
+  const build = spawnSync("cargo", ["build", "-p", "gloves-client-native"], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+  });
+  if (build.status !== 0) {
+    throw new Error(build.stderr || "cargo build for gloves-client-native failed");
+  }
+
+  const sourcePath = nativeArtifactPath();
+  const outputPath = nativeAddonPath();
+  mkdirSync(join(GLOVES_CLIENT_PACKAGE_ROOT, "native"), { recursive: true });
+  cpSync(sourcePath, outputPath);
+  nativeAddonReady = true;
+  return outputPath;
 }
 
 function writeCreationRules(root: string): void {
@@ -166,4 +189,21 @@ function runGlovesCommand(glovesBin: string, root: string, args: string[]): void
   if (command.status !== 0) {
     throw new Error(command.stderr || `gloves command failed: ${args.join(" ")}`);
   }
+}
+
+function nativeAddonPath(): string {
+  return join(GLOVES_CLIENT_PACKAGE_ROOT, "native", "gloves_client_native.node");
+}
+
+function nativeArtifactPath(): string {
+  if (process.platform === "darwin") {
+    return join(REPO_ROOT, "target", "debug", "libgloves_client_native.dylib");
+  }
+  if (process.platform === "linux") {
+    return join(REPO_ROOT, "target", "debug", "libgloves_client_native.so");
+  }
+  if (process.platform === "win32") {
+    return join(REPO_ROOT, "target", "debug", "gloves_client_native.dll");
+  }
+  throw new Error(`unsupported platform for native addon build: ${process.platform}`);
 }

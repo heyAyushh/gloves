@@ -31,3 +31,4 @@ examples/
 .openclaw/
 node_modules/
 packages/*/dist/
+packages/*/native/

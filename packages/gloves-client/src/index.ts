@@ -1,7 +1,9 @@
 import { readFileSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { Socket, createConnection } from "node:net";
-import { basename } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface GlovesClientConfig {
   root: string;
@@ -35,6 +37,37 @@ export interface GetSecretResult {
   approvalLatencyMs: number;
 }
 
+type NativeGetSecretResult = {
+  value: string;
+  metadata: SecretMetadata;
+  approvalStatus: "auto" | "approved";
+  approvalLatencyMs: number;
+};
+
+type NativeGlovesClientHandle = {
+  list: (prefix?: string) => Promise<string[]>;
+  show: (path: string) => Promise<SecretMetadata>;
+  get: (path: string) => Promise<NativeGetSecretResult>;
+  set: (path: string, value: string) => Promise<void>;
+  delete: (path: string) => Promise<void>;
+  rotate: (agentId: string) => Promise<void>;
+  approve: (requestId: string, decision: "approve" | "deny", reason?: string) => Promise<void>;
+};
+
+type NativeBinding = {
+  NativeGlovesClient: new (
+    root: string,
+    agentId: string,
+    mcpConfigPath: string,
+    tokenPath: string,
+    socketPath?: string,
+    glovesBin?: string,
+    glovesMcpBin?: string,
+    cwd?: string,
+    timeoutMs?: number,
+  ) => NativeGlovesClientHandle;
+};
+
 type ToolResponse = {
   content?: Array<{ type: string; text: string }>;
   isError?: boolean;
@@ -66,6 +99,7 @@ const TOOLS_CALL_METHOD = "tools/call";
 const SECRET_NOTIFICATION_METHOD = "gloves/secret";
 
 export class GlovesClient {
+  private readonly nativeClient: NativeGlovesClientHandle | null;
   private readonly config: Required<Omit<GlovesClientConfig, "cwd" | "glovesBin" | "glovesMcpBin" | "timeoutMs">> &
     Pick<GlovesClientConfig, "cwd"> & {
       glovesBin: string;
@@ -73,8 +107,9 @@ export class GlovesClient {
       timeoutMs: number;
     };
 
-  private constructor(config: GlovesClient["config"]) {
+  private constructor(config: GlovesClient["config"], nativeClient: NativeGlovesClientHandle | null) {
     this.config = config;
+    this.nativeClient = nativeClient;
   }
 
   static async connect(config: GlovesClientConfig): Promise<GlovesClient> {
@@ -82,7 +117,7 @@ export class GlovesClient {
       throw new Error("GlovesClient.connect requires root, agentId, mcpConfigPath, and tokenPath");
     }
 
-    return new GlovesClient({
+    const resolvedConfig = {
       root: config.root,
       agentId: config.agentId,
       mcpConfigPath: config.mcpConfigPath,
@@ -92,10 +127,15 @@ export class GlovesClient {
       glovesMcpBin: config.glovesMcpBin ?? "gloves-mcp",
       cwd: config.cwd,
       timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    });
+    };
+
+    return new GlovesClient(resolvedConfig, tryCreateNativeClient(resolvedConfig));
   }
 
   async list(prefix?: string): Promise<string[]> {
+    if (this.nativeClient) {
+      return await this.nativeClient.list(prefix);
+    }
     const { response } = await this.callTool("gloves_list", prefix ? { prefix } : {});
     const secrets = response.structuredContent?.secrets;
     if (!Array.isArray(secrets)) {
@@ -105,11 +145,23 @@ export class GlovesClient {
   }
 
   async show(path: string): Promise<SecretMetadata> {
+    if (this.nativeClient) {
+      return await this.nativeClient.show(path);
+    }
     const { response } = await this.callTool("gloves_show", { path });
     return normalizeMetadata(response.structuredContent);
   }
 
   async get(path: string): Promise<GetSecretResult> {
+    if (this.nativeClient) {
+      const result = await this.nativeClient.get(path);
+      return {
+        value: result.value,
+        metadata: result.metadata,
+        approvalStatus: result.approvalStatus,
+        approvalLatencyMs: result.approvalLatencyMs,
+      };
+    }
     const startedAt = performance.now();
     const mcpResponse = await this.callTool("gloves_get", { path });
     if (typeof mcpResponse.secretValue !== "string") {
@@ -126,19 +178,35 @@ export class GlovesClient {
   }
 
   async set(path: string, value: string): Promise<void> {
+    if (this.nativeClient) {
+      await this.nativeClient.set(path, value);
+      return;
+    }
     const envName = createSetEnvName(path);
     await this.callTool("gloves_set", { path, from_env: envName }, { [envName]: value });
   }
 
   async delete(path: string): Promise<void> {
+    if (this.nativeClient) {
+      await this.nativeClient.delete(path);
+      return;
+    }
     await this.callTool("gloves_delete", { path });
   }
 
   async rotate(agentId = this.config.agentId): Promise<void> {
+    if (this.nativeClient) {
+      await this.nativeClient.rotate(agentId);
+      return;
+    }
     await this.callTool("gloves_rotate", { agent_id: agentId });
   }
 
   async approve(requestId: string, decision: "approve" | "deny", reason?: string): Promise<void> {
+    if (this.nativeClient) {
+      await this.nativeClient.approve(requestId, decision, reason);
+      return;
+    }
     await this.callTool("gloves_approve", {
       request_id: requestId,
       decision,
@@ -466,6 +534,49 @@ function formatSessionError(stderr: string, error: unknown): string {
   const reason = error instanceof Error ? error.message : String(error);
   const details = stderr.trim();
   return details ? `${reason}: ${details}` : reason;
+}
+
+let cachedNativeBinding: NativeBinding | null | undefined;
+
+function tryCreateNativeClient(
+  config: GlovesClient["config"],
+): NativeGlovesClientHandle | null {
+  const binding = loadNativeBinding();
+  if (!binding) {
+    return null;
+  }
+
+  try {
+    return new binding.NativeGlovesClient(
+      config.root,
+      config.agentId,
+      config.mcpConfigPath,
+      config.tokenPath,
+      config.socketPath,
+      config.glovesBin,
+      config.glovesMcpBin,
+      config.cwd,
+      config.timeoutMs,
+    );
+  } catch {
+    return null;
+  }
+}
+
+function loadNativeBinding(): NativeBinding | null {
+  if (cachedNativeBinding !== undefined) {
+    return cachedNativeBinding;
+  }
+
+  const require = createRequire(import.meta.url);
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const nativeAddonPath = join(moduleDirectory, "..", "native", "gloves_client_native.node");
+  try {
+    cachedNativeBinding = require(nativeAddonPath) as NativeBinding;
+  } catch {
+    cachedNativeBinding = null;
+  }
+  return cachedNativeBinding;
 }
 
 class BufferedLineReader {

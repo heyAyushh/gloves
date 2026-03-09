@@ -7,7 +7,7 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target node",
+    "build": "bun run scripts/build-native.ts && bun build src/index.ts --outdir dist --target node",
     "test": "bun test src"
   }
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/gloves-core"]
+members = ["crates/gloves-core", "crates/gloves-config", "crates/gloves-client-native"]
 resolver = "2"
 
 [workspace.package]

@@ -4,12 +4,14 @@ import { GlovesClient } from "./index";
 import {
   createGlovesFixture,
   ensureGlovesBinaries,
+  ensureNativeAddon,
   type GlovesFixture,
 } from "./testing";
 
 let fixture: GlovesFixture | null = null;
 
 ensureGlovesBinaries();
+ensureNativeAddon();
 
 afterEach(() => {
   fixture?.cleanup();
@@ -17,6 +19,23 @@ afterEach(() => {
 });
 
 describe("@gloves/client", () => {
+  test("loads the native addon when it is available", async () => {
+    fixture = createGlovesFixture();
+    const client = await GlovesClient.connect({
+      root: fixture.root,
+      agentId: "devy",
+      mcpConfigPath: fixture.mcpConfigPath,
+      tokenPath: fixture.tokenPath,
+      socketPath: fixture.socketPath,
+      glovesMcpBin: fixture.glovesMcpBin,
+    });
+
+    expect((client as unknown as { nativeClient: unknown }).nativeClient).not.toBeNull();
+
+    const secret = await client.get(fixture.secretPath);
+    expect(secret.value).toBe(fixture.secretValue);
+  });
+
   test("lists, shows, and gets secrets through the MCP bridge", async () => {
     fixture = createGlovesFixture();
     const client = await GlovesClient.connect({
