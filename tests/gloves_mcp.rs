@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Stdio},
@@ -283,9 +283,27 @@ struct SocketMcpSession {
 #[cfg(unix)]
 impl SocketMcpSession {
     fn connect(socket_path: &Path) -> Self {
-        let stream = UnixStream::connect(socket_path).unwrap();
-        let reader = BufReader::new(stream.try_clone().unwrap());
-        Self { stream, reader }
+        let deadline = Instant::now() + TOKEN_WAIT_TIMEOUT;
+        loop {
+            match UnixStream::connect(socket_path) {
+                Ok(stream) => {
+                    let reader = BufReader::new(stream.try_clone().unwrap());
+                    return Self { stream, reader };
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                    ) && Instant::now() < deadline =>
+                {
+                    thread::sleep(TOKEN_WAIT_INTERVAL);
+                }
+                Err(error) => panic!(
+                    "failed to connect to socket {}: {error}",
+                    socket_path.display()
+                ),
+            }
+        }
     }
 
     fn send(&mut self, payload: Value) {

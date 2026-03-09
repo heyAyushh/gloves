@@ -5,7 +5,7 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     path::{Component, Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Stdio},
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration as StdDuration, Instant},
@@ -70,6 +70,8 @@ const GLOVES_BINARY_NAME: &str = "gloves";
 const DEFAULT_METRICS_BIND_ADDRESS: &str = "127.0.0.1:7789";
 const METRICS_RESPONSE_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const WEBHOOK_CALLBACK_APPROVER_AGENT_ID: &str = "webhook";
+const WEBHOOK_CURL_BIN_ENV_VAR: &str = "GLOVES_CURL_BIN";
+const WEBHOOK_CURL_MAX_TIME_SECONDS: u64 = 10;
 
 static METRICS_STATE: OnceLock<Arc<MetricsState>> = OnceLock::new();
 
@@ -1599,6 +1601,9 @@ fn webhook_signature(secret: Option<&str>, body: &[u8]) -> Result<String> {
 }
 
 fn post_json(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
+    if url.starts_with("https://") {
+        return post_json_over_https(url, body, signature);
+    }
     let parsed = parse_http_url(url)?;
     let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))?;
     write!(
@@ -1624,6 +1629,55 @@ fn post_json(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn post_json_over_https(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
+    let curl_binary = env::var(WEBHOOK_CURL_BIN_ENV_VAR).unwrap_or_else(|_| "curl".to_owned());
+    let mut command = ProcessCommand::new(&curl_binary);
+    command
+        .arg("--silent")
+        .arg("--show-error")
+        .arg("--fail")
+        .arg("--request")
+        .arg("POST")
+        .arg("--header")
+        .arg("Content-Type: application/json")
+        .arg("--data-binary")
+        .arg("@-")
+        .arg("--max-time")
+        .arg(WEBHOOK_CURL_MAX_TIME_SECONDS.to_string())
+        .arg(url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(signature) = signature.filter(|value| !value.is_empty()) {
+        command
+            .arg("--header")
+            .arg(format!("X-Gloves-Signature: {signature}"));
+    }
+
+    let mut child = command.spawn().map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "failed to spawn `{curl_binary}` for HTTPS webhook delivery: {error}"
+        ))
+    })?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(body)?;
+    }
+    let output = child.wait_with_output().map_err(GlovesError::Io)?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let failure_reason = if stderr.is_empty() {
+        format!("exit status {}", output.status)
+    } else {
+        stderr
+    };
+    Err(GlovesError::InvalidInput(format!(
+        "HTTPS webhook delivery failed: {failure_reason}"
+    )))
 }
 
 struct ParsedHttpUrl {
@@ -2499,6 +2553,9 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
+    static CURL_BIN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
     const TEST_AGENT: &str = "devy";
     const TEST_OTHER_AGENT: &str = "webhook";
     const TEST_SECRET_PATH: &str = "agents/devy/api-keys/anthropic";
@@ -2621,6 +2678,50 @@ mod tests {
             fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn https_webhook_delivery_uses_configured_curl_binary() {
+        let _lock = CURL_BIN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("mock-curl.sh");
+        let args_path = temp.path().join("curl-args.txt");
+        let body_path = temp.path().join("curl-body.bin");
+        fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat > \"{}\"\n",
+                args_path.display(),
+                body_path.display(),
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let previous_curl_bin = env::var_os(WEBHOOK_CURL_BIN_ENV_VAR);
+        env::set_var(WEBHOOK_CURL_BIN_ENV_VAR, &script_path);
+        let body = br#"{"hello":"world"}"#;
+        let result = post_json(
+            "https://hooks.example.test/approve",
+            body,
+            Some("sha256=test-signature"),
+        );
+        match previous_curl_bin {
+            Some(value) => env::set_var(WEBHOOK_CURL_BIN_ENV_VAR, value),
+            None => env::remove_var(WEBHOOK_CURL_BIN_ENV_VAR),
+        }
+
+        assert!(result.is_ok());
+        let args = fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("--request"));
+        assert!(args.contains("POST"));
+        assert!(args.contains("--data-binary"));
+        assert!(args.contains("@-"));
+        assert!(args.contains("Content-Type: application/json"));
+        assert!(args.contains("X-Gloves-Signature: sha256=test-signature"));
+        assert!(args.contains("https://hooks.example.test/approve"));
+        assert_eq!(fs::read(body_path).unwrap(), body);
     }
 
     #[test]
