@@ -340,6 +340,30 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 return Ok(code);
             }
         }
+        Command::Rotate { agent, keep_old } => {
+            let store = NamespacedStore::new(state.paths.root());
+            let agent_id = AgentId::new(&agent)?;
+            let result = store.rotate_identity(&agent_id, keep_old)?;
+            log_command_executed(
+                &state.paths,
+                &state.default_agent_id,
+                "rotate",
+                Some(agent.clone()),
+            );
+            let line = format!(
+                "rotated {} from {} to {}\narchived_identity: {}\nupdated: {}\nunchanged: {}\nskipped: {}",
+                result.agent,
+                result.old_public_key,
+                result.new_public_key,
+                result.archived_identity_path.display(),
+                result.updated,
+                result.unchanged,
+                result.skipped
+            );
+            if let Some(code) = stdout_line_or_exit(&line)? {
+                return Ok(code);
+            }
+        }
         Command::Explain { code } => {
             let normalized_code = normalize_error_code(&code);
             if let Some(exit_code) = run_explain_command(&code, json_output)? {

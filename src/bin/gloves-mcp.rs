@@ -4,6 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, BufRead, BufReader, Write},
     path::{Component, Path, PathBuf},
+    process::Command as ProcessCommand,
     thread,
     time::{Duration as StdDuration, Instant},
 };
@@ -51,11 +52,13 @@ const GLOVES_GET_TOOL: &str = "gloves_get";
 const GLOVES_SET_TOOL: &str = "gloves_set";
 const GLOVES_DELETE_TOOL: &str = "gloves_delete";
 const GLOVES_APPROVE_TOOL: &str = "gloves_approve";
+const GLOVES_ROTATE_TOOL: &str = "gloves_rotate";
 const SESSION_TOKEN_ENV_VAR: &str = "GLOVES_SESSION_TOKEN_PATH";
 const HOME_ENV_VAR: &str = "HOME";
 const STORE_SECTION_DEFAULT: &str = "store";
 const IDENTITIES_SECTION_DEFAULT: &str = "identities";
 const AUDIT_SECTION_DEFAULT: &str = "audit";
+const GLOVES_BINARY_NAME: &str = "gloves";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -238,6 +241,12 @@ struct ApprovalResult {
     request_id: String,
     decision: String,
     reviewer: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RotateAgentResult {
+    agent: String,
+    approval_status: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,6 +565,7 @@ fn handle_tool_call(
         GLOVES_SET_TOOL => handle_set_tool(config, session, &arguments),
         GLOVES_DELETE_TOOL => handle_delete_tool(config, session, &arguments),
         GLOVES_APPROVE_TOOL => handle_approve_tool(config, session, &arguments),
+        GLOVES_ROTATE_TOOL => handle_rotate_tool(config, session, &arguments),
         _ => Err((
             INTERNAL_ERROR_CODE,
             "Unsupported tool",
@@ -766,6 +776,46 @@ fn handle_approve_tool(
     ))
 }
 
+fn handle_rotate_tool(
+    config: &ResolvedConfig,
+    session: &SessionContext,
+    arguments: &Map<String, Value>,
+) -> std::result::Result<Value, (i64, &'static str, Value)> {
+    let agent_id = required_string_argument(arguments, "agent_id")?;
+    if agent_id != session.agent_id.as_str() {
+        return Err((
+            PERMISSION_DENIED_CODE,
+            "Permission denied",
+            json!({ "reason": "cross_agent_rotation_denied" }),
+        ));
+    }
+    let approval = resolve_approval(config, session, GLOVES_ROTATE_TOOL, &agent_id)?;
+    run_gloves_rotate(config, &agent_id).map_err(map_runtime_error)?;
+    append_audit_record(
+        config,
+        AuditRecord {
+            version: 1,
+            timestamp: Utc::now(),
+            event_type: "key_rotation",
+            agent_id: Some(session.agent_id.as_str()),
+            tool: Some(GLOVES_ROTATE_TOOL),
+            path: Some(&agent_id),
+            result: "approved",
+            error: None,
+        },
+    )
+    .map_err(|_| internal_error("failed to write audit log"))?;
+
+    Ok(tool_success_response(
+        format!("Rotated identity `{agent_id}`"),
+        serde_json::to_value(RotateAgentResult {
+            agent: agent_id,
+            approval_status: approval.status,
+        })
+        .map_err(|_| internal_error("failed to serialize rotate result"))?,
+    ))
+}
+
 fn get_secret(
     config: &ResolvedConfig,
     session: &SessionContext,
@@ -959,7 +1009,7 @@ fn resolve_approval(
 fn approval_tier_for_tool(tool_name: &str) -> ApprovalTier {
     match tool_name {
         GLOVES_LIST_TOOL | GLOVES_SHOW_TOOL | GLOVES_APPROVE_TOOL => ApprovalTier::Auto,
-        GLOVES_GET_TOOL | GLOVES_SET_TOOL => ApprovalTier::Human,
+        GLOVES_GET_TOOL | GLOVES_SET_TOOL | GLOVES_ROTATE_TOOL => ApprovalTier::Human,
         GLOVES_DELETE_TOOL => ApprovalTier::Deny,
         _ => ApprovalTier::Deny,
     }
@@ -1057,6 +1107,52 @@ fn generate_signing_key() -> SigningKey {
     let mut key_bytes = [0_u8; 32];
     rand::rng().fill(&mut key_bytes);
     SigningKey::from_bytes(&key_bytes)
+}
+
+fn run_gloves_rotate(config: &ResolvedConfig, agent_id: &str) -> Result<()> {
+    let root_path = config.store_path.parent().ok_or_else(|| {
+        GlovesError::InvalidInput("store.path must have a parent root directory".to_owned())
+    })?;
+    let output = ProcessCommand::new(gloves_binary_path())
+        .args([
+            "--root",
+            root_path.to_str().ok_or_else(|| {
+                GlovesError::InvalidInput("root path must be valid UTF-8".to_owned())
+            })?,
+            "rotate",
+            "--agent",
+            agent_id,
+        ])
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    if stderr.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "gloves rotate failed without stderr output".to_owned(),
+        ));
+    }
+    Err(GlovesError::InvalidInput(stderr))
+}
+
+fn gloves_binary_path() -> PathBuf {
+    let sibling_binary = env::current_exe()
+        .ok()
+        .map(|path| path.with_file_name(executable_name(GLOVES_BINARY_NAME)));
+    match sibling_binary {
+        Some(path) if path.exists() => path,
+        _ => PathBuf::from(GLOVES_BINARY_NAME),
+    }
+}
+
+fn executable_name(base_name: &str) -> String {
+    if cfg!(windows) {
+        format!("{base_name}.exe")
+    } else {
+        base_name.to_owned()
+    }
 }
 
 fn resolve_recipients(
@@ -1652,6 +1748,26 @@ fn tool_definitions() -> Vec<Value> {
                 "openWorldHint": false
             }
         }),
+        json!({
+            "name": GLOVES_ROTATE_TOOL,
+            "description": "Rotate the authenticated agent identity and re-encrypt affected secrets",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to rotate"
+                    }
+                },
+                "required": ["agent_id"]
+            },
+            "annotations": {
+                "readOnlyHint": false,
+                "destructiveHint": true,
+                "idempotentHint": false,
+                "openWorldHint": false
+            }
+        }),
     ]
 }
 
@@ -1938,7 +2054,7 @@ mod tests {
             &harness.config,
             &session,
             Some(&json!({
-                "name": "gloves_rotate",
+                "name": "gloves_unknown",
                 "arguments": {}
             })),
         )
@@ -2010,6 +2126,7 @@ mod tests {
                 GLOVES_SET_TOOL,
                 GLOVES_DELETE_TOOL,
                 GLOVES_APPROVE_TOOL,
+                GLOVES_ROTATE_TOOL,
             ]
         );
     }

@@ -29,3 +29,5 @@ examples/
 
 # Local runtime secret state
 .openclaw/
+node_modules/
+packages/*/dist/

@@ -22,7 +22,10 @@ const STORE_DIR_NAME: &str = "store";
 const AUDIT_DIR_NAME: &str = "audit";
 const METADATA_DIR_NAME: &str = ".gloves-meta";
 const AGE_EXTENSION: &str = "age";
-const DATE_STAMP_FORMAT: &str = "%Y%m%d";
+const TIMESTAMP_STAMP_FORMAT: &str = "%Y%m%d%H%M%S";
+const REVOKED_IDENTITY_PREFIX: &str = "revoked";
+const PREVIOUS_IDENTITY_PREFIX: &str = "previous";
+const STAGED_IDENTITY_PREFIX: &str = "next";
 
 #[derive(Debug, Clone)]
 pub(crate) struct NamespacedStore {
@@ -70,6 +73,18 @@ pub(crate) struct UpdateKeysResult {
     pub(crate) dry_run: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct RotateIdentityResult {
+    pub(crate) agent: String,
+    pub(crate) identity_path: PathBuf,
+    pub(crate) archived_identity_path: PathBuf,
+    pub(crate) old_public_key: String,
+    pub(crate) new_public_key: String,
+    pub(crate) updated: usize,
+    pub(crate) unchanged: usize,
+    pub(crate) skipped: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SecretMetadata {
     name: String,
@@ -80,6 +95,12 @@ struct SecretMetadata {
     last_accessed: Option<DateTime<Utc>>,
     agent: String,
     encrypted_to: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct FileRewrite {
+    path: PathBuf,
+    original_contents: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,8 +172,9 @@ impl NamespacedStore {
                 return Err(GlovesError::AlreadyExists);
             }
             let revoked_path = identity_path.with_extension(format!(
-                "{AGE_EXTENSION}.revoked-{}",
-                Utc::now().format(DATE_STAMP_FORMAT)
+                "{AGE_EXTENSION}.{}-{}",
+                REVOKED_IDENTITY_PREFIX,
+                Utc::now().format(TIMESTAMP_STAMP_FORMAT)
             ));
             fs::rename(&identity_path, revoked_path)?;
         }
@@ -340,6 +362,51 @@ impl NamespacedStore {
         })
     }
 
+    pub(crate) fn rotate_identity(
+        &self,
+        agent: &AgentId,
+        keep_old: bool,
+    ) -> Result<RotateIdentityResult> {
+        self.init_layout()?;
+        let identity_path = self.identity_path(agent);
+        if !identity_path.exists() {
+            return Err(GlovesError::InvalidInput(format!(
+                "identity file not found: {}",
+                identity_path.display()
+            )));
+        }
+
+        let old_public_key = age_crypto::recipient_from_identity_file(&identity_path)?;
+        let staged_identity_path = self.staged_identity_path(agent);
+        age_crypto::generate_identity_file(&staged_identity_path)?;
+        let new_public_key = age_crypto::recipient_from_identity_file(&staged_identity_path)?;
+        let rewrites = self.rewrite_recipient_references(&old_public_key, &new_public_key)?;
+
+        let update_result = match self.update_keys(None, Some(identity_path.as_path()), false) {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = self.restore_file_rewrites(&rewrites);
+                let _ = fs::remove_file(&staged_identity_path);
+                return Err(error);
+            }
+        };
+
+        let archived_identity_path = self.archived_identity_path(agent, keep_old);
+        fs::rename(&identity_path, &archived_identity_path)?;
+        fs::rename(&staged_identity_path, &identity_path)?;
+
+        Ok(RotateIdentityResult {
+            agent: agent.as_str().to_owned(),
+            identity_path,
+            archived_identity_path,
+            old_public_key,
+            new_public_key,
+            updated: update_result.updated,
+            unchanged: update_result.unchanged,
+            skipped: update_result.skipped,
+        })
+    }
+
     fn resolve_identity_for_update(
         &self,
         identity_override: Option<&Path>,
@@ -514,9 +581,101 @@ impl NamespacedStore {
         Ok(secrets)
     }
 
+    fn rewrite_recipient_references(
+        &self,
+        current_recipient: &str,
+        next_recipient: &str,
+    ) -> Result<Vec<FileRewrite>> {
+        let mut rewrites = Vec::new();
+
+        for file_path in self.recipient_reference_files()? {
+            let original_contents = fs::read(&file_path)?;
+            let original_text = String::from_utf8(original_contents.clone())?;
+            let updated_text = if file_path.file_name().and_then(|value| value.to_str())
+                == Some(RECIPIENTS_FILE_NAME)
+            {
+                replace_recipient_lines(&original_text, current_recipient, next_recipient)
+            } else {
+                original_text.replace(current_recipient, next_recipient)
+            };
+
+            if updated_text == original_text {
+                continue;
+            }
+
+            write_private_file_atomic(&file_path, updated_text.as_bytes())?;
+            rewrites.push(FileRewrite {
+                path: file_path,
+                original_contents,
+            });
+        }
+
+        Ok(rewrites)
+    }
+
+    fn restore_file_rewrites(&self, rewrites: &[FileRewrite]) -> Result<()> {
+        for rewrite in rewrites {
+            write_private_file_atomic(&rewrite.path, &rewrite.original_contents)?;
+        }
+        Ok(())
+    }
+
+    fn recipient_reference_files(&self) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let rules_path = self.store_dir().join(RULES_FILE_NAME);
+        if rules_path.exists() {
+            files.push(rules_path);
+        }
+
+        let mut pending = vec![self.store_dir()];
+        while let Some(directory) = pending.pop() {
+            for entry in fs::read_dir(&directory)? {
+                let path = entry?.path();
+                if path == self.metadata_dir() {
+                    continue;
+                }
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.file_name().and_then(|value| value.to_str()) == Some(RECIPIENTS_FILE_NAME) {
+                    files.push(path);
+                }
+            }
+        }
+
+        files.sort();
+        Ok(files)
+    }
+
     fn identity_path(&self, agent: &AgentId) -> PathBuf {
         self.identities_dir()
             .join(format!("{}.{}", agent.as_str(), AGE_EXTENSION))
+    }
+
+    fn archived_identity_path(&self, agent: &AgentId, keep_old: bool) -> PathBuf {
+        let archive_prefix = if keep_old {
+            PREVIOUS_IDENTITY_PREFIX
+        } else {
+            REVOKED_IDENTITY_PREFIX
+        };
+        self.identities_dir().join(format!(
+            "{}.{}.{}-{}",
+            agent.as_str(),
+            AGE_EXTENSION,
+            archive_prefix,
+            Utc::now().format(TIMESTAMP_STAMP_FORMAT)
+        ))
+    }
+
+    fn staged_identity_path(&self, agent: &AgentId) -> PathBuf {
+        self.identities_dir().join(format!(
+            "{}.{}.{}-{}",
+            agent.as_str(),
+            AGE_EXTENSION,
+            STAGED_IDENTITY_PREFIX,
+            Utc::now().format(TIMESTAMP_STAMP_FORMAT)
+        ))
     }
 
     fn secret_ciphertext_path(&self, secret_path: &str) -> PathBuf {
@@ -608,9 +767,33 @@ fn validated_relative_path(path: &str) -> Result<PathBuf> {
     Ok(relative_path)
 }
 
+fn replace_recipient_lines(
+    contents: &str,
+    current_recipient: &str,
+    next_recipient: &str,
+) -> String {
+    let replaced_lines = contents
+        .lines()
+        .map(|line| {
+            if line.trim() == current_recipient {
+                next_recipient.to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>();
+    if contents.ends_with('\n') {
+        format!("{}\n", replaced_lines.join("\n"))
+    } else {
+        replaced_lines.join("\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{scope_agent, CreationRule, CreationRulesFile, RecipientList};
+    use super::{
+        replace_recipient_lines, scope_agent, CreationRule, CreationRulesFile, RecipientList,
+    };
 
     #[test]
     fn recipient_list_accepts_csv_and_array_values() {
@@ -641,5 +824,12 @@ mod tests {
                 path_regex: _
             }
         ));
+    }
+
+    #[test]
+    fn replace_recipient_lines_updates_only_matching_keys() {
+        let contents = "# main\nage1main\nage1devy\n";
+        let updated = replace_recipient_lines(contents, "age1devy", "age1next");
+        assert_eq!(updated, "# main\nage1main\nage1next\n");
     }
 }

@@ -13,6 +13,9 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     assert!(contents.contains("command: \"gloves-mcp\""));
     assert!(contents.contains("GLOVES_SESSION_TOKEN_PATH"));
     assert!(contents.contains("package: \"@openclaw/gloves\""));
+    assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
+    assert!(contents.contains("root: \"~/.config/gloves\""));
+    assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
     assert!(contents.contains("GLOVES_SOCKET: \"/gloves.sock\""));
     assert!(contents.contains("GLOVES_TOKEN_PATH: \"/run/gloves/token\""));
 }

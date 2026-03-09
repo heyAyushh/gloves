@@ -214,6 +214,10 @@ const UPDATEKEYS_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves updatekeys
   gloves updatekeys --path shared --dry-run
 "#;
+const ROTATE_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves rotate --agent devy
+  gloves rotate --agent devy --keep-old
+"#;
 const GPG_CREATE_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent agent-main gpg create
 
@@ -339,6 +343,16 @@ pub enum Command {
         /// Explicit identity file used for decryption.
         #[arg(long)]
         identity: Option<PathBuf>,
+    },
+    /// Rotates one agent identity and re-encrypts affected secrets.
+    #[command(after_help = ROTATE_COMMAND_AFTER_HELP)]
+    Rotate {
+        /// Agent identifier.
+        #[arg(long)]
+        agent: String,
+        /// Preserve the old identity under a non-revoked archive name.
+        #[arg(long)]
+        keep_old: bool,
     },
     /// Explains a stable error code with recovery guidance.
     #[command(after_help = EXPLAIN_COMMAND_AFTER_HELP)]

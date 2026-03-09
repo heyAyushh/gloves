@@ -329,7 +329,8 @@ fn authenticated_sessions_can_list_tools_and_read_redacted_metadata() {
             "gloves_get",
             "gloves_set",
             "gloves_delete",
-            "gloves_approve"
+            "gloves_approve",
+            "gloves_rotate"
         ]
     );
 
@@ -571,4 +572,54 @@ fn delete_tool_is_denied_with_explanation() {
     let response = session.call_tool(2, "gloves_delete", json!({ "path": SECRET_PATH }));
     assert_eq!(response["error"]["code"], -32002);
     assert_eq!(response["error"]["message"], "Operation denied");
+}
+
+#[test]
+fn rotate_tool_reencrypts_current_agent_secrets_under_auto_approval() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("root");
+    let config_path = temp.path().join("gloves.toml");
+    let token_path = temp.path().join("session-token");
+
+    set_identity(&root, "devy");
+    write_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(&root, "devy", SECRET_PATH, SECRET_VALUE);
+    let original_recipients =
+        fs::read_to_string(root.join("store/agents/devy/.age-recipients")).unwrap();
+    write_mcp_config(&config_path, &root, &token_path, "auto");
+
+    let (mut session, created_token_path) = McpSession::spawn(&config_path, Some("devy"));
+    let token = wait_for_token(&created_token_path);
+    let init_response = session.initialize(&token, "devy");
+    assert!(init_response.get("result").is_some());
+    session.notify_initialized();
+
+    let rotate_response = session.call_tool(2, "gloves_rotate", json!({ "agent_id": "devy" }));
+    assert_eq!(rotate_response["result"]["isError"], false);
+    assert_eq!(
+        rotate_response["result"]["structuredContent"]["agent"],
+        "devy"
+    );
+
+    let rotated_recipients =
+        fs::read_to_string(root.join("store/agents/devy/.age-recipients")).unwrap();
+    assert_ne!(rotated_recipients, original_recipients);
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "devy",
+            "get",
+            SECRET_PATH,
+            "--format",
+            "raw",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::diff(SECRET_VALUE));
 }

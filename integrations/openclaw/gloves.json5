@@ -26,7 +26,8 @@
     gloves: {
       package: "@openclaw/gloves",
       config: {
-        socketPath: "~/.openclaw/gloves/daemon.sock",
+        root: "~/.config/gloves",
+        mcpConfigPath: "~/.config/gloves/gloves.toml",
         tokenPath: "~/.openclaw/gloves/session-token",
         injectMode: "env",
         tmpfsPath: "/run/secrets"

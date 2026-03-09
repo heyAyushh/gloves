@@ -554,6 +554,31 @@ const UPDATEKEYS_FIELDS: &[FieldSpec] = &[
     },
 ];
 
+const ROTATE_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "agent",
+        label: "Agent",
+        help: "--agent id",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::OptionValue("--agent"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "keep_old",
+        label: "Keep Old",
+        help: "--keep-old",
+        required: false,
+        kind: FieldKind::Bool,
+        arg: FieldArg::Flag("--keep-old"),
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
 const ENV_FIELDS: &[FieldSpec] = &[
     FieldSpec {
         id: "name",
@@ -1009,6 +1034,13 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Re-encrypt secrets using current recipients",
         path: &["updatekeys"],
         fields: UPDATEKEYS_FIELDS,
+    },
+    CommandSpec {
+        id: "rotate",
+        title: "rotate",
+        summary: "Rotate one agent identity and re-encrypt secrets",
+        path: &["rotate"],
+        fields: ROTATE_FIELDS,
     },
     CommandSpec {
         id: "set",
@@ -4183,7 +4215,7 @@ mod unit_tests {
             assert!(tree.iter().all(|node| node.label != label));
         }
 
-        for label in ["set", "get", "show", "updatekeys", "set-identity"] {
+        for label in ["set", "get", "show", "updatekeys", "rotate", "set-identity"] {
             assert!(tree.iter().any(|node| node.label == label));
         }
 

@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use gloves::agent::age_crypto;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
@@ -38,6 +39,18 @@ fn store_paths(root: &Path, secret_path: &str) -> (PathBuf, PathBuf) {
         .join(".gloves-meta")
         .join(format!("{secret_path}.json"));
     (ciphertext, metadata)
+}
+
+fn find_rotated_identity(root: &Path, agent: &str, prefix: &str) -> PathBuf {
+    fs::read_dir(root.join("identities"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.starts_with(&format!("{agent}.age.{prefix}")))
+        })
+        .unwrap_or_else(|| panic!("missing rotated identity for agent {agent}"))
 }
 
 fn collect_file_contents(root: &Path) -> Vec<Vec<u8>> {
@@ -271,6 +284,49 @@ fn updatekeys_reencrypts_using_current_namespace_recipients() {
     get_secret_raw(root, "devy", "shared/database-url")
         .failure()
         .stderr(predicate::str::contains("unauthorized"));
+}
+
+#[test]
+fn rotate_reencrypts_secrets_for_the_new_identity_and_revokes_the_old_one() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let original_recipient = set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+
+    let (ciphertext_path, _metadata_path) = store_paths(root, SECRET_PATH);
+    let old_identity_path = root.join("identities/devy.age");
+    let old_plaintext = age_crypto::decrypt_file(&ciphertext_path, &old_identity_path).unwrap();
+    assert_eq!(String::from_utf8(old_plaintext).unwrap(), SECRET_VALUE);
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "rotate",
+            "--agent",
+            "devy",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rotated devy"));
+
+    let updated_recipient = read_namespace_recipients(root, "agents/devy");
+    assert_eq!(updated_recipient.len(), 1);
+    assert_ne!(updated_recipient[0], original_recipient);
+
+    get_secret_raw(root, "devy", SECRET_PATH)
+        .success()
+        .stdout(predicate::eq(SECRET_VALUE));
+
+    let revoked_identity_path = find_rotated_identity(root, "devy", "revoked-");
+    let revoked_error = age_crypto::decrypt_file(&ciphertext_path, &revoked_identity_path)
+        .expect_err("revoked identity should not decrypt rotated secret");
+    assert!(revoked_error.to_string().contains("No matching keys"));
 }
 
 #[test]
