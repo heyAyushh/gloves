@@ -32,6 +32,7 @@ export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin
     name: "gloves",
     version: "0.1.0",
     async init(api: PluginAPI) {
+      validatePluginConfig(config, api);
       const client = await GlovesClient.connect({
         ...config,
         agentId: api.agent.id,
@@ -133,4 +134,15 @@ function expectString(value: unknown, fieldName: string): string {
     throw new Error(`tool argument '${fieldName}' must be a non-empty string`);
   }
   return value;
+}
+
+function validatePluginConfig(config: GlovesPluginConfig, api: PluginAPI): void {
+  if (config.injectMode === "tmpfs" || config.injectMode === "both") {
+    if (!config.tmpfsPath) {
+      throw new Error("tmpfs injection requires tmpfsPath at plugin startup");
+    }
+    if (!api.sandbox.writeFile) {
+      throw new Error("tmpfs injection requires api.sandbox.writeFile at plugin startup");
+    }
+  }
 }

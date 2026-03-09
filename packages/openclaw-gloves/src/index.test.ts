@@ -80,4 +80,46 @@ describe("@openclaw/gloves", () => {
       await callback();
     }
   });
+
+  test("fails fast when tmpfs injection has no tmpfsPath", async () => {
+    const plugin = glovesPlugin({
+      root: "/tmp/gloves",
+      mcpConfigPath: "/tmp/gloves.toml",
+      tokenPath: "/tmp/session-token",
+      injectMode: "tmpfs",
+    });
+
+    const api: PluginAPI = {
+      agent: { id: "devy" },
+      sandbox: {
+        env: { set() {} },
+        writeFile: async () => {},
+      },
+      registerTool() {},
+      onShutdown() {},
+    };
+
+    await expect(plugin.init(api)).rejects.toThrow("tmpfsPath");
+  });
+
+  test("fails fast when tmpfs injection has no sandbox writer", async () => {
+    const plugin = glovesPlugin({
+      root: "/tmp/gloves",
+      mcpConfigPath: "/tmp/gloves.toml",
+      tokenPath: "/tmp/session-token",
+      injectMode: "both",
+      tmpfsPath: "/run/secrets",
+    });
+
+    const api: PluginAPI = {
+      agent: { id: "devy" },
+      sandbox: {
+        env: { set() {} },
+      },
+      registerTool() {},
+      onShutdown() {},
+    };
+
+    await expect(plugin.init(api)).rejects.toThrow("sandbox.writeFile");
+  });
 });
