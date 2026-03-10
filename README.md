@@ -131,6 +131,12 @@ cargo test --all-features --locked
 cargo doc --no-deps
 ```
 
+When Docker is available, the OpenClaw sandbox harness can be exercised with:
+
+```bash
+bun run docker:e2e
+```
+
 ## License and Changelog
 
 - [LICENSE](LICENSE)

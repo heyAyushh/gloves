@@ -4,7 +4,23 @@
 
 ### Minor Changes
 
-- No unreleased changes yet.
+- Added the OpenClaw namespaced secret workflow:
+  - `gloves set-identity` now provisions per-agent age identities and namespace recipient files.
+  - `gloves set`, `get`, `show`, `updatekeys`, and `rotate` now support agent-scoped OpenClaw secret paths and redacted metadata output.
+- Added first-class OpenClaw integration artifacts:
+  - Published `gloves.json5` bridge config and `SKILL.md` guidance for agent-safe secret handling.
+  - Added Bun-based `@gloves/client` and `@openclaw/gloves` packages, including native addon loading and environment/tmpfs injection flows.
+- Rebuilt `gloves-mcp` around `rmcp` with brokered secret delivery:
+  - Supports stdio and Unix-socket sessions with session-token authentication.
+  - Exposes typed `gloves_*` tools with redacted responses, approval gating, audit logging, webhook callbacks, and metrics output.
+- Added a Docker end-to-end OpenClaw harness:
+  - `bun run docker:e2e` now exercises the sandboxed plugin flow, verifies cross-agent denial, and checks that secret plaintext stays out of tool responses and conversation logs.
+
+### Patch Changes
+
+- Hardened OpenClaw approval and transport behavior with HTTPS webhook delivery, tmpfs startup validation, and more explicit configuration/runtime errors.
+- Added architecture and security documentation for the brokered-credentials model and linked the new operator guidance from the README.
+- Expanded Rust and Bun regression coverage across the CLI, daemon, namespaced store, vault flows, and OpenClaw integration paths, lifting repo-wide Rust line coverage above 90%.
 
 ## 0.5.6
 
