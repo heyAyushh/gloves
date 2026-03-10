@@ -792,8 +792,11 @@ fn replace_recipient_lines(
 #[cfg(test)]
 mod tests {
     use super::{
-        replace_recipient_lines, scope_agent, CreationRule, CreationRulesFile, RecipientList,
+        namespace_for_secret_path, replace_recipient_lines, scope_agent, validated_relative_path,
+        CreationRule, CreationRulesFile, NamespacedStore, RecipientList, RULES_FILE_NAME,
     };
+    use crate::{agent::age_crypto, error::GlovesError, types::AgentId};
+    use std::{fs, path::Path, path::PathBuf};
 
     #[test]
     fn recipient_list_accepts_csv_and_array_values() {
@@ -831,5 +834,204 @@ mod tests {
         let contents = "# main\nage1main\nage1devy\n";
         let updated = replace_recipient_lines(contents, "age1devy", "age1next");
         assert_eq!(updated, "# main\nage1main\nage1next\n");
+    }
+
+    #[test]
+    fn namespace_helpers_cover_agents_shared_and_invalid_paths() {
+        assert_eq!(
+            namespace_for_secret_path("agents/devy/api-keys/anthropic").unwrap(),
+            PathBuf::from("agents").join("devy")
+        );
+        assert_eq!(
+            namespace_for_secret_path("shared/database-url").unwrap(),
+            PathBuf::from("shared")
+        );
+        assert_eq!(
+            validated_relative_path("shared/database-url").unwrap(),
+            PathBuf::from("shared/database-url")
+        );
+
+        let missing_agent = namespace_for_secret_path("agents").unwrap_err();
+        assert!(missing_agent
+            .to_string()
+            .contains("agent namespace is missing"));
+
+        let traversal = validated_relative_path("../escape").unwrap_err();
+        assert!(matches!(traversal, GlovesError::Validation(_)));
+    }
+
+    #[test]
+    fn init_layout_and_create_identity_cover_force_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+        assert!(temp.path().join("identities").is_dir());
+        assert!(temp.path().join("store").is_dir());
+        assert!(temp.path().join("store/.gloves-meta").is_dir());
+        assert!(temp.path().join("audit").is_dir());
+
+        let agent = AgentId::new("devy").unwrap();
+        let first = store.create_identity(&agent, false).unwrap();
+        let duplicate = store.create_identity(&agent, false).unwrap_err();
+        assert!(matches!(duplicate, GlovesError::AlreadyExists));
+
+        let second = store.create_identity(&agent, true).unwrap();
+        assert_ne!(first.public_key, second.public_key);
+        let recipients = fs::read_to_string(second.recipients_file).unwrap();
+        assert_eq!(recipients.trim(), second.public_key);
+        assert!(fs::read_dir(temp.path().join("identities"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .any(|name| name.starts_with("devy.age.revoked-")));
+    }
+
+    #[test]
+    fn resolve_recipients_merges_rules_with_namespace_entries_and_reports_missing_rules() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let missing_rules = store
+            .resolve_recipients("shared/database-url", Path::new("shared"))
+            .unwrap_err();
+        assert!(missing_rules
+            .to_string()
+            .contains("creation rules not found"));
+
+        fs::write(
+            temp.path().join("store").join(RULES_FILE_NAME),
+            "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n    age:\n      - age1rule\n      - age1shared\n",
+        )
+        .unwrap();
+        fs::create_dir_all(temp.path().join("store/shared")).unwrap();
+        fs::write(
+            temp.path().join("store/shared/.age-recipients"),
+            "# comment\nage1namespace\nage1shared\n",
+        )
+        .unwrap();
+
+        let recipients = store
+            .resolve_recipients("shared/database-url", Path::new("shared"))
+            .unwrap();
+        assert_eq!(
+            recipients,
+            vec![
+                "age1namespace".to_owned(),
+                "age1rule".to_owned(),
+                "age1shared".to_owned(),
+            ]
+        );
+
+        let no_match = store
+            .resolve_recipients("agents/devy/api-keys/anthropic", Path::new("agents/devy"))
+            .unwrap_err();
+        assert!(no_match.to_string().contains("no matching creation rule"));
+    }
+
+    #[test]
+    fn list_secret_paths_skips_metadata_and_filters_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+        fs::create_dir_all(temp.path().join("store/shared")).unwrap();
+        fs::create_dir_all(temp.path().join("store/agents/devy")).unwrap();
+        fs::create_dir_all(temp.path().join("store/.gloves-meta/shared")).unwrap();
+        fs::write(
+            temp.path().join("store/shared/database-url.age"),
+            b"ciphertext",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("store/agents/devy/openai.age"),
+            b"ciphertext",
+        )
+        .unwrap();
+        fs::write(
+            temp.path()
+                .join("store/.gloves-meta/shared/database-url.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        let all = store.list_secret_paths(None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                "agents/devy/openai".to_owned(),
+                "shared/database-url".to_owned()
+            ]
+        );
+        let filtered = store.list_secret_paths(Some("agents/devy")).unwrap();
+        assert_eq!(filtered, vec!["agents/devy/openai".to_owned()]);
+    }
+
+    #[test]
+    fn rewrite_and_restore_recipient_references_round_trip() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+        let rules_path = temp.path().join("store").join(RULES_FILE_NAME);
+        let recipients_path = temp.path().join("store/shared/.age-recipients");
+        fs::create_dir_all(recipients_path.parent().unwrap()).unwrap();
+        fs::write(
+            &rules_path,
+            "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n    age:\n      - age1old\n",
+        )
+        .unwrap();
+        fs::write(&recipients_path, "age1old\nage1keep\n").unwrap();
+
+        let rewrites = store
+            .rewrite_recipient_references("age1old", "age1new")
+            .unwrap();
+        assert_eq!(rewrites.len(), 2);
+        assert!(fs::read_to_string(&rules_path).unwrap().contains("age1new"));
+        assert!(fs::read_to_string(&recipients_path)
+            .unwrap()
+            .contains("age1new"));
+
+        store.restore_file_rewrites(&rewrites).unwrap();
+        assert!(fs::read_to_string(&rules_path).unwrap().contains("age1old"));
+        assert!(fs::read_to_string(&recipients_path)
+            .unwrap()
+            .contains("age1old"));
+    }
+
+    #[test]
+    fn resolve_identity_for_update_uses_override_and_existing_identity_search() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+        let agent = AgentId::new("devy").unwrap();
+        let identity = store.create_identity(&agent, false).unwrap();
+        let current_recipients = vec![identity.public_key.clone()];
+
+        let override_path = store
+            .resolve_identity_for_update(
+                Some(identity.identity_path.as_path()),
+                &current_recipients,
+                "agents/devy/api-keys/anthropic",
+            )
+            .unwrap();
+        assert_eq!(override_path, identity.identity_path);
+
+        let auto_resolved = store
+            .resolve_identity_for_update(
+                None,
+                &current_recipients,
+                "agents/devy/api-keys/anthropic",
+            )
+            .unwrap();
+        assert!(auto_resolved.ends_with("devy.age"));
+
+        let other_identity = temp.path().join("identities/other.age");
+        age_crypto::generate_identity_file(&other_identity).unwrap();
+        let unauthorized = store
+            .resolve_identity_for_update(
+                Some(other_identity.as_path()),
+                &current_recipients,
+                "agents/devy/api-keys/anthropic",
+            )
+            .unwrap_err();
+        assert!(matches!(unauthorized, GlovesError::Unauthorized));
     }
 }

@@ -119,6 +119,26 @@ fn get_secret_raw(root: &Path, agent: &str, path: &str) -> assert_cmd::assert::A
     command.assert()
 }
 
+fn get_secret_json(root: &Path, agent: &str, path: &str) -> Value {
+    let output = gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            agent,
+            "get",
+            path,
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 #[test]
 fn set_identity_creates_private_identity_and_namespace_recipients_file() {
     let temp = tempfile::tempdir().unwrap();
@@ -158,23 +178,7 @@ fn set_and_get_support_raw_and_json_output_for_namespaced_secrets() {
         .success()
         .stdout(predicate::eq(SECRET_VALUE));
 
-    let output = gloves_command()
-        .args([
-            "--root",
-            root.to_str().unwrap(),
-            "--agent",
-            "devy",
-            "get",
-            SECRET_PATH,
-            "--format",
-            "json",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let payload: Value = serde_json::from_slice(&output).unwrap();
+    let payload = get_secret_json(root, "devy", SECRET_PATH);
 
     assert_eq!(payload["name"], SECRET_PATH);
     assert_eq!(payload["value"], SECRET_VALUE);
@@ -219,6 +223,18 @@ fn show_redacted_returns_metadata_without_identity_file() {
 }
 
 #[test]
+fn show_reports_not_found_for_missing_secret() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    gloves_command()
+        .args(["--root", root.to_str().unwrap(), "show", SECRET_PATH])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
 fn get_rejects_agents_outside_the_recipient_set() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -234,6 +250,117 @@ fn get_rejects_agents_outside_the_recipient_set() {
     get_secret_raw(root, "webhook", SECRET_PATH)
         .failure()
         .stderr(predicate::str::contains("unauthorized"));
+}
+
+#[test]
+fn get_reports_missing_identity_file_for_agent() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+    fs::remove_file(root.join("identities/devy.age")).unwrap();
+
+    get_secret_raw(root, "devy", SECRET_PATH)
+        .failure()
+        .stderr(predicate::str::contains("identity file not found"));
+}
+
+#[test]
+fn set_rejects_matching_rule_without_any_resolved_recipients() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "devy",
+            "set",
+            SECRET_PATH,
+            "--value",
+            SECRET_VALUE,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no recipients resolved"));
+}
+
+#[test]
+fn set_reports_missing_creation_rules_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "devy",
+            "set",
+            SECRET_PATH,
+            "--value",
+            SECRET_VALUE,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("creation rules not found"));
+}
+
+#[test]
+fn set_reports_invalid_creation_rules_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(root, "version: [");
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--agent",
+            "devy",
+            "set",
+            SECRET_PATH,
+            "--value",
+            SECRET_VALUE,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid creation rules"));
+}
+
+#[test]
+fn set_overwrite_preserves_created_timestamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+    let first_payload = get_secret_json(root, "devy", SECRET_PATH);
+
+    set_secret(root, "devy", SECRET_PATH, "sk-ant-api03-updated-secret");
+    let second_payload = get_secret_json(root, "devy", SECRET_PATH);
+
+    assert_eq!(first_payload["created"], second_payload["created"]);
+    assert_eq!(second_payload["value"], "sk-ant-api03-updated-secret");
 }
 
 #[test]
@@ -287,6 +414,183 @@ fn updatekeys_reencrypts_using_current_namespace_recipients() {
 }
 
 #[test]
+fn updatekeys_accepts_explicit_identity_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let main_recipient = set_identity(root, "main");
+    let devy_recipient = set_identity(root, "devy");
+    fs::create_dir_all(root.join("store/shared")).unwrap();
+    fs::write(
+        root.join("store/shared/.age-recipients"),
+        format!("{main_recipient}\n"),
+    )
+    .unwrap();
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    set_secret(root, "main", "shared/database-url", "postgres://db");
+    fs::write(
+        root.join("store/shared/.age-recipients"),
+        format!("{main_recipient}\n{devy_recipient}\n"),
+    )
+    .unwrap();
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "updatekeys",
+            "--path",
+            "shared",
+            "--identity",
+            root.join("identities/main.age").to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated: 1"));
+
+    get_secret_raw(root, "devy", "shared/database-url")
+        .success()
+        .stdout(predicate::eq("postgres://db"));
+}
+
+#[test]
+fn updatekeys_reports_unchanged_when_recipients_already_match() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "updatekeys",
+            "--path",
+            "agents/devy",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated: 0"))
+        .stdout(predicate::str::contains("unchanged: 1"))
+        .stdout(predicate::str::contains("skipped: 0"));
+}
+
+#[test]
+fn updatekeys_dry_run_reports_updates_without_reencrypting() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let devy_recipient = set_identity(root, "devy");
+    let main_recipient = set_identity(root, "main");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+    fs::write(
+        root.join("store/agents/devy/.age-recipients"),
+        format!("{devy_recipient}\n{main_recipient}\n"),
+    )
+    .unwrap();
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "updatekeys",
+            "--path",
+            "agents/devy",
+            "--dry-run",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated: 1"))
+        .stdout(predicate::str::contains("unchanged: 0"))
+        .stdout(predicate::str::contains("skipped: 0"))
+        .stdout(predicate::str::contains("dry_run: true"));
+
+    get_secret_raw(root, "main", SECRET_PATH)
+        .failure()
+        .stderr(predicate::str::contains("unauthorized"));
+}
+
+#[test]
+fn updatekeys_fails_when_no_identity_can_decrypt_current_recipients() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    let main_recipient = set_identity(root, "main");
+    let devy_recipient = set_identity(root, "devy");
+    fs::create_dir_all(root.join("store/shared")).unwrap();
+    fs::write(
+        root.join("store/shared/.age-recipients"),
+        format!("{main_recipient}\n"),
+    )
+    .unwrap();
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    set_secret(root, "main", "shared/database-url", "postgres://db");
+    fs::write(
+        root.join("store/shared/.age-recipients"),
+        format!("{main_recipient}\n{devy_recipient}\n"),
+    )
+    .unwrap();
+    fs::remove_dir_all(root.join("identities")).unwrap();
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "updatekeys",
+            "--path",
+            "shared",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no identity can decrypt shared/database-url",
+        ));
+}
+
+#[test]
+fn updatekeys_skips_paths_when_rules_resolve_no_recipients() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+    fs::write(root.join("store/agents/devy/.age-recipients"), "").unwrap();
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "updatekeys",
+            "--path",
+            "agents/devy",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("updated: 0"))
+        .stdout(predicate::str::contains("unchanged: 0"))
+        .stdout(predicate::str::contains("skipped: 1"));
+}
+
+#[test]
 fn rotate_reencrypts_secrets_for_the_new_identity_and_revokes_the_old_one() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -327,6 +631,52 @@ fn rotate_reencrypts_secrets_for_the_new_identity_and_revokes_the_old_one() {
     let revoked_error = age_crypto::decrypt_file(&ciphertext_path, &revoked_identity_path)
         .expect_err("revoked identity should not decrypt rotated secret");
     assert!(revoked_error.to_string().contains("No matching keys"));
+}
+
+#[test]
+fn rotate_keep_old_archives_previous_identity_without_revocation_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    set_identity(root, "devy");
+    write_creation_rules(
+        root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    );
+    set_secret(root, "devy", SECRET_PATH, SECRET_VALUE);
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "rotate",
+            "--agent",
+            "devy",
+            "--keep-old",
+        ])
+        .assert()
+        .success();
+
+    let archived_identity_path = find_rotated_identity(root, "devy", "previous-");
+    assert!(archived_identity_path.exists());
+}
+
+#[test]
+fn rotate_requires_existing_identity_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+
+    gloves_command()
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "rotate",
+            "--agent",
+            "devy",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("identity file not found"));
 }
 
 #[test]

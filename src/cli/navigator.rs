@@ -1306,27 +1306,18 @@ fn normalize_launch_command_args(args: &[String]) -> Vec<String> {
 }
 
 fn resolve_launch_command_spec(args: &[String]) -> Option<(usize, usize)> {
-    let mut best_match: Option<(usize, usize)> = None;
-    for (command_index, command_spec) in COMMAND_SPECS.iter().enumerate() {
-        if args.len() < command_spec.path.len() {
-            continue;
-        }
-        let matches_path = command_spec
-            .path
-            .iter()
-            .zip(args.iter())
-            .all(|(path_segment, argument)| *path_segment == argument.as_str());
-        if !matches_path {
-            continue;
-        }
-        match best_match {
-            Some((_, matched_segments)) if matched_segments >= command_spec.path.len() => {}
-            _ => {
-                best_match = Some((command_index, command_spec.path.len()));
-            }
-        }
-    }
-    best_match
+    COMMAND_SPECS
+        .iter()
+        .enumerate()
+        .find(|(_, command_spec)| {
+            args.len() >= command_spec.path.len()
+                && command_spec
+                    .path
+                    .iter()
+                    .zip(args.iter())
+                    .all(|(path_segment, argument)| *path_segment == argument.as_str())
+        })
+        .map(|(command_index, command_spec)| (command_index, command_spec.path.len()))
 }
 
 fn split_long_option_token(token: &str) -> (&str, Option<&str>) {
@@ -4090,19 +4081,30 @@ impl FocusPane {
 #[cfg(test)]
 mod unit_tests {
     use super::{
-        build_command_tree, build_invocation_args, field_states_for_spec,
-        format_output_text_for_viewport, initial_field_state, is_risky_command,
-        normalize_launch_command_args, resolve_launch_command_spec, sanitize_output_line,
-        stdin_payload_for_command, tail_scroll_start, visible_line_window, CommandSpec,
-        CommandTreeNode, FieldState, FieldValue, FocusPane, NavigatorLaunchOptions, RunPhase,
-        RunRecord, TuiApp, COMMAND_SPECS, GLOBAL_FIELDS, HORIZONTAL_SCROLL_STEP, MAX_OUTPUT_LINES,
-        UI_FOOTER_HEIGHT, UI_HEADER_HEIGHT,
+        build_command_tree, build_invocation_args, command_spec_matches_query,
+        field_states_for_spec, format_invocation_args, format_output_text_for_viewport,
+        initial_field_state, is_risky_command, normalize_launch_command_args,
+        resolve_launch_command_spec, sanitize_output_line, spawn_process_with_streaming_output,
+        split_long_option_token, stdin_payload_for_command, tail_scroll_start, trim_line_ending,
+        visible_line_window, visible_tree_leaf_count, ActiveRun, CommandSpec, CommandTreeNode,
+        FieldKind, FieldState, FieldValue, FocusPane, NavigatorLaunchOptions, RunOutputEvent,
+        RunOutputStream, RunPhase, RunRecord, TuiApp, COMMAND_SPECS, GLOBAL_FIELDS,
+        HORIZONTAL_SCROLL_STEP, MAX_OUTPUT_LINES, UI_FOOTER_HEIGHT, UI_HEADER_HEIGHT,
     };
     use crate::cli::Cli;
     use clap::CommandFactory;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
-    use ratatui::layout::{Constraint, Direction, Layout, Rect};
-    use std::{collections::BTreeSet, process::Command as ProcessCommand, time::Instant};
+    use ratatui::{
+        backend::TestBackend,
+        layout::{Constraint, Direction, Layout, Rect},
+        Terminal,
+    };
+    use std::{
+        collections::BTreeSet,
+        process::{Command as ProcessCommand, Stdio},
+        sync::mpsc,
+        time::Instant,
+    };
 
     fn command_by_id(id: &str) -> &'static CommandSpec {
         COMMAND_SPECS
@@ -4113,6 +4115,39 @@ mod unit_tests {
 
     fn default_global_fields() -> Vec<FieldState> {
         GLOBAL_FIELDS.iter().map(initial_field_state).collect()
+    }
+
+    fn text_field_value<'a>(fields: &'a [FieldState], field_id: &str) -> &'a str {
+        let field = fields
+            .iter()
+            .find(|field| field.spec.id == field_id)
+            .expect("field exists");
+        match &field.value {
+            FieldValue::Text(value) => value,
+            _ => panic!("expected text field"),
+        }
+    }
+
+    fn bool_field_value(fields: &[FieldState], field_id: &str) -> bool {
+        let field = fields
+            .iter()
+            .find(|field| field.spec.id == field_id)
+            .expect("field exists");
+        match field.value {
+            FieldValue::Bool(value) => value,
+            _ => panic!("expected bool field"),
+        }
+    }
+
+    fn choice_field_value<'a>(fields: &'a [FieldState], field_id: &str) -> &'a str {
+        let field = fields
+            .iter()
+            .find(|field| field.spec.id == field_id)
+            .expect("field exists");
+        match (&field.spec.kind, &field.value) {
+            (FieldKind::Choice(choices), FieldValue::Choice(index)) => choices[*index],
+            _ => panic!("expected choice field"),
+        }
     }
 
     fn node_by_label<'a>(nodes: &'a [CommandTreeNode], label: &str) -> &'a CommandTreeNode {
@@ -4127,6 +4162,14 @@ mod unit_tests {
             .args(arguments)
             .status()
             .expect("cargo status available")
+    }
+
+    fn render_app(app: &mut TuiApp, width: u16, height: u16) {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| app.render(frame))
+            .expect("render should succeed");
     }
 
     fn collect_visible_leaf_paths(
@@ -4158,6 +4201,26 @@ mod unit_tests {
         assert!(COMMAND_SPECS
             .iter()
             .any(|command| command.id == "requests_approve"));
+    }
+
+    #[test]
+    fn command_catalog_uses_only_leaf_paths() {
+        for (index, command_spec) in COMMAND_SPECS.iter().enumerate() {
+            let has_executable_child =
+                COMMAND_SPECS
+                    .iter()
+                    .enumerate()
+                    .any(|(other_index, other)| {
+                        index != other_index
+                            && other.path.starts_with(command_spec.path)
+                            && other.path.len() > command_spec.path.len()
+                    });
+            assert!(
+                !has_executable_child,
+                "command `{}` must stay a leaf path",
+                command_spec.id
+            );
+        }
     }
 
     #[test]
@@ -4361,6 +4424,30 @@ mod unit_tests {
     }
 
     #[test]
+    fn visible_tree_leaf_count_matches_visible_cli_catalog() {
+        let mut paths = Vec::new();
+        collect_visible_leaf_paths(&Cli::command(), &[], &mut paths);
+        let visible_leaf_count = paths
+            .into_iter()
+            .filter(|path| {
+                !matches!(path.first().map(String::as_str), Some("help") | Some("tui"))
+                    && !matches!(path.last().map(String::as_str), Some("help"))
+            })
+            .count();
+        assert_eq!(visible_tree_leaf_count(), visible_leaf_count);
+    }
+
+    #[test]
+    fn command_search_matches_title_summary_and_path_segments() {
+        let request_approve = command_by_id("requests_approve");
+        assert!(command_spec_matches_query(request_approve, ""));
+        assert!(command_spec_matches_query(request_approve, "approve"));
+        assert!(command_spec_matches_query(request_approve, "pending"));
+        assert!(command_spec_matches_query(request_approve, "requests"));
+        assert!(!command_spec_matches_query(request_approve, "unrelated"));
+    }
+
+    #[test]
     fn build_args_for_requests_approve_includes_request_id() {
         let command = command_by_id("requests_approve");
         let globals = default_global_fields();
@@ -4470,6 +4557,124 @@ mod unit_tests {
     }
 
     #[test]
+    fn build_args_for_set_generate_mode_includes_generate_flag() {
+        let command = command_by_id("set");
+        let globals = default_global_fields();
+        let mut fields = field_states_for_spec(command);
+        fields[0].value = FieldValue::Text("service/token".to_owned());
+        fields[1].value = FieldValue::Choice(0);
+
+        let args = build_invocation_args(command, &globals, &fields).expect("build args");
+        assert!(args.contains(&"--generate".to_owned()));
+    }
+
+    #[test]
+    fn build_args_for_namespaced_set_modes_cover_value_and_stdin_paths() {
+        let command = command_by_id("ns_set");
+        let globals = default_global_fields();
+        let mut value_fields = field_states_for_spec(command);
+        value_fields[0].value = FieldValue::Text("agents/devy/api-keys/anthropic".to_owned());
+        value_fields[1].value = FieldValue::Choice(0);
+        value_fields[2].value = FieldValue::Text("secret-value".to_owned());
+
+        let value_args =
+            build_invocation_args(command, &globals, &value_fields).expect("value args");
+        assert_eq!(
+            value_args,
+            vec![
+                "--error-format",
+                "text",
+                "set",
+                "agents/devy/api-keys/anthropic",
+                "--value",
+                "secret-value"
+            ]
+        );
+
+        let mut stdin_fields = field_states_for_spec(command);
+        stdin_fields[0].value = FieldValue::Text("agents/devy/api-keys/anthropic".to_owned());
+        stdin_fields[1].value = FieldValue::Choice(1);
+        stdin_fields[2].value = FieldValue::Text("stdin-secret".to_owned());
+        let stdin_args =
+            build_invocation_args(command, &globals, &stdin_fields).expect("stdin args");
+        assert_eq!(
+            stdin_args,
+            vec![
+                "--error-format",
+                "text",
+                "set",
+                "agents/devy/api-keys/anthropic",
+                "--stdin"
+            ]
+        );
+        let payload = stdin_payload_for_command(command, &stdin_fields)
+            .expect("stdin payload")
+            .expect("payload exists");
+        assert_eq!(payload, b"stdin-secret");
+    }
+
+    #[test]
+    fn format_invocation_args_and_signature_quote_shell_words() {
+        let args = vec![
+            "vault".to_owned(),
+            "exec".to_owned(),
+            "value with spaces".to_owned(),
+            "quote'heavy".to_owned(),
+        ];
+        let formatted = format_invocation_args(&args);
+        assert!(formatted.contains("'value with spaces'"));
+        assert!(formatted.contains("quote"));
+
+        let signature = super::command_signature(command_by_id("vault_exec"), &args);
+        assert!(signature.starts_with("vault_exec::"));
+        assert!(signature.contains("value with spaces"));
+    }
+
+    #[test]
+    fn trim_line_ending_removes_trailing_crlf_bytes() {
+        let mut buffer = b"secret\r\n".to_vec();
+        trim_line_ending(&mut buffer);
+        assert_eq!(buffer, b"secret");
+
+        let mut clean = b"secret".to_vec();
+        trim_line_ending(&mut clean);
+        assert_eq!(clean, b"secret");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_process_with_streaming_output_reads_stdout_stderr_and_stdin() {
+        let args = vec![
+            "-c".to_owned(),
+            "read line; printf 'out:%s\\n' \"$line\"; printf 'err:%s\\n' \"$line\" >&2".to_owned(),
+        ];
+        let (mut child, receiver) = spawn_process_with_streaming_output(
+            std::path::Path::new("/bin/sh"),
+            &args,
+            Some(b"streamed-input\n"),
+        )
+        .expect("process should spawn");
+        let status = child.wait().expect("child should exit");
+        assert!(status.success());
+
+        let events = receiver.into_iter().collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RunOutputEvent::Line {
+                stream: RunOutputStream::Stdout,
+                line
+            } if line == "out:streamed-input"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            RunOutputEvent::Line {
+                stream: RunOutputStream::Stderr,
+                line
+            } if line == "err:streamed-input"
+        )));
+    }
+
+    #[test]
     fn build_args_validates_required_fields() {
         let command = command_by_id("revoke");
         let globals = default_global_fields();
@@ -4489,6 +4694,740 @@ mod unit_tests {
         let args = build_invocation_args(command, &globals, &fields).expect("build args");
         assert!(args.contains(&"--".to_owned()));
         assert!(args.ends_with(&["sh".to_owned(), "-c".to_owned(), "echo hi".to_owned()]));
+    }
+
+    #[test]
+    fn launch_command_normalization_handles_empty_shortcuts_and_passthrough() {
+        assert!(normalize_launch_command_args(&[]).is_empty());
+        assert_eq!(
+            normalize_launch_command_args(&["ls".to_owned()]),
+            vec!["list".to_owned()]
+        );
+        assert_eq!(
+            normalize_launch_command_args(&["req".to_owned()]),
+            vec!["requests".to_owned()]
+        );
+        assert_eq!(
+            normalize_launch_command_args(&["deny".to_owned(), "req-123".to_owned()]),
+            vec![
+                "requests".to_owned(),
+                "deny".to_owned(),
+                "req-123".to_owned()
+            ]
+        );
+        assert_eq!(
+            normalize_launch_command_args(&["show".to_owned(), "agents/devy/key".to_owned()]),
+            vec!["show".to_owned(), "agents/devy/key".to_owned()]
+        );
+    }
+
+    #[test]
+    fn launch_command_resolver_rejects_unknown_paths() {
+        assert!(resolve_launch_command_spec(&["unknown".to_owned()]).is_none());
+    }
+
+    #[test]
+    fn split_long_option_token_handles_inline_and_flag_only_forms() {
+        assert_eq!(split_long_option_token("--ttl=7"), ("--ttl", Some("7")));
+        assert_eq!(split_long_option_token("--dry-run"), ("--dry-run", None));
+    }
+
+    #[test]
+    fn tui_launch_options_apply_all_global_overrides() {
+        let app = TuiApp::new(NavigatorLaunchOptions {
+            root: Some("/tmp/gloves".to_owned()),
+            agent: Some("devy".to_owned()),
+            config: Some("/etc/gloves/gloves.toml".to_owned()),
+            no_config: true,
+            vault_mode: Some("required".to_owned()),
+            error_format: Some("json".to_owned()),
+            command_args: Vec::new(),
+        });
+
+        assert_eq!(text_field_value(&app.global_fields, "root"), "/tmp/gloves");
+        assert_eq!(text_field_value(&app.global_fields, "agent"), "devy");
+        assert_eq!(
+            text_field_value(&app.global_fields, "config"),
+            "/etc/gloves/gloves.toml"
+        );
+        assert!(bool_field_value(&app.global_fields, "no_config"));
+        assert_eq!(
+            choice_field_value(&app.global_fields, "vault_mode"),
+            "required"
+        );
+        assert_eq!(
+            choice_field_value(&app.global_fields, "error_format"),
+            "json"
+        );
+        assert!(!app.startup_command_pending);
+    }
+
+    #[test]
+    fn tui_launch_options_report_unknown_startup_command() {
+        let app = TuiApp::new(NavigatorLaunchOptions {
+            command_args: vec!["missing".to_owned(), "command".to_owned()],
+            ..NavigatorLaunchOptions::default()
+        });
+
+        assert!(!app.startup_command_pending);
+        assert_eq!(
+            app.status_line,
+            "TUI startup command not found: missing command"
+        );
+    }
+
+    #[test]
+    fn startup_command_parse_note_keeps_command_selection_without_autorun() {
+        let app = TuiApp::new(NavigatorLaunchOptions {
+            command_args: vec![
+                "show".to_owned(),
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "--format".to_owned(),
+                "yaml".to_owned(),
+            ],
+            ..NavigatorLaunchOptions::default()
+        });
+
+        assert_eq!(app.selected_command_spec().id, "show");
+        assert!(!app.startup_command_pending);
+        assert!(app
+            .status_line
+            .contains("Loaded `show` (startup parse note: invalid value `yaml` for `Format`)"));
+        assert_eq!(
+            text_field_value(&app.command_fields, "path"),
+            "agents/devy/api-keys/anthropic"
+        );
+    }
+
+    #[test]
+    fn legacy_set_startup_parser_accepts_inline_values() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("legacy set command exists");
+        app.select_command_by_index(set_index);
+
+        app.populate_set_fields_from_args(&[
+            "service/token".to_owned(),
+            "--value=secret-value".to_owned(),
+            "--ttl=7".to_owned(),
+        ])
+        .expect("legacy set args should parse");
+
+        assert_eq!(
+            text_field_value(&app.command_fields, "name"),
+            "service/token"
+        );
+        assert_eq!(
+            choice_field_value(&app.command_fields, "input_mode"),
+            "value"
+        );
+        assert_eq!(
+            text_field_value(&app.command_fields, "value"),
+            "secret-value"
+        );
+        assert_eq!(text_field_value(&app.command_fields, "ttl"), "7");
+    }
+
+    #[test]
+    fn legacy_set_startup_parser_rejects_invalid_flag_forms() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("legacy set command exists");
+        app.select_command_by_index(set_index);
+
+        let cases = [
+            (
+                vec!["--value".to_owned(), "secret".to_owned()],
+                "missing secret name",
+            ),
+            (
+                vec!["service/token".to_owned(), "--generate=true".to_owned()],
+                "`--generate` does not take a value",
+            ),
+            (
+                vec!["service/token".to_owned(), "--stdin=value".to_owned()],
+                "`--stdin` does not take a value",
+            ),
+            (
+                vec!["service/token".to_owned(), "--value".to_owned()],
+                "`--value` requires a value",
+            ),
+            (
+                vec!["service/token".to_owned(), "--ttl".to_owned()],
+                "`--ttl` requires a value",
+            ),
+            (
+                vec!["service/token".to_owned(), "--unknown".to_owned()],
+                "unknown option `--unknown`",
+            ),
+            (
+                vec!["service/token".to_owned(), "extra".to_owned()],
+                "unexpected argument `extra`",
+            ),
+        ];
+
+        for (args, expected_error) in cases {
+            let error = app
+                .populate_set_fields_from_args(&args)
+                .expect_err("invalid legacy set args must fail");
+            assert_eq!(error, expected_error);
+        }
+    }
+
+    #[test]
+    fn vault_exec_startup_parser_populates_options_and_command_tail() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let command_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "vault_exec")
+            .expect("vault exec command exists");
+        app.select_command_by_index(command_index);
+
+        app.populate_vault_exec_fields_from_args(&[
+            "agent-data".to_owned(),
+            "--ttl=1h".to_owned(),
+            "--mountpoint".to_owned(),
+            "/run/secrets".to_owned(),
+            "--agent".to_owned(),
+            "devy".to_owned(),
+            "--".to_owned(),
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo hi".to_owned(),
+        ])
+        .expect("vault exec args should parse");
+
+        assert_eq!(text_field_value(&app.command_fields, "name"), "agent-data");
+        assert_eq!(text_field_value(&app.command_fields, "ttl"), "1h");
+        assert_eq!(
+            text_field_value(&app.command_fields, "mountpoint"),
+            "/run/secrets"
+        );
+        assert_eq!(text_field_value(&app.command_fields, "agent"), "devy");
+        assert_eq!(
+            text_field_value(&app.command_fields, "command_line"),
+            "sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
+    fn vault_exec_startup_parser_rejects_unknown_or_misplaced_arguments() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let command_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "vault_exec")
+            .expect("vault exec command exists");
+        app.select_command_by_index(command_index);
+
+        let missing_value = app
+            .populate_vault_exec_fields_from_args(&["--ttl".to_owned()])
+            .expect_err("missing option value must fail");
+        assert_eq!(missing_value, "`--ttl` requires a value");
+
+        let unknown_option = app
+            .populate_vault_exec_fields_from_args(&["--unknown=1".to_owned()])
+            .expect_err("unknown option must fail");
+        assert_eq!(unknown_option, "unknown option `--unknown`");
+
+        let misplaced_argument = app
+            .populate_vault_exec_fields_from_args(&["agent-data".to_owned(), "echo".to_owned()])
+            .expect_err("second positional argument must fail");
+        assert_eq!(
+            misplaced_argument,
+            "unexpected argument `echo` (expected `--` before command)"
+        );
+    }
+
+    #[test]
+    fn commit_edit_buffer_updates_fields_and_filter_status() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_identity_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set_identity")
+            .expect("set-identity command exists");
+        app.select_command_by_index(set_identity_index);
+        app.pending_risky_signature = Some("confirm".to_owned());
+        app.start_edit(false, 0);
+        app.editing_buffer = "devy".to_owned();
+
+        app.commit_edit_buffer();
+
+        assert_eq!(text_field_value(&app.command_fields, "agent"), "devy");
+        assert_eq!(app.status_line, "Value updated");
+        assert!(app.pending_risky_signature.is_none());
+        assert!(app.editing_target.is_none());
+        assert!(app.editing_buffer.is_empty());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("filter edit should start");
+        app.editing_buffer = "vault".to_owned();
+        app.commit_edit_buffer();
+        assert_eq!(app.command_filter, "vault");
+        assert_eq!(app.status_line, "Filter set: vault");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE))
+            .expect("filter edit should start");
+        app.editing_buffer.clear();
+        app.commit_edit_buffer();
+        assert!(app.command_filter.is_empty());
+        assert_eq!(app.status_line, "Filter cleared");
+    }
+
+    #[test]
+    fn pane_max_line_width_accounts_for_placeholder_fields_and_output() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let explain_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "explain")
+            .expect("explain command exists");
+        app.select_command_by_index(explain_index);
+        app.command_filter = "zzzz-no-match".to_owned();
+        app.global_fields
+            .iter_mut()
+            .find(|field| field.spec.id == "config")
+            .expect("config field exists")
+            .value = FieldValue::Text("/very/long/config/path/gloves.toml".to_owned());
+        app.command_fields
+            .iter_mut()
+            .find(|field| field.spec.id == "code")
+            .expect("explain code field exists")
+            .value = FieldValue::Text("E123".to_owned());
+        let mut record = RunRecord::new(7, "version".to_owned(), "gloves version".to_owned());
+        record
+            .stdout_lines
+            .push("0123456789abcdefghijklmnop".to_owned());
+        app.run_history.push(record);
+
+        assert_eq!(
+            app.pane_max_line_width(FocusPane::Commands),
+            "<no matching commands>".chars().count()
+        );
+        assert!(app.pane_max_line_width(FocusPane::Globals) >= "Config".len());
+        assert!(app.pane_max_line_width(FocusPane::Fields) >= "Code".len());
+        assert!(app.pane_max_line_width(FocusPane::Output) >= "0123456789abcdefghijklmnop".len());
+    }
+
+    #[test]
+    fn command_list_keys_expand_collapse_and_move_to_parent() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let rows = app.command_tree_rows();
+        let requests_index = rows
+            .iter()
+            .position(|row| row.label == "requests" && row.is_branch)
+            .expect("requests branch exists");
+        let requests_key = rows[requests_index].key.clone();
+        app.expanded_command_tree_paths.remove(&requests_key);
+        app.selected_command_tree_row = requests_index;
+
+        app.on_command_list_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert!(app.expanded_command_tree_paths.contains(&requests_key));
+
+        let rows = app.command_tree_rows();
+        let approve_index = rows
+            .iter()
+            .position(|row| {
+                row.parent_key.as_deref() == Some(requests_key.as_str()) && row.label == "approve"
+            })
+            .expect("approve child exists");
+        app.selected_command_tree_row = approve_index;
+
+        app.on_command_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(app.selected_command_tree_row, requests_index);
+    }
+
+    #[test]
+    fn field_list_keys_toggle_bools_cycle_choices_and_start_editing() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.pending_risky_signature = Some("confirm".to_owned());
+        let no_config_index = app
+            .global_fields
+            .iter()
+            .position(|field| field.spec.id == "no_config")
+            .expect("no-config field exists");
+        app.selected_global_field_index = no_config_index;
+        app.on_field_list_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE), true);
+        assert!(bool_field_value(&app.global_fields, "no_config"));
+        assert_eq!(app.status_line, "Toggled `No Config`");
+        assert!(app.pending_risky_signature.is_none());
+
+        let vault_mode_index = app
+            .global_fields
+            .iter()
+            .position(|field| field.spec.id == "vault_mode")
+            .expect("vault mode field exists");
+        app.selected_global_field_index = vault_mode_index;
+        app.on_field_list_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE), true);
+        assert_eq!(choice_field_value(&app.global_fields, "vault_mode"), "auto");
+        app.on_field_list_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE), true);
+        assert_eq!(
+            choice_field_value(&app.global_fields, "vault_mode"),
+            "<unset>"
+        );
+
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("set command exists");
+        app.select_command_by_index(set_index);
+        app.selected_command_field_index = 0;
+        app.on_field_list_key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE), false);
+        assert_eq!(app.input_mode_label(), "edit");
+        assert_eq!(app.status_line, "Editing `Name`");
+    }
+
+    #[test]
+    fn reload_and_reset_selected_fields_restore_defaults() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set")
+            .expect("set command exists");
+        app.select_command_by_index(set_index);
+        app.command_fields
+            .iter_mut()
+            .find(|field| field.spec.id == "ttl")
+            .expect("ttl field exists")
+            .value = FieldValue::Text("99".to_owned());
+        app.selected_command_field_index = app
+            .command_fields
+            .iter()
+            .position(|field| field.spec.id == "ttl")
+            .expect("ttl field index exists");
+        app.pending_risky_signature = Some("confirm".to_owned());
+
+        app.reset_selected_field(false);
+        assert_eq!(text_field_value(&app.command_fields, "ttl"), "1");
+        assert_eq!(app.status_line, "Reset `TTL Days`");
+        assert!(app.pending_risky_signature.is_none());
+
+        app.command_filter = "zzzz-no-match".to_owned();
+        app.pending_risky_signature = Some("confirm".to_owned());
+        app.reload_selected_command_fields();
+        assert!(app.command_fields.is_empty());
+        assert_eq!(app.status_line, "<no matching commands>");
+        assert!(app.pending_risky_signature.is_none());
+    }
+
+    #[test]
+    fn execute_selected_command_requires_confirmation_for_risky_commands() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let set_identity_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "set_identity")
+            .expect("set-identity command exists");
+        app.select_command_by_index(set_identity_index);
+        app.align_tree_selection_to_command(set_identity_index);
+        app.set_command_text("agent", "devy".to_owned());
+
+        app.execute_selected_command_with_policy(false)
+            .expect("confirmation step should succeed");
+
+        assert!(app.active_run.is_none());
+        assert_eq!(app.status_line, "Confirmation required for `set-identity`");
+        assert!(app.pending_risky_signature.is_some());
+    }
+
+    #[test]
+    fn execute_selected_command_reports_empty_filter_and_branch_selection() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.command_filter = "zzzz-no-match".to_owned();
+        app.execute_selected_command()
+            .expect("empty filter should not error");
+        assert_eq!(app.status_line, "<no matching commands>");
+
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let rows = app.command_tree_rows();
+        let requests_index = rows
+            .iter()
+            .position(|row| row.label == "requests" && row.is_branch)
+            .expect("requests branch exists");
+        app.selected_command_tree_row = requests_index;
+        app.execute_selected_command()
+            .expect("branch selection should not error");
+        assert_eq!(app.status_line, "Select a leaf command to execute");
+    }
+
+    #[test]
+    fn execute_selected_help_requires_leaf_command_selection() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let rows = app.command_tree_rows();
+        let requests_index = rows
+            .iter()
+            .position(|row| row.label == "requests" && row.is_branch)
+            .expect("requests branch exists");
+        app.selected_command_tree_row = requests_index;
+
+        app.execute_selected_help()
+            .expect("branch help should not error");
+
+        assert_eq!(app.status_line, "Select a leaf command to open help");
+    }
+
+    #[test]
+    fn cancel_active_run_without_process_reports_status() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.cancel_active_run();
+        assert_eq!(app.status_line, "No active run to cancel");
+    }
+
+    #[test]
+    fn apply_output_event_recreates_run_record_and_captures_errors() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let child = ProcessCommand::new("cargo")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cargo child");
+        let (_tx, rx) = mpsc::channel();
+        app.active_run = Some(ActiveRun {
+            run_id: 91,
+            command_title: "show".to_owned(),
+            invocation: "gloves show".to_owned(),
+            child,
+            output_events: rx,
+            cancel_requested: false,
+        });
+
+        app.apply_output_event(
+            91,
+            RunOutputEvent::Line {
+                stream: RunOutputStream::Stdout,
+                line: "value".to_owned(),
+            },
+        );
+        app.apply_output_event(
+            91,
+            RunOutputEvent::ReadError {
+                stream: RunOutputStream::Stderr,
+                message: "stream failed".to_owned(),
+            },
+        );
+
+        let record = app.run_record_mut(91).expect("run record exists");
+        assert!(record.stdout_lines.iter().any(|line| line == "value"));
+        assert!(record
+            .stderr_lines
+            .iter()
+            .any(|line| line.contains("[stderr] stream failed")));
+
+        let _ = app
+            .active_run
+            .as_mut()
+            .expect("active run exists")
+            .child
+            .wait();
+    }
+
+    #[test]
+    fn render_updates_viewport_state_in_split_and_fullscreen_modes() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        app.command_filter = "zzzz-no-match".to_owned();
+        app.pending_risky_signature = Some("confirm".to_owned());
+        let mut record = RunRecord::new(3, "version".to_owned(), "gloves version".to_owned());
+        record.stdout_lines.push("0123456789abcdef".to_owned());
+        app.run_history.push(record);
+
+        render_app(&mut app, 120, 40);
+        assert!(app.command_viewport_width > 0);
+        assert!(app.globals_viewport_width > 0);
+        assert!(app.fields_viewport_width > 0);
+        assert!(app.output_viewport_width > 0);
+        assert!(app.output_viewport_height > 0);
+
+        app.fullscreen_enabled = true;
+        app.focus = FocusPane::Output;
+        render_app(&mut app, 100, 30);
+        assert!(app.output_viewport_width > 0);
+        assert!(app.output_viewport_height > 0);
+    }
+
+    #[test]
+    fn mouse_clicks_distinguish_global_and_field_panes() {
+        let app = TuiApp::new(NavigatorLaunchOptions::default());
+        let terminal_area = Rect::new(0, 0, 140, 40);
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(UI_HEADER_HEIGHT),
+                Constraint::Min(1),
+                Constraint::Length(UI_FOOTER_HEIGHT),
+            ])
+            .split(terminal_area);
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(28),
+                Constraint::Percentage(32),
+                Constraint::Percentage(40),
+            ])
+            .split(root_chunks[1]);
+        let form_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(body_chunks[1]);
+
+        assert_eq!(
+            app.mouse_target_pane(form_chunks[0].x + 1, form_chunks[0].y + 1, terminal_area),
+            Some(FocusPane::Globals)
+        );
+        assert_eq!(
+            app.mouse_target_pane(form_chunks[1].x + 1, form_chunks[1].y + 1, terminal_area),
+            Some(FocusPane::Fields)
+        );
+    }
+
+    #[test]
+    fn output_navigation_keys_cover_page_home_and_end_shortcuts() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let mut record = RunRecord::new(99, "version".to_owned(), "gloves version".to_owned());
+        for index in 0..48 {
+            record.stdout_lines.push(format!("line-{index}"));
+        }
+        app.run_history.push(record);
+        app.output_viewport_height = 6;
+        app.focus = FocusPane::Output;
+        app.follow_tail = true;
+        app.sync_output_scroll();
+
+        app.on_output_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        assert!(!app.follow_tail);
+        let scrolled_up = app.output_scroll;
+        assert!(
+            scrolled_up < tail_scroll_start(app.output_line_count(), app.output_viewport_height)
+        );
+
+        app.on_output_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert!(app.output_scroll >= scrolled_up);
+
+        app.on_output_key(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+        assert_eq!(app.output_scroll, 0);
+        assert!(!app.follow_tail);
+
+        app.on_output_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert!(app.follow_tail);
+        assert_eq!(
+            app.output_scroll,
+            tail_scroll_start(app.output_line_count(), app.output_viewport_height)
+        );
+    }
+
+    #[test]
+    fn start_edit_on_non_text_field_shows_toggle_hint() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let bool_index = app
+            .global_fields
+            .iter()
+            .position(|field| matches!(field.value, FieldValue::Bool(_)))
+            .expect("bool field exists");
+
+        app.start_edit(true, bool_index);
+
+        assert_eq!(app.input_mode_label(), "navigate");
+        assert_eq!(app.status_line, "Use Space or ←→ to toggle this field");
+    }
+
+    #[test]
+    fn generic_startup_parser_supports_flags_choices_and_options() {
+        let mut updatekeys_app = TuiApp::new(NavigatorLaunchOptions::default());
+        let updatekeys_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "updatekeys")
+            .expect("updatekeys command exists");
+        updatekeys_app.select_command_by_index(updatekeys_index);
+        updatekeys_app
+            .populate_generic_fields_from_args(&[
+                "--path".to_owned(),
+                "agents/devy".to_owned(),
+                "--dry-run".to_owned(),
+                "--identity=/tmp/devy.age".to_owned(),
+            ])
+            .expect("updatekeys args should parse");
+        assert_eq!(
+            text_field_value(&updatekeys_app.command_fields, "path"),
+            "agents/devy"
+        );
+        assert!(bool_field_value(&updatekeys_app.command_fields, "dry_run"));
+        assert_eq!(
+            text_field_value(&updatekeys_app.command_fields, "identity"),
+            "/tmp/devy.age"
+        );
+
+        let mut show_app = TuiApp::new(NavigatorLaunchOptions::default());
+        let show_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "show")
+            .expect("show command exists");
+        show_app.select_command_by_index(show_index);
+        show_app
+            .populate_generic_fields_from_args(&[
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "--format=json".to_owned(),
+            ])
+            .expect("show args should parse");
+        assert_eq!(
+            text_field_value(&show_app.command_fields, "path"),
+            "agents/devy/api-keys/anthropic"
+        );
+        assert_eq!(
+            choice_field_value(&show_app.command_fields, "format"),
+            "json"
+        );
+    }
+
+    #[test]
+    fn generic_startup_parser_rejects_invalid_values_and_unknown_options() {
+        let mut show_app = TuiApp::new(NavigatorLaunchOptions::default());
+        let show_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "show")
+            .expect("show command exists");
+        show_app.select_command_by_index(show_index);
+
+        let value_error = show_app
+            .populate_generic_fields_from_args(&[
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "--format=yaml".to_owned(),
+            ])
+            .expect_err("invalid choice must fail");
+        assert_eq!(value_error, "invalid value `yaml` for `Format`");
+
+        let missing_value = show_app
+            .populate_generic_fields_from_args(&["--format".to_owned()])
+            .expect_err("missing option value must fail");
+        assert_eq!(missing_value, "`--format` requires a value");
+
+        let unknown_option = show_app
+            .populate_generic_fields_from_args(&[
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "--unknown".to_owned(),
+            ])
+            .expect_err("unknown option must fail");
+        assert_eq!(unknown_option, "unknown option `--unknown`");
+
+        let extra_positional = show_app
+            .populate_generic_fields_from_args(&[
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "extra".to_owned(),
+            ])
+            .expect_err("extra positional must fail");
+        assert_eq!(extra_positional, "unexpected argument `extra`");
+
+        let mut updatekeys_app = TuiApp::new(NavigatorLaunchOptions::default());
+        let updatekeys_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "updatekeys")
+            .expect("updatekeys command exists");
+        updatekeys_app.select_command_by_index(updatekeys_index);
+        let flag_value_error = updatekeys_app
+            .populate_generic_fields_from_args(&["--dry-run=true".to_owned()])
+            .expect_err("flag with inline value must fail");
+        assert_eq!(flag_value_error, "`--dry-run` does not take a value");
     }
 
     #[test]

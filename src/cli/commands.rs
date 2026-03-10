@@ -3059,10 +3059,26 @@ fn path_operation_label(operation: &PathOperation) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_policy_url_argument, parse_policy_url_prefix, parse_tui_bootstrap_args,
-        policy_url_matches_prefix, validate_pipe_url_prefix, ErrorFormatArg, VaultModeArg,
-        SECRET_PIPE_URL_POLICY_ENV_VAR,
+        audit_event_name, audit_event_summary, bytes_to_hex, format_audit_record_line,
+        latest_audit_records, load_audit_records, parse_policy_url_argument,
+        parse_policy_url_prefix, parse_tui_bootstrap_args, path_operation_label,
+        policy_url_matches_prefix, secret_bytes_json_value, validate_pipe_url_prefix, AuditRecord,
+        ErrorFormatArg, PathOperation, VaultModeArg, SECRET_PIPE_URL_POLICY_ENV_VAR,
     };
+    #[cfg(unix)]
+    use super::{
+        canonical_or_absolute_path, reset_gpg_homedir_alias, resolve_gpg_homedir,
+        resolve_relative_symlink_target,
+    };
+    use crate::{
+        audit::AuditEvent,
+        types::{AgentId, Owner, SecretId},
+    };
+    use chrono::{Duration, Utc};
+    #[cfg(unix)]
+    use std::{fs, path::Path};
+    #[cfg(unix)]
+    use tempfile::tempdir;
 
     #[test]
     fn parse_policy_url_prefix_rejects_query_and_fragment() {
@@ -3202,5 +3218,391 @@ mod tests {
         assert!(error
             .to_string()
             .contains("expected auto, required, or disabled"));
+    }
+
+    #[test]
+    fn audit_helpers_format_all_supported_event_variants() {
+        let secret_id = SecretId::new("service/token").unwrap();
+        let requested_file = "docs/spec.md".to_owned();
+        let agent = AgentId::new("devy").unwrap();
+        let reviewer = AgentId::new("main").unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let expires_at = Utc::now() + Duration::minutes(30);
+        let cases = [
+            (
+                AuditEvent::SecretAccessed {
+                    secret_id: secret_id.clone(),
+                    by: agent.clone(),
+                },
+                "secret_accessed",
+                vec!["secret=service/token", "by=devy"],
+            ),
+            (
+                AuditEvent::SecretExpired {
+                    secret_id: secret_id.clone(),
+                },
+                "secret_expired",
+                vec!["secret=service/token"],
+            ),
+            (
+                AuditEvent::SecretCreated {
+                    secret_id: secret_id.clone(),
+                    by: agent.clone(),
+                },
+                "secret_created",
+                vec!["secret=service/token", "by=devy"],
+            ),
+            (
+                AuditEvent::SecretRevoked {
+                    secret_id: secret_id.clone(),
+                    by: reviewer.clone(),
+                },
+                "secret_revoked",
+                vec!["secret=service/token", "by=main"],
+            ),
+            (
+                AuditEvent::RequestCreated {
+                    request_id,
+                    secret_id: secret_id.clone(),
+                    requested_by: agent.clone(),
+                    reason: "need testing".to_owned(),
+                    expires_at,
+                },
+                "request_created",
+                vec![
+                    "request_id=",
+                    "secret=service/token",
+                    "requested_by=devy",
+                    "expires_at=",
+                ],
+            ),
+            (
+                AuditEvent::RequestApproved {
+                    request_id,
+                    secret_id: secret_id.clone(),
+                    requested_by: agent.clone(),
+                    approved_by: reviewer.clone(),
+                },
+                "request_approved",
+                vec!["approved_by=main", "requested_by=devy"],
+            ),
+            (
+                AuditEvent::RequestDenied {
+                    request_id,
+                    secret_id: secret_id.clone(),
+                    requested_by: agent.clone(),
+                    denied_by: reviewer.clone(),
+                },
+                "request_denied",
+                vec!["denied_by=main", "requested_by=devy"],
+            ),
+            (
+                AuditEvent::VaultCreated {
+                    vault: "primary".to_owned(),
+                    owner: Owner::Agent,
+                },
+                "vault_created",
+                vec!["vault=primary", "owner=Agent"],
+            ),
+            (
+                AuditEvent::VaultMounted {
+                    vault: "primary".to_owned(),
+                    agent: agent.clone(),
+                    ttl_minutes: 30,
+                },
+                "vault_mounted",
+                vec!["vault=primary", "agent=devy", "ttl_minutes=30"],
+            ),
+            (
+                AuditEvent::VaultUnmounted {
+                    vault: "primary".to_owned(),
+                    reason: "idle_timeout".to_owned(),
+                    agent: reviewer.clone(),
+                },
+                "vault_unmounted",
+                vec!["vault=primary", "reason=idle_timeout", "agent=main"],
+            ),
+            (
+                AuditEvent::VaultSessionExpired {
+                    vault: "primary".to_owned(),
+                },
+                "vault_session_expired",
+                vec!["vault=primary"],
+            ),
+            (
+                AuditEvent::VaultHandoffPromptIssued {
+                    vault: "primary".to_owned(),
+                    requester: agent.clone(),
+                    trusted_agent: reviewer.clone(),
+                    requested_file: requested_file.clone(),
+                },
+                "vault_handoff_prompt_issued",
+                vec![
+                    "vault=primary",
+                    "requester=devy",
+                    "trusted_agent=main",
+                    "file=docs/spec.md",
+                ],
+            ),
+            (
+                AuditEvent::GpgKeyCreated {
+                    agent: reviewer.clone(),
+                    fingerprint: "ABC123".to_owned(),
+                },
+                "gpg_key_created",
+                vec!["agent=main", "fingerprint=ABC123"],
+            ),
+            (
+                AuditEvent::CommandExecuted {
+                    by: reviewer.clone(),
+                    interface: "mcp".to_owned(),
+                    command: "gloves_get".to_owned(),
+                    target: Some("agents/devy/api-keys/anthropic".to_owned()),
+                },
+                "command_executed",
+                vec![
+                    "by=main",
+                    "interface=mcp",
+                    "command=gloves_get",
+                    "target=agents/devy/api-keys/anthropic",
+                ],
+            ),
+        ];
+
+        for (event, expected_name, expected_fragments) in cases {
+            assert_eq!(audit_event_name(&event), expected_name);
+            let summary = audit_event_summary(&event);
+            for fragment in expected_fragments {
+                assert!(
+                    summary.contains(fragment),
+                    "summary `{summary}` must contain `{fragment}`"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audit_helpers_format_lines_and_apply_limits() {
+        let first = AuditRecord {
+            timestamp: Utc::now() - Duration::minutes(2),
+            event: AuditEvent::SecretExpired {
+                secret_id: SecretId::new("service/old").unwrap(),
+            },
+        };
+        let second = AuditRecord {
+            timestamp: Utc::now() - Duration::minutes(1),
+            event: AuditEvent::SecretCreated {
+                secret_id: SecretId::new("service/new").unwrap(),
+                by: AgentId::new("devy").unwrap(),
+            },
+        };
+        let third = AuditRecord {
+            timestamp: Utc::now(),
+            event: AuditEvent::CommandExecuted {
+                by: AgentId::new("main").unwrap(),
+                interface: "cli".to_owned(),
+                command: "list".to_owned(),
+                target: None,
+            },
+        };
+
+        let formatted = format_audit_record_line(&third);
+        assert!(formatted.contains("command_executed"));
+        assert!(formatted.contains("command=list"));
+
+        let limited = latest_audit_records(vec![first.clone(), second.clone(), third.clone()], 2);
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].timestamp, second.timestamp);
+        assert_eq!(limited[1].timestamp, third.timestamp);
+
+        let unlimited = latest_audit_records(vec![first, second, third], 0);
+        assert_eq!(unlimited.len(), 3);
+    }
+
+    #[test]
+    fn secret_bytes_helpers_cover_utf8_and_binary_inputs() {
+        let utf8 = secret_bytes_json_value(b"hello");
+        assert_eq!(utf8["encoding"], "utf8");
+        assert_eq!(utf8["data"], "hello");
+
+        let binary = secret_bytes_json_value(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(binary["encoding"], "hex");
+        assert_eq!(binary["data"], "deadbeef");
+
+        assert_eq!(bytes_to_hex(&[0x00, 0x0f, 0x10, 0xff]), "000f10ff");
+    }
+
+    #[test]
+    fn load_audit_records_skips_blank_lines_and_reports_invalid_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let audit_path = temp.path().join("audit.jsonl");
+        std::fs::write(
+            &audit_path,
+            format!(
+                "{}\n\n{}\n",
+                serde_json::to_string(&AuditRecord {
+                    timestamp: Utc::now(),
+                    event: AuditEvent::CommandExecuted {
+                        by: AgentId::new("main").unwrap(),
+                        interface: "cli".to_owned(),
+                        command: "list".to_owned(),
+                        target: None,
+                    },
+                })
+                .unwrap(),
+                "not-json"
+            ),
+        )
+        .unwrap();
+
+        let error = load_audit_records(&audit_path).unwrap_err();
+        assert!(error.to_string().contains("invalid audit entry at line 3"));
+
+        std::fs::write(
+            &audit_path,
+            format!(
+                "{}\n\n",
+                serde_json::to_string(&AuditRecord {
+                    timestamp: Utc::now(),
+                    event: AuditEvent::CommandExecuted {
+                        by: AgentId::new("main").unwrap(),
+                        interface: "cli".to_owned(),
+                        command: "list".to_owned(),
+                        target: None,
+                    },
+                })
+                .unwrap()
+            ),
+        )
+        .unwrap();
+        let records = load_audit_records(&audit_path).unwrap();
+        assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn path_operation_label_covers_all_variants() {
+        assert_eq!(path_operation_label(&PathOperation::Read), "read");
+        assert_eq!(path_operation_label(&PathOperation::Write), "write");
+        assert_eq!(path_operation_label(&PathOperation::List), "list");
+        assert_eq!(path_operation_label(&PathOperation::Mount), "mount");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_or_absolute_path_returns_canonical_existing_path() {
+        let temp_dir = tempdir().expect("temp dir");
+        let actual_home = temp_dir.path().join("actual-home");
+        fs::create_dir_all(&actual_home).expect("create actual home");
+
+        let resolved = canonical_or_absolute_path(&actual_home).expect("canonical path");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(&actual_home).expect("canonicalized actual home")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_or_absolute_path_preserves_missing_absolute_path() {
+        let temp_dir = tempdir().expect("temp dir");
+        let missing_path = temp_dir.path().join("missing-home");
+
+        let resolved = canonical_or_absolute_path(&missing_path).expect("absolute fallback");
+        assert_eq!(resolved, missing_path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_relative_symlink_target_joins_alias_parent_for_relative_paths() {
+        let alias_parent = Path::new("/tmp/gloves-gpg-test");
+        let relative_target =
+            resolve_relative_symlink_target(Path::new("../real-home"), Some(alias_parent));
+        assert_eq!(
+            relative_target,
+            Path::new("/tmp/gloves-gpg-test/../real-home")
+        );
+
+        let absolute_target =
+            resolve_relative_symlink_target(Path::new("/var/run/gloves-home"), Some(alias_parent));
+        assert_eq!(absolute_target, Path::new("/var/run/gloves-home"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reset_gpg_homedir_alias_replaces_existing_directory_with_symlink() {
+        let temp_dir = tempdir().expect("temp dir");
+        let alias_home = temp_dir.path().join("alias-home");
+        let target_home = temp_dir.path().join("target-home");
+        fs::create_dir_all(alias_home.join("stale")).expect("create stale alias directory");
+        fs::create_dir_all(&target_home).expect("create target home");
+
+        reset_gpg_homedir_alias(&alias_home, &target_home).expect("replace alias directory");
+
+        let metadata = fs::symlink_metadata(&alias_home).expect("alias metadata");
+        assert!(metadata.file_type().is_symlink());
+        assert_eq!(
+            fs::read_link(&alias_home).expect("alias target"),
+            target_home
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_gpg_homedir_creates_short_alias_symlink() {
+        let temp_dir = tempdir().expect("temp dir");
+        let actual_home = temp_dir.path().join("very/deep/runtime/gpg/home");
+        fs::create_dir_all(&actual_home).expect("create actual gpg home");
+
+        let gpg_home = resolve_gpg_homedir(&actual_home).expect("resolve gpg homedir");
+        let alias_path = gpg_home.path().to_path_buf();
+        let alias_root = alias_path.parent().expect("alias root").to_path_buf();
+
+        assert_ne!(alias_path, actual_home);
+        assert!(alias_path.starts_with("/tmp"));
+        assert!(fs::symlink_metadata(&alias_path)
+            .expect("alias metadata")
+            .file_type()
+            .is_symlink());
+        let alias_target = fs::read_link(&alias_path).expect("alias target");
+        assert_eq!(
+            fs::canonicalize(resolve_relative_symlink_target(
+                &alias_target,
+                alias_path.parent()
+            ))
+            .expect("canonical alias target"),
+            fs::canonicalize(&actual_home).expect("canonical actual home")
+        );
+
+        fs::remove_dir_all(alias_root).expect("cleanup alias root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_gpg_homedir_repairs_mismatched_alias_target() {
+        let temp_dir = tempdir().expect("temp dir");
+        let actual_home = temp_dir.path().join("runtime/gpg/home");
+        let wrong_home = temp_dir.path().join("wrong-home");
+        fs::create_dir_all(&actual_home).expect("create actual gpg home");
+        fs::create_dir_all(&wrong_home).expect("create wrong gpg home");
+
+        let gpg_home = resolve_gpg_homedir(&actual_home).expect("resolve gpg homedir");
+        let alias_path = gpg_home.path().to_path_buf();
+        let alias_root = alias_path.parent().expect("alias root").to_path_buf();
+
+        fs::remove_file(&alias_path).expect("remove original alias");
+        std::os::unix::fs::symlink(&wrong_home, &alias_path).expect("seed wrong alias");
+
+        let repaired = resolve_gpg_homedir(&actual_home).expect("repair alias target");
+        let repaired_target = fs::read_link(repaired.path()).expect("repaired target");
+        assert_eq!(
+            fs::canonicalize(resolve_relative_symlink_target(
+                &repaired_target,
+                repaired.path().parent()
+            ))
+            .expect("canonical repaired target"),
+            fs::canonicalize(&actual_home).expect("canonical actual home")
+        );
+
+        fs::remove_dir_all(alias_root).expect("cleanup alias root");
     }
 }

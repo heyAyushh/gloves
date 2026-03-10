@@ -202,14 +202,22 @@ fn run_daemon_tcp(
 }
 
 fn emit_stdout_line(line: &str) -> Result<()> {
-    match output::stdout_line(line) {
+    normalize_stdout_result(output::stdout_line(line))
+}
+
+fn emit_stderr_line(line: &str) -> std::io::Result<()> {
+    normalize_stderr_result(output::stderr_line(line))
+}
+
+fn normalize_stdout_result(result: std::io::Result<OutputStatus>) -> Result<()> {
+    match result {
         Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
         Err(error) => Err(GlovesError::Io(error)),
     }
 }
 
-fn emit_stderr_line(line: &str) -> std::io::Result<()> {
-    match output::stderr_line(line) {
+fn normalize_stderr_result(result: std::io::Result<OutputStatus>) -> std::io::Result<()> {
+    match result {
         Ok(OutputStatus::Written | OutputStatus::BrokenPipe) => Ok(()),
         Err(error) => Err(error),
     }
@@ -554,6 +562,55 @@ fn execute_daemon_request_with_actor(
 mod tests {
     use super::*;
     use serde_json::Value;
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+    use std::{
+        ffi::OsString,
+        io::Cursor,
+        sync::{Mutex, OnceLock},
+    };
+
+    static DAEMON_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn clear_daemon_token_env() {
+        std::env::remove_var(DAEMON_TOKEN_ENV_VAR);
+    }
+
+    struct MemoryStream {
+        reader: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl MemoryStream {
+        fn new(input: impl Into<Vec<u8>>) -> Self {
+            Self {
+                reader: Cursor::new(input.into()),
+                written: Vec::new(),
+            }
+        }
+
+        fn response_value(&self) -> Value {
+            let text = String::from_utf8(self.written.clone()).expect("utf8");
+            serde_json::from_str(text.trim_end()).expect("json")
+        }
+    }
+
+    impl Read for MemoryStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reader.read(buf)
+        }
+    }
+
+    impl Write for MemoryStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn setup_paths() -> (tempfile::TempDir, SecretsPaths) {
         let temp_dir = tempfile::tempdir().expect("temp dir");
@@ -570,6 +627,20 @@ mod tests {
     fn parse_daemon_bind_rejects_invalid_address() {
         let error = parse_daemon_bind("not-a-socket-address").expect_err("must fail");
         assert!(error.to_string().contains("invalid daemon bind address"));
+    }
+
+    #[test]
+    fn parse_daemon_bind_accepts_loopback_and_rejects_unsafe_values() {
+        assert_eq!(
+            parse_daemon_bind("127.0.0.1:7373").unwrap(),
+            "127.0.0.1:7373".parse().unwrap()
+        );
+
+        let zero_port = parse_daemon_bind("127.0.0.1:0").expect_err("must fail");
+        assert!(zero_port.to_string().contains("must be non-zero"));
+
+        let non_loopback = parse_daemon_bind("10.0.0.2:7373").expect_err("must fail");
+        assert!(non_loopback.to_string().contains("must be loopback"));
     }
 
     #[cfg(unix)]
@@ -619,12 +690,38 @@ mod tests {
     }
 
     #[test]
+    fn read_daemon_request_rejects_non_object_and_accepts_null_optional_fields() {
+        let mut non_object: &[u8] = br#"["ping"]"#;
+        let error = read_daemon_request(&mut non_object, 64).expect_err("must fail");
+        assert!(error
+            .to_string()
+            .contains("invalid daemon request: expected JSON object"));
+
+        let mut valid: &[u8] = br#"{"action":"ping","agent":null,"token":null}"#;
+        let request = read_daemon_request(&mut valid, 128).expect("request");
+        assert!(matches!(request.request, DaemonRequest::Ping));
+        assert!(request.agent.is_none());
+        assert!(request.token.is_none());
+    }
+
+    #[test]
     fn read_daemon_request_accepts_agent_and_token_fields() {
         let mut valid: &[u8] = br#"{"action":"ping","agent":"agent-a","token":"abc"}"#;
         let request = read_daemon_request(&mut valid, 128).expect("request");
         assert!(matches!(request.request, DaemonRequest::Ping));
         assert_eq!(request.agent.as_deref(), Some("agent-a"));
         assert_eq!(request.token.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn read_daemon_request_rejects_non_string_agent_and_token_fields() {
+        let mut invalid_agent: &[u8] = br#"{"action":"ping","agent":true}"#;
+        let error = read_daemon_request(&mut invalid_agent, 128).expect_err("must fail");
+        assert!(error.to_string().contains("`agent` must be a string"));
+
+        let mut invalid_token: &[u8] = br#"{"action":"ping","token":123}"#;
+        let error = read_daemon_request(&mut invalid_token, 128).expect_err("must fail");
+        assert!(error.to_string().contains("`token` must be a string"));
     }
 
     #[test]
@@ -649,7 +746,174 @@ mod tests {
     }
 
     #[test]
+    fn output_helpers_accept_written_and_broken_pipe_results() {
+        assert!(normalize_stdout_result(Ok(OutputStatus::Written)).is_ok());
+        assert!(normalize_stdout_result(Ok(OutputStatus::BrokenPipe)).is_ok());
+        assert!(normalize_stderr_result(Ok(OutputStatus::Written)).is_ok());
+        assert!(normalize_stderr_result(Ok(OutputStatus::BrokenPipe)).is_ok());
+
+        let stdout_error = normalize_stdout_result(Err(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )))
+        .expect_err("must fail");
+        assert!(matches!(stdout_error, GlovesError::Io(_)));
+
+        let stderr_error = normalize_stderr_result(Err(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied,
+        )))
+        .expect_err("must fail");
+        assert_eq!(stderr_error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn daemon_token_helpers_validate_environment_requirements() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
+        assert!(required_daemon_token_from_env().unwrap().is_none());
+        assert!(validate_daemon_token(None).is_ok());
+
+        std::env::set_var(DAEMON_TOKEN_ENV_VAR, "daemon-token");
+        assert_eq!(
+            required_daemon_token_from_env().unwrap().as_deref(),
+            Some("daemon-token")
+        );
+        let error = validate_daemon_token(Some("wrong")).expect_err("must fail");
+        assert!(error.to_string().contains("invalid daemon token"));
+        assert!(validate_daemon_token(Some("daemon-token")).is_ok());
+
+        std::env::set_var(DAEMON_TOKEN_ENV_VAR, "   ");
+        let error = required_daemon_token_from_env().expect_err("must fail");
+        assert!(error
+            .to_string()
+            .contains("GLOVES_DAEMON_TOKEN must not be empty"));
+        clear_daemon_token_env();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_token_helpers_reject_non_utf8_environment_values() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
+
+        std::env::set_var(
+            DAEMON_TOKEN_ENV_VAR,
+            OsString::from_vec(vec![0xf0, 0x28, 0x8c, 0x28]),
+        );
+        let error = required_daemon_token_from_env().expect_err("must fail");
+        assert!(error
+            .to_string()
+            .contains("GLOVES_DAEMON_TOKEN must be valid UTF-8"));
+        clear_daemon_token_env();
+    }
+
+    #[test]
+    fn resolve_daemon_actor_defaults_and_rejects_blank_values() {
+        assert_eq!(
+            resolve_daemon_actor(None).unwrap().as_str(),
+            DEFAULT_AGENT_ID
+        );
+        assert_eq!(
+            resolve_daemon_actor(Some(" agent-a ")).unwrap().as_str(),
+            "agent-a"
+        );
+
+        let error = resolve_daemon_actor(Some("   ")).expect_err("must fail");
+        assert!(error.to_string().contains("daemon agent must not be empty"));
+    }
+
+    #[test]
+    fn handle_daemon_connection_roundtrip_honors_agent_and_token() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        std::env::set_var(DAEMON_TOKEN_ENV_VAR, "daemon-token");
+
+        let (_temp_dir, paths) = setup_paths();
+        let mut set_stream = MemoryStream::new(
+            br#"{"action":"set","agent":"agent-main","token":"daemon-token","name":"alpha","value":"secret-value"}"#,
+        );
+        handle_daemon_connection(&paths, &mut set_stream, 512).expect("set response");
+        let set_response = set_stream.response_value();
+        assert_eq!(set_response["status"], "ok");
+        assert_eq!(set_response["message"], "ok");
+        assert_eq!(set_response["data"]["id"], "alpha");
+
+        let mut denied_stream = MemoryStream::new(
+            br#"{"action":"get","agent":"agent-other","token":"daemon-token","name":"alpha"}"#,
+        );
+        handle_daemon_connection(&paths, &mut denied_stream, 512).expect("denied response");
+        let denied_response = denied_stream.response_value();
+        assert_eq!(denied_response["status"], "error");
+        assert!(!denied_response["error"].as_str().unwrap().is_empty());
+
+        clear_daemon_token_env();
+    }
+
+    #[test]
+    fn execute_daemon_envelope_request_reports_blank_agent_and_invalid_token() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        std::env::set_var(DAEMON_TOKEN_ENV_VAR, "daemon-token");
+        let (_temp_dir, paths) = setup_paths();
+
+        let invalid_token = execute_daemon_envelope_request(
+            &paths,
+            DaemonEnvelope {
+                agent: None,
+                token: Some("wrong".to_owned()),
+                request: DaemonRequest::Ping,
+            },
+        );
+        assert!(matches!(invalid_token, DaemonResponse::Error { .. }));
+
+        let invalid_actor = execute_daemon_envelope_request(
+            &paths,
+            DaemonEnvelope {
+                agent: Some("   ".to_owned()),
+                token: Some("daemon-token".to_owned()),
+                request: DaemonRequest::Ping,
+            },
+        );
+        assert!(matches!(invalid_actor, DaemonResponse::Error { .. }));
+        let DaemonResponse::Error { error } = invalid_actor else {
+            unreachable!("validated above");
+        };
+        assert!(error.contains("daemon agent must not be empty"));
+
+        clear_daemon_token_env();
+    }
+
+    #[test]
+    fn execute_daemon_request_inner_supports_ping() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
+        let (_temp_dir, paths) = setup_paths();
+        let (message, data) =
+            execute_daemon_request_inner(&paths, DaemonRequest::Ping).expect("ping");
+        assert_eq!(message, "pong");
+        assert!(data.is_none());
+        clear_daemon_token_env();
+    }
+
+    #[test]
     fn execute_daemon_request_inner_supports_set_get_list_status_and_revoke() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
         let (_temp_dir, paths) = setup_paths();
 
         let (message, data) = execute_daemon_request_inner(
@@ -699,10 +963,16 @@ mod tests {
         .expect("revoke");
         assert_eq!(message, "revoked");
         assert!(data.is_none());
+        clear_daemon_token_env();
     }
 
     #[test]
     fn execute_daemon_request_inner_supports_request_approve_deny_and_verify() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
         let (_temp_dir, paths) = setup_paths();
 
         let (message, data) = execute_daemon_request_inner(
@@ -773,10 +1043,16 @@ mod tests {
             execute_daemon_request_inner(&paths, DaemonRequest::Verify).expect("verify");
         assert_eq!(message, "ok");
         assert!(data.is_none());
+        clear_daemon_token_env();
     }
 
     #[test]
     fn execute_daemon_request_wraps_errors() {
+        let _lock = DAEMON_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_daemon_token_env();
         let (_temp_dir, paths) = setup_paths();
         let response = execute_daemon_request(
             &paths,
@@ -785,13 +1061,13 @@ mod tests {
             },
         );
 
-        match response {
-            DaemonResponse::Error { error } => {
-                assert!(error.contains("invalid request id `not-a-uuid`"));
-                assert!(error.contains("gloves requests list"));
-            }
-            DaemonResponse::Ok { .. } => panic!("expected error response"),
-        }
+        assert!(matches!(response, DaemonResponse::Error { .. }));
+        let DaemonResponse::Error { error } = response else {
+            unreachable!("validated above");
+        };
+        assert!(error.contains("invalid request id `not-a-uuid`"));
+        assert!(error.contains("gloves requests list"));
+        clear_daemon_token_env();
     }
 
     #[test]

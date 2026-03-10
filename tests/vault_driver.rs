@@ -182,6 +182,42 @@ exit 1
 }
 
 #[test]
+fn init_reports_stderr_when_gocryptfs_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    write_script(
+        &bin_dir.join("gocryptfs"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "init failed" >&2
+exit 7
+"#,
+    );
+    write_script(
+        &bin_dir.join("fusermount"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n",
+    );
+    write_script(
+        &bin_dir.join("mountpoint"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    );
+
+    let driver = build_driver(&bin_dir);
+    let error = driver
+        .init(&InitRequest {
+            cipher_dir: temp_dir.path().join("cipher"),
+            extpass_command: "gloves extpass-get vault/agent_data".to_owned(),
+            extpass_environment: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(
+        matches!(error, GlovesError::Crypto(message) if message.contains("gocryptfs init failed: init failed"))
+    );
+}
+
+#[test]
 fn mount_passes_extpass_and_idle() {
     let temp_dir = tempfile::tempdir().unwrap();
     let bin_dir = temp_dir.path().join("bin");
@@ -333,6 +369,65 @@ exit 1
     let log = fs::read_to_string(fuser_log).unwrap();
     assert!(log.contains("-u"));
     assert!(log.contains(mount_point.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn unmount_reports_generic_error_when_stderr_is_empty() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    write_script(
+        &bin_dir.join("gocryptfs"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n",
+    );
+    write_script(
+        &bin_dir.join("fusermount"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+exit 1
+"#,
+    );
+    write_script(
+        &bin_dir.join("mountpoint"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    );
+
+    let driver = build_driver(&bin_dir);
+    let error = driver
+        .unmount(temp_dir.path().join("mount").as_path())
+        .unwrap_err();
+    assert!(matches!(error, GlovesError::Crypto(message) if message == "gocryptfs unmount failed"));
+}
+
+#[test]
+fn unmount_reports_stderr_when_fusermount_fails() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    write_script(
+        &bin_dir.join("gocryptfs"),
+        "#!/usr/bin/env bash\nset -euo pipefail\n",
+    );
+    write_script(
+        &bin_dir.join("fusermount"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+echo "device busy" >&2
+exit 1
+"#,
+    );
+    write_script(
+        &bin_dir.join("mountpoint"),
+        "#!/usr/bin/env bash\nset -euo pipefail\nexit 1\n",
+    );
+
+    let driver = build_driver(&bin_dir);
+    let error = driver
+        .unmount(temp_dir.path().join("mount").as_path())
+        .unwrap_err();
+    assert!(matches!(error, GlovesError::Crypto(message) if message.contains("device busy")));
 }
 
 #[test]

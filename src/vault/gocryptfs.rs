@@ -205,3 +205,83 @@ where
 fn is_exec_busy_error(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::ExecutableFileBusy || error.raw_os_error() == Some(26)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_exec_busy_error, map_command_execution_error, retry_exec_busy, GocryptfsDriver,
+    };
+    use crate::error::GlovesError;
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn constructors_preserve_custom_binary_names() {
+        let default_driver = GocryptfsDriver::new();
+        let derived_default = GocryptfsDriver::default();
+        assert_eq!(default_driver.gocryptfs_binary, "gocryptfs");
+        assert_eq!(default_driver.fusermount_binary, "fusermount");
+        assert_eq!(default_driver.mountpoint_binary, "mountpoint");
+        assert_eq!(
+            default_driver.gocryptfs_binary,
+            derived_default.gocryptfs_binary
+        );
+
+        let custom = GocryptfsDriver::with_binaries("gcfs", "fuse", "mount");
+        assert_eq!(custom.gocryptfs_binary, "gcfs");
+        assert_eq!(custom.fusermount_binary, "fuse");
+        assert_eq!(custom.mountpoint_binary, "mount");
+    }
+
+    #[test]
+    fn map_command_execution_error_marks_missing_binaries_as_crypto_errors() {
+        let not_found = map_command_execution_error(
+            "gocryptfs",
+            io::Error::new(io::ErrorKind::NotFound, "missing"),
+        );
+        assert!(matches!(not_found, GlovesError::Crypto(_)));
+
+        let permission = map_command_execution_error(
+            "gocryptfs",
+            io::Error::new(io::ErrorKind::PermissionDenied, "denied"),
+        );
+        assert!(matches!(permission, GlovesError::Io(_)));
+    }
+
+    #[test]
+    fn retry_exec_busy_retries_busy_errors_and_returns_success() {
+        let attempts = AtomicUsize::new(0);
+        let value = retry_exec_busy(|| {
+            let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < 2 {
+                return Err(io::Error::from(io::ErrorKind::ExecutableFileBusy));
+            }
+            Ok("ready")
+        })
+        .unwrap();
+
+        assert_eq!(value, "ready");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn retry_exec_busy_stops_on_non_busy_errors() {
+        let error = retry_exec_busy::<(), _>(|| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn is_exec_busy_error_detects_kind_and_errno_variants() {
+        assert!(is_exec_busy_error(&io::Error::from(
+            io::ErrorKind::ExecutableFileBusy
+        )));
+        assert!(is_exec_busy_error(&io::Error::from_raw_os_error(26)));
+        assert!(!is_exec_busy_error(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "denied"
+        )));
+    }
+}
