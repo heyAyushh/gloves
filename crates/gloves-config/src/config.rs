@@ -1066,3 +1066,733 @@ fn is_regular_config_candidate(path: &Path) -> bool {
     };
     !metadata.file_type().is_symlink() && metadata.file_type().is_file()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        ffi::OsString,
+        sync::{Mutex, OnceLock},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_root = PathBuf::from("/tmp");
+        let base_dir = if temp_root.is_dir() {
+            temp_root
+        } else {
+            std::env::temp_dir()
+        };
+        let path = base_dir.join(format!(
+            "gloves-config-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn cleanup_dir(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    fn valid_config(root_literal: &str, private_path_literal: &str) -> String {
+        format!(
+            r#"
+version = 1
+
+[paths]
+root = "{root_literal}"
+
+[private_paths]
+runtime = "{private_path_literal}"
+
+[daemon]
+bind = "127.0.0.1:7789"
+io_timeout_seconds = 9
+request_limit_bytes = 32768
+
+[vault]
+mode = "required"
+
+[defaults]
+agent_id = "devy"
+secret_ttl_days = 7
+vault_mount_ttl = "2h"
+vault_secret_ttl_days = 90
+vault_secret_length_bytes = 48
+
+[agents.devy]
+paths = ["runtime"]
+operations = ["read", "write"]
+
+[secrets.acl.devy]
+paths = ["agents/devy/*", "shared/database-url"]
+operations = ["read", "list"]
+
+[secrets.pipe.commands.curl]
+require_url = true
+url_prefixes = ["https://api.example.com/v1/"]
+"#
+        )
+    }
+
+    struct HomeGuard {
+        previous_home: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let previous_home = std::env::var_os("HOME");
+            std::env::set_var("HOME", home);
+            Self { previous_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous_home) = &self.previous_home {
+                std::env::set_var("HOME", previous_home);
+            } else {
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    #[test]
+    fn parse_from_str_builds_effective_config_and_accessors() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("parse");
+        let source_path = temp_dir.join(CONFIG_FILE_NAME);
+        let root_dir = temp_dir.join("secrets-root");
+        let private_dir = temp_dir.join("private").join("runtime");
+        fs::create_dir_all(&root_dir).unwrap();
+        fs::create_dir_all(&private_dir).unwrap();
+
+        let config = GlovesConfig::parse_from_str(
+            &valid_config("./secrets-root", "./private/runtime"),
+            &source_path,
+        )
+        .unwrap();
+
+        assert_eq!(config.source_path, source_path);
+        assert_eq!(config.root, fs::canonicalize(&root_dir).unwrap());
+        assert_eq!(
+            config.private_paths.get("runtime"),
+            Some(&fs::canonicalize(&private_dir).unwrap())
+        );
+        assert_eq!(config.daemon.bind, "127.0.0.1:7789");
+        assert_eq!(config.daemon.io_timeout_seconds, 9);
+        assert_eq!(config.daemon.request_limit_bytes, 32768);
+        assert_eq!(config.vault.mode, VaultMode::Required);
+        assert_eq!(config.defaults.agent_id.as_str(), "devy");
+        assert_eq!(config.defaults.secret_ttl_days, 7);
+        assert_eq!(config.defaults.vault_mount_ttl, "2h");
+        assert_eq!(config.defaults.vault_secret_ttl_days, 90);
+        assert_eq!(config.defaults.vault_secret_length_bytes, 48);
+        assert!(config.has_secret_acl());
+
+        let agent_id = AgentId::new("devy").unwrap();
+        let paths = config.agent_paths(&agent_id).unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].alias, "runtime");
+        assert_eq!(
+            paths[0].operations,
+            vec![PathOperation::Read, PathOperation::Write]
+        );
+
+        let secret_policy = config.secret_access_policy(&agent_id).unwrap();
+        assert!(secret_policy.allows_operation(SecretAclOperation::Read));
+        assert!(secret_policy.allows_secret("agents/devy/api-keys/anthropic"));
+        assert!(secret_policy.allows_secret("shared/database-url"));
+        assert!(!secret_policy.allows_secret("agents/webhook/api-keys/anthropic"));
+
+        let pipe_policy = config.secret_pipe_command_policy("curl").unwrap();
+        assert!(pipe_policy.require_url);
+        assert_eq!(
+            pipe_policy.url_prefixes,
+            vec!["https://api.example.com/v1/".to_owned()]
+        );
+        assert!(config
+            .secret_access_policy(&AgentId::new("webhook").unwrap())
+            .is_none());
+        assert!(config.secret_pipe_command_policy("wget").is_none());
+
+        let mut config_without_acl = config.clone();
+        config_without_acl.secret_access.clear();
+        assert!(!config_without_acl.has_secret_acl());
+
+        cleanup_dir(&temp_dir);
+    }
+
+    #[test]
+    fn resolve_config_path_honors_flag_env_discovery_and_no_config() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("resolve");
+        let nested_dir = temp_dir.join("workspace").join("nested");
+        fs::create_dir_all(&nested_dir).unwrap();
+
+        let discovered_path = temp_dir.join("workspace").join(CONFIG_FILE_NAME);
+        fs::write(&discovered_path, "version = 1\n").unwrap();
+
+        let flag_path = nested_dir.join("custom.toml");
+        fs::write(&flag_path, "version = 1\n").unwrap();
+        let env_path = nested_dir.join("env.toml");
+        fs::write(&env_path, "version = 1\n").unwrap();
+
+        let flag_selection =
+            resolve_config_path(Some(Path::new("custom.toml")), None, false, &nested_dir).unwrap();
+        assert_eq!(flag_selection.source, ConfigSource::Flag);
+        assert_eq!(flag_selection.path, Some(flag_path.clone()));
+
+        let env_selection =
+            resolve_config_path(None, Some("env.toml"), false, &nested_dir).unwrap();
+        assert_eq!(env_selection.source, ConfigSource::Env);
+        assert_eq!(env_selection.path, Some(env_path.clone()));
+
+        let discovered_selection = resolve_config_path(None, None, false, &nested_dir).unwrap();
+        assert_eq!(discovered_selection.source, ConfigSource::Discovered);
+        assert_eq!(discovered_selection.path, Some(discovered_path.clone()));
+
+        let none_selection = resolve_config_path(None, None, true, &nested_dir).unwrap();
+        assert_eq!(none_selection.source, ConfigSource::None);
+        assert!(none_selection.path.is_none());
+
+        let env_error = resolve_config_path(None, Some("   "), false, &nested_dir).unwrap_err();
+        assert!(env_error
+            .to_string()
+            .contains("GLOVES_CONFIG cannot be empty"));
+
+        let missing_error =
+            resolve_config_path(Some(Path::new("missing.toml")), None, false, &nested_dir)
+                .unwrap_err();
+        assert!(missing_error
+            .to_string()
+            .contains("config file must be a regular file"));
+
+        cleanup_dir(&temp_dir);
+    }
+
+    #[test]
+    fn helper_functions_cover_path_resolution_and_home_expansion() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("paths");
+        let home_dir = temp_dir.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let _home_guard = HomeGuard::set(&home_dir);
+
+        assert_eq!(expand_home("~").unwrap(), home_dir);
+        assert_eq!(expand_home("~/bin").unwrap(), home_dir.join("bin"));
+        assert!(expand_home("~other/bin")
+            .unwrap_err()
+            .to_string()
+            .contains("only '~' and '~/' home expansion are supported"));
+
+        assert_eq!(
+            normalize_path(Path::new("foo/./bar/../baz")),
+            PathBuf::from("foo/baz")
+        );
+        assert_eq!(
+            normalize_path(Path::new("/tmp/../var/./lib")),
+            PathBuf::from("/var/lib")
+        );
+        assert_eq!(
+            absolutize_path(Path::new("nested/../config.toml"), Path::new("/tmp/work")),
+            PathBuf::from("/tmp/work/config.toml")
+        );
+        assert_eq!(
+            absolutize_path(Path::new("/tmp/./gloves.toml"), Path::new("/unused")),
+            PathBuf::from("/tmp/gloves.toml")
+        );
+
+        let resolved_existing = resolve_path_value("~/bin", Path::new("/unused")).unwrap();
+        assert_eq!(resolved_existing, home_dir.join("bin"));
+        let resolved_relative = resolve_path_value("./secrets/../secrets-root", &temp_dir).unwrap();
+        assert_eq!(resolved_relative, temp_dir.join("secrets-root"));
+
+        assert!(validate_path_literal("", "paths.root")
+            .unwrap_err()
+            .to_string()
+            .contains("paths.root cannot be empty"));
+
+        cleanup_dir(&temp_dir);
+    }
+
+    #[test]
+    fn daemon_defaults_and_vault_validation_cover_failure_modes() {
+        let daemon_defaults = resolve_daemon_config(&DaemonConfigFile::default()).unwrap();
+        assert_eq!(daemon_defaults.bind, DEFAULT_DAEMON_BIND);
+        assert_eq!(
+            daemon_defaults.io_timeout_seconds,
+            DEFAULT_DAEMON_IO_TIMEOUT_SECONDS
+        );
+        assert_eq!(
+            daemon_defaults.request_limit_bytes,
+            DEFAULT_DAEMON_REQUEST_LIMIT_BYTES
+        );
+
+        assert!(resolve_daemon_config(&DaemonConfigFile {
+            bind: Some("127.0.0.1:0".to_owned()),
+            io_timeout_seconds: None,
+            request_limit_bytes: None,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("daemon bind port must be non-zero"));
+        assert!(resolve_daemon_config(&DaemonConfigFile {
+            bind: Some("0.0.0.0:7788".to_owned()),
+            io_timeout_seconds: None,
+            request_limit_bytes: None,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("daemon bind address must be loopback"));
+        assert!(resolve_daemon_config(&DaemonConfigFile {
+            bind: None,
+            io_timeout_seconds: Some(0),
+            request_limit_bytes: None,
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("io_timeout_seconds must be greater than zero"));
+        assert!(resolve_daemon_config(&DaemonConfigFile {
+            bind: None,
+            io_timeout_seconds: None,
+            request_limit_bytes: Some(0),
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("request_limit_bytes must be greater than zero"));
+
+        let default_config = resolve_default_config(&DefaultsConfigFile::default()).unwrap();
+        assert_eq!(default_config.agent_id.as_str(), DEFAULT_AGENT_ID);
+        assert_eq!(default_config.secret_ttl_days, DEFAULT_SECRET_TTL_DAYS);
+        assert_eq!(default_config.vault_mount_ttl, DEFAULT_VAULT_MOUNT_TTL);
+        assert_eq!(
+            default_config.vault_secret_ttl_days,
+            DEFAULT_VAULT_SECRET_TTL_DAYS
+        );
+        assert_eq!(
+            default_config.vault_secret_length_bytes,
+            DEFAULT_VAULT_SECRET_LENGTH_BYTES
+        );
+
+        assert!(resolve_default_config(&DefaultsConfigFile {
+            agent_id: Some("bad agent".to_owned()),
+            ..DefaultsConfigFile::default()
+        })
+        .is_err());
+        assert!(resolve_default_config(&DefaultsConfigFile {
+            secret_ttl_days: Some(0),
+            ..DefaultsConfigFile::default()
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("secret_ttl_days must be greater than zero"));
+        assert!(resolve_default_config(&DefaultsConfigFile {
+            vault_mount_ttl: Some("12x".to_owned()),
+            ..DefaultsConfigFile::default()
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("vault_mount_ttl must use one of s, m, h, d"));
+        assert!(resolve_default_config(&DefaultsConfigFile {
+            vault_secret_ttl_days: Some(0),
+            ..DefaultsConfigFile::default()
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("vault_secret_ttl_days must be greater than zero"));
+        assert!(resolve_default_config(&DefaultsConfigFile {
+            vault_secret_length_bytes: Some(0),
+            ..DefaultsConfigFile::default()
+        })
+        .unwrap_err()
+        .to_string()
+        .contains("vault_secret_length_bytes must be greater than zero"));
+
+        assert_eq!(
+            resolve_vault_config(&VaultConfigFile::default()).mode,
+            VaultMode::Auto
+        );
+        assert_eq!(
+            resolve_vault_config(&VaultConfigFile {
+                mode: Some(VaultMode::Disabled)
+            })
+            .mode,
+            VaultMode::Disabled
+        );
+
+        assert!(validate_duration_literal("", "defaults.vault_mount_ttl")
+            .unwrap_err()
+            .to_string()
+            .contains("defaults.vault_mount_ttl cannot be empty"));
+        assert!(validate_duration_literal("0h", "defaults.vault_mount_ttl")
+            .unwrap_err()
+            .to_string()
+            .contains("defaults.vault_mount_ttl must be greater than zero"));
+    }
+
+    #[test]
+    fn policy_validation_helpers_cover_duplicates_and_invalid_patterns() {
+        let private_paths = BTreeMap::from([("runtime".to_owned(), PathBuf::from("/tmp/runtime"))]);
+
+        assert!(validate_agent_policy(
+            "devy",
+            &AgentAccessFile {
+                paths: Vec::new(),
+                operations: vec![PathOperation::Read],
+            },
+            &private_paths,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must include at least one private path alias"));
+        assert!(validate_agent_policy(
+            "devy",
+            &AgentAccessFile {
+                paths: vec!["runtime".to_owned()],
+                operations: Vec::new(),
+            },
+            &private_paths,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must include at least one operation"));
+        assert!(validate_agent_policy(
+            "devy",
+            &AgentAccessFile {
+                paths: vec!["missing".to_owned()],
+                operations: vec![PathOperation::Read],
+            },
+            &private_paths,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("references unknown private path alias"));
+        assert!(validate_agent_policy(
+            "devy",
+            &AgentAccessFile {
+                paths: vec!["runtime".to_owned(), "runtime".to_owned()],
+                operations: vec![PathOperation::Read],
+            },
+            &private_paths,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate private path alias"));
+        assert!(validate_agent_policy(
+            "devy",
+            &AgentAccessFile {
+                paths: vec!["runtime".to_owned()],
+                operations: vec![PathOperation::Read, PathOperation::Read],
+            },
+            &private_paths,
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate operation"));
+
+        let valid_secret_policy = SecretAccessFile {
+            paths: vec!["agents/devy/*".to_owned(), "shared/database-url".to_owned()],
+            operations: vec![SecretAclOperation::Read, SecretAclOperation::List],
+        };
+        validate_secret_access_policy("devy", &valid_secret_policy).unwrap();
+        assert!(validate_secret_access_policy(
+            "devy",
+            &SecretAccessFile {
+                paths: Vec::new(),
+                operations: vec![SecretAclOperation::Read],
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must include at least one path pattern"));
+        assert!(validate_secret_access_policy(
+            "devy",
+            &SecretAccessFile {
+                paths: vec!["*".to_owned()],
+                operations: Vec::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must include at least one operation"));
+        assert!(validate_secret_access_policy(
+            "devy",
+            &SecretAccessFile {
+                paths: vec!["*".to_owned(), "*".to_owned()],
+                operations: vec![SecretAclOperation::Read],
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate pattern"));
+        assert!(validate_secret_access_policy(
+            "devy",
+            &SecretAccessFile {
+                paths: vec!["*".to_owned()],
+                operations: vec![SecretAclOperation::Read, SecretAclOperation::Read],
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate operation"));
+
+        validate_secret_pattern("*").unwrap();
+        validate_secret_pattern("agents/devy/*").unwrap();
+        validate_secret_pattern("shared/database-url").unwrap();
+        assert!(validate_secret_pattern("/*")
+            .unwrap_err()
+            .to_string()
+            .contains("is not allowed"));
+        assert!(validate_secret_pattern("agents/*/broken")
+            .unwrap_err()
+            .to_string()
+            .contains("must be '*', '<namespace>/*', or an exact secret id"));
+        assert!(validate_secret_pattern("agents/devy*")
+            .unwrap_err()
+            .to_string()
+            .contains("must be '*', '<namespace>/*', or an exact secret id"));
+        assert!(validate_secret_pattern("bad secret")
+            .unwrap_err()
+            .to_string()
+            .contains("is not a valid secret id"));
+
+        assert!(secret_pattern_matches("*", "shared/database-url"));
+        assert!(secret_pattern_matches(
+            "agents/devy/*",
+            "agents/devy/api-keys/anthropic"
+        ));
+        assert!(!secret_pattern_matches("agents/devy/*", "agents/devy"));
+        assert!(!secret_pattern_matches(
+            "agents/devy/*",
+            "agents/webhook/api-keys/anthropic"
+        ));
+        assert!(secret_pattern_matches(
+            "shared/database-url",
+            "shared/database-url"
+        ));
+    }
+
+    #[test]
+    fn pipe_policy_and_raw_config_validation_cover_edge_cases() {
+        validate_secret_pipe_command_policy(
+            "curl",
+            &SecretPipeCommandPolicyFile {
+                require_url: true,
+                url_prefixes: vec!["https://api.example.com/".to_owned()],
+            },
+        )
+        .unwrap();
+
+        assert!(validate_pipe_command_name("curl").is_ok());
+        assert!(validate_pipe_command_name("curl --fail")
+            .unwrap_err()
+            .to_string()
+            .contains("must be a bare executable name"));
+        assert!(validate_secret_pipe_command_policy(
+            "curl",
+            &SecretPipeCommandPolicyFile::default(),
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("must set require_url = true or include at least one url_prefix"));
+        assert!(validate_secret_pipe_command_policy(
+            "curl",
+            &SecretPipeCommandPolicyFile {
+                require_url: true,
+                url_prefixes: Vec::new(),
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("requires at least one url_prefix"));
+        assert!(validate_secret_pipe_command_policy(
+            "curl",
+            &SecretPipeCommandPolicyFile {
+                require_url: false,
+                url_prefixes: vec![
+                    "https://api.example.com/".to_owned(),
+                    "https://api.example.com/".to_owned()
+                ],
+            },
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate url_prefix"));
+        assert!(validate_pipe_url_prefix("curl", "   ")
+            .unwrap_err()
+            .to_string()
+            .contains("contains an empty url_prefix"));
+
+        assert!(parse_policy_url_prefix("ftp://example.com")
+            .unwrap_err()
+            .contains("must start with http:// or https://"));
+        assert!(parse_policy_url_prefix("https://")
+            .unwrap_err()
+            .contains("must include an authority after scheme"));
+        assert!(parse_policy_url_prefix("https://bad host/path")
+            .unwrap_err()
+            .contains("must not contain whitespace in authority"));
+        assert!(parse_policy_url_prefix("https://example.com/path?query")
+            .unwrap_err()
+            .contains("must not include query or fragment components"));
+        assert!(parse_policy_url_prefix("https://example.com/path#fragment")
+            .unwrap_err()
+            .contains("must not include query or fragment components"));
+
+        assert!(validate_alias("runtime-1").is_ok());
+        assert!(validate_alias("")
+            .unwrap_err()
+            .to_string()
+            .contains("alias cannot be empty"));
+        assert!(validate_alias("bad/alias")
+            .unwrap_err()
+            .to_string()
+            .contains("invalid private path alias"));
+
+        assert!(
+            GlovesConfig::parse_from_str("version = 2\n", Path::new("/tmp/.gloves.toml"))
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported config version")
+        );
+        assert!(GlovesConfig::parse_from_str(
+            "version = 1\nunknown = true\n",
+            Path::new("/tmp/.gloves.toml")
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("invalid config TOML"));
+    }
+
+    #[test]
+    fn agent_paths_reports_unknown_alias_when_config_is_mutated() {
+        let mut config = GlovesConfig {
+            source_path: PathBuf::from("/tmp/.gloves.toml"),
+            root: PathBuf::from("/tmp/root"),
+            private_paths: BTreeMap::new(),
+            daemon: DaemonBootstrapConfig {
+                bind: DEFAULT_DAEMON_BIND.to_owned(),
+                io_timeout_seconds: DEFAULT_DAEMON_IO_TIMEOUT_SECONDS,
+                request_limit_bytes: DEFAULT_DAEMON_REQUEST_LIMIT_BYTES,
+            },
+            vault: VaultBootstrapConfig {
+                mode: VaultMode::Auto,
+            },
+            defaults: DefaultBootstrapConfig {
+                agent_id: AgentId::new(DEFAULT_AGENT_ID).unwrap(),
+                secret_ttl_days: DEFAULT_SECRET_TTL_DAYS,
+                vault_mount_ttl: DEFAULT_VAULT_MOUNT_TTL.to_owned(),
+                vault_secret_ttl_days: DEFAULT_VAULT_SECRET_TTL_DAYS,
+                vault_secret_length_bytes: DEFAULT_VAULT_SECRET_LENGTH_BYTES,
+            },
+            agents: BTreeMap::from([(
+                "devy".to_owned(),
+                AgentAccessPolicy {
+                    path_aliases: vec!["runtime".to_owned()],
+                    operations: vec![PathOperation::Read],
+                },
+            )]),
+            secret_access: BTreeMap::new(),
+            secret_pipe_commands: BTreeMap::new(),
+        };
+
+        let error = config
+            .agent_paths(&AgentId::new("devy").unwrap())
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("references unknown private path alias"));
+
+        config
+            .private_paths
+            .insert("runtime".to_owned(), PathBuf::from("/tmp/runtime"));
+        let missing_agent = config
+            .agent_paths(&AgentId::new("webhook").unwrap())
+            .unwrap_err();
+        assert!(matches!(missing_agent, GlovesError::NotFound));
+    }
+
+    #[test]
+    fn discover_config_walks_upward_and_ignores_missing_candidates() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("discover");
+        let workspace_dir = temp_dir.join("workspace");
+        let nested_dir = workspace_dir.join("nested").join("child");
+        fs::create_dir_all(&nested_dir).unwrap();
+
+        let config_path = workspace_dir.join(CONFIG_FILE_NAME);
+        fs::write(&config_path, "version = 1\n").unwrap();
+
+        assert_eq!(discover_config(&nested_dir), Some(config_path.clone()));
+        assert!(is_regular_config_candidate(&config_path));
+        assert!(!is_regular_config_candidate(&workspace_dir));
+        assert_eq!(discover_config(temp_dir.join("missing")), None);
+
+        cleanup_dir(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_from_path_and_permission_validation_cover_unix_rules() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("load");
+        let config_path = temp_dir.join(CONFIG_FILE_NAME);
+        let regular_path = temp_dir.join("regular.toml");
+        let symlink_path = temp_dir.join("config-link.toml");
+        fs::create_dir_all(temp_dir.join("private").join("runtime")).unwrap();
+        fs::create_dir_all(temp_dir.join("secrets-root")).unwrap();
+
+        fs::write(
+            &config_path,
+            valid_config("./secrets-root", "./private/runtime"),
+        )
+        .unwrap();
+        fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let loaded = GlovesConfig::load_from_path(&config_path).unwrap();
+        assert_eq!(loaded.defaults.agent_id.as_str(), "devy");
+
+        fs::write(&regular_path, "version = 1\n").unwrap();
+        fs::set_permissions(&regular_path, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(validate_config_file_permissions(&regular_path, false)
+            .unwrap_err()
+            .to_string()
+            .contains("must not be group/world writable"));
+
+        fs::set_permissions(&regular_path, fs::Permissions::from_mode(0o750)).unwrap();
+        assert!(validate_config_file_permissions(&regular_path, true)
+            .unwrap_err()
+            .to_string()
+            .contains("must be private"));
+
+        symlink(&regular_path, &symlink_path).unwrap();
+        assert!(validate_config_file_permissions(&symlink_path, false)
+            .unwrap_err()
+            .to_string()
+            .contains("must be a regular file"));
+
+        assert!(GlovesConfig::load_from_path(temp_dir.join("missing.toml"))
+            .unwrap_err()
+            .to_string()
+            .contains("config file does not exist"));
+
+        cleanup_dir(&temp_dir);
+    }
+}

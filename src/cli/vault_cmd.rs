@@ -132,20 +132,7 @@ pub(crate) fn run_vault_command(
                 "exec-error"
             };
             let unmount_result = manager.unmount(&name, unmount_reason, mounted_by);
-            match (command_exit_code, unmount_result) {
-                (Ok(exit_code), Ok(())) => return Ok(Some(exit_code)),
-                (Ok(exit_code), Err(unmount_error)) => {
-                    return Err(GlovesError::InvalidInput(format!(
-                        "vault exec command exited with code {exit_code}, but unmount failed: {unmount_error}"
-                    )));
-                }
-                (Err(command_error), Ok(())) => return Err(command_error),
-                (Err(command_error), Err(unmount_error)) => {
-                    return Err(GlovesError::InvalidInput(format!(
-                        "vault exec command failed: {command_error}; additionally failed to unmount vault: {unmount_error}"
-                    )));
-                }
-            }
+            return finalize_vault_exec(command_exit_code, unmount_result);
         }
         VaultCommand::Unmount { name, agent } => {
             let manager = vault_manager_for_paths(paths, defaults, &defaults.agent_id)?;
@@ -208,10 +195,33 @@ fn emit_stdout_line(line: &str) -> Result<()> {
 }
 
 fn emit_text_or_json(text: &str, payload: serde_json::Value, json_output: bool) -> Result<()> {
+    emit_stdout_line(&render_text_or_json(text, payload, json_output)?)
+}
+
+fn render_text_or_json(
+    text: &str,
+    payload: serde_json::Value,
+    json_output: bool,
+) -> Result<String> {
     if json_output {
-        emit_stdout_line(&serde_json::to_string_pretty(&payload)?)
-    } else {
-        emit_stdout_line(text)
+        return Ok(serde_json::to_string_pretty(&payload)?);
+    }
+    Ok(text.to_owned())
+}
+
+fn finalize_vault_exec(
+    command_exit_code: Result<i32>,
+    unmount_result: Result<()>,
+) -> Result<Option<i32>> {
+    match (command_exit_code, unmount_result) {
+        (Ok(exit_code), Ok(())) => Ok(Some(exit_code)),
+        (Ok(exit_code), Err(unmount_error)) => Err(GlovesError::InvalidInput(format!(
+            "vault exec command exited with code {exit_code}, but unmount failed: {unmount_error}"
+        ))),
+        (Err(command_error), Ok(())) => Err(command_error),
+        (Err(command_error), Err(unmount_error)) => Err(GlovesError::InvalidInput(format!(
+            "vault exec command failed: {command_error}; additionally failed to unmount vault: {unmount_error}"
+        ))),
     }
 }
 
@@ -241,5 +251,129 @@ fn run_vault_exec_command(command: &[String]) -> Result<i32> {
         None => Err(GlovesError::InvalidInput(format!(
             "vault exec command '{executable}' terminated by signal"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        finalize_vault_exec, render_text_or_json, resolve_agent_id, run_vault_command,
+        run_vault_exec_command, VaultCommandDefaults,
+    };
+    use crate::{cli::VaultCommand, paths::SecretsPaths, types::AgentId};
+
+    #[test]
+    fn resolve_agent_id_uses_explicit_or_default_value() {
+        let default_agent = AgentId::new("main").unwrap();
+        assert_eq!(
+            resolve_agent_id(Some("devy".to_owned()), &default_agent)
+                .unwrap()
+                .as_str(),
+            "devy"
+        );
+        assert_eq!(
+            resolve_agent_id(None, &default_agent).unwrap().as_str(),
+            "main"
+        );
+    }
+
+    #[test]
+    fn resolve_agent_id_rejects_invalid_values() {
+        let default_agent = AgentId::new("main").unwrap();
+        let error = resolve_agent_id(Some("../bad".to_owned()), &default_agent).unwrap_err();
+        assert!(error.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn run_vault_exec_command_rejects_missing_command() {
+        let error = run_vault_exec_command(&[]).unwrap_err();
+        assert!(error.to_string().contains("requires a command after '--'"));
+    }
+
+    #[test]
+    fn render_text_or_json_returns_text_and_json_payloads() {
+        let payload = serde_json::json!({ "status": "ok", "vault": "agent-data" });
+        assert_eq!(
+            render_text_or_json("mounted", payload.clone(), false).unwrap(),
+            "mounted"
+        );
+
+        let rendered_json = render_text_or_json("mounted", payload, true).unwrap();
+        assert!(rendered_json.contains("\"status\": \"ok\""));
+        assert!(rendered_json.contains("\"vault\": \"agent-data\""));
+    }
+
+    #[test]
+    fn finalize_vault_exec_covers_all_command_and_unmount_outcomes() {
+        assert_eq!(finalize_vault_exec(Ok(7), Ok(())).unwrap(), Some(7));
+
+        let unmount_error =
+            finalize_vault_exec(Ok(3), Err(crate::error::GlovesError::Forbidden)).unwrap_err();
+        assert!(unmount_error
+            .to_string()
+            .contains("vault exec command exited with code 3"));
+
+        let command_error =
+            finalize_vault_exec(Err(crate::error::GlovesError::Unauthorized), Ok(())).unwrap_err();
+        assert!(matches!(
+            command_error,
+            crate::error::GlovesError::Unauthorized
+        ));
+
+        let combined_error = finalize_vault_exec(
+            Err(crate::error::GlovesError::Forbidden),
+            Err(crate::error::GlovesError::NotFound),
+        )
+        .unwrap_err();
+        assert!(combined_error
+            .to_string()
+            .contains("additionally failed to unmount vault"));
+    }
+
+    #[test]
+    fn run_vault_command_help_returns_without_side_effects() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let paths = SecretsPaths::new(temp_dir.path());
+        let defaults = VaultCommandDefaults {
+            mount_ttl: "1h".to_owned(),
+            agent_id: AgentId::new("main").unwrap(),
+            vault_secret_ttl_days: 1,
+            vault_secret_length_bytes: 32,
+        };
+
+        let result = run_vault_command(
+            &paths,
+            VaultCommand::Help { topic: Vec::new() },
+            &defaults,
+            false,
+        )
+        .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn run_vault_exec_command_reports_start_failures() {
+        let error =
+            run_vault_exec_command(&["/definitely/missing/gloves-command".to_owned()]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("failed to start vault exec command"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_vault_exec_command_returns_exit_code_and_signal_errors() {
+        let success =
+            run_vault_exec_command(&["/bin/sh".to_owned(), "-c".to_owned(), "exit 7".to_owned()])
+                .unwrap();
+        assert_eq!(success, 7);
+
+        let signal_error = run_vault_exec_command(&[
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "kill -TERM $$".to_owned(),
+        ])
+        .unwrap_err();
+        assert!(signal_error.to_string().contains("terminated by signal"));
     }
 }

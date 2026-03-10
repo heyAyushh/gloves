@@ -23,6 +23,7 @@ const GET_PIPE_URL_POLICY_ENV_VAR: &str = "GLOVES_GET_PIPE_URL_POLICY";
 const REQUEST_ALLOWLIST_ENV_VAR: &str = "GLOVES_REQUEST_ALLOWLIST";
 const REQUEST_BLOCKLIST_ENV_VAR: &str = "GLOVES_REQUEST_BLOCKLIST";
 const SUGGEST_AUTORUN_ENV_VAR: &str = "GLOVES_SUGGEST_AUTORUN";
+const SUGGEST_AUTORUN_DELAY_ENV_VAR: &str = "GLOVES_SUGGEST_AUTORUN_DELAY_MS";
 const TEST_PIPE_COMMAND: &str = "cat";
 const ACL_TEST_AGENT_MAIN: &str = "agent-main";
 const ACL_TEST_SECRET_GITHUB_TOKEN: &str = "github/token";
@@ -48,14 +49,28 @@ fn connect_with_retry(address: &str) -> TcpStream {
     panic!("daemon endpoint was not reachable in time: {address}");
 }
 
-fn reserve_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+fn bind_loopback_listener() -> Option<TcpListener> {
+    match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => Some(listener),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping loopback daemon test because bind is not permitted: {error}");
+            None
+        }
+        Err(error) => panic!("failed to bind loopback test listener: {error}"),
+    }
 }
 
-fn spawn_daemon_with_retry(root: &Path, max_requests: usize) -> (std::process::Child, String) {
+fn reserve_loopback_port() -> Option<u16> {
+    let listener = bind_loopback_listener()?;
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    Some(port)
+}
+
+fn spawn_daemon_with_retry(
+    root: &Path,
+    max_requests: usize,
+) -> Option<(std::process::Child, String)> {
     spawn_daemon_with_retry_and_env(root, max_requests, &[])
 }
 
@@ -63,13 +78,14 @@ fn spawn_daemon_with_retry_and_env(
     root: &Path,
     max_requests: usize,
     env_pairs: &[(&str, &str)],
-) -> (std::process::Child, String) {
+) -> Option<(std::process::Child, String)> {
     let binary = assert_cmd::cargo::cargo_bin!("gloves");
     let root = root.to_str().unwrap();
     let mut last_bind_error = String::new();
 
     for _ in 0..DAEMON_WAIT_ATTEMPTS {
-        let bind = format!("127.0.0.1:{}", reserve_loopback_port());
+        let port = reserve_loopback_port()?;
+        let bind = format!("127.0.0.1:{port}");
         let mut command = std::process::Command::new(binary);
         command.args([
             "--root",
@@ -102,7 +118,7 @@ fn spawn_daemon_with_retry_and_env(
                 }
                 panic!("daemon failed to start: {stderr}");
             }
-            None => return (child, bind),
+            None => return Some((child, bind)),
         }
     }
 
@@ -438,8 +454,12 @@ fn cli_help_command_index_hides_legacy_request_shortcuts() {
     assert!(stdout.contains("\n  secrets "));
     assert!(!stdout.contains("\n  approve "));
     assert!(!stdout.contains("\n  deny "));
-    assert!(!stdout.contains("\n  set "));
-    assert!(!stdout.contains("\n  get "));
+    assert!(stdout.contains("\n  set "));
+    assert!(stdout.contains("\n  get "));
+    assert!(stdout.contains("\n  show "));
+    assert!(stdout.contains("\n  updatekeys "));
+    assert!(stdout.contains("\n  rotate "));
+    assert!(stdout.contains("\n  set-identity "));
     assert!(!stdout.contains("\n  grant "));
     assert!(!stdout.contains("\n  revoke "));
     assert!(!stdout.contains("\n  status "));
@@ -624,6 +644,44 @@ fn cli_error_format_json_reports_parse_error_shape() {
     assert_eq!(payload["code"], "E001");
     assert_eq!(payload["suggestion"]["unknown"], "aproov");
     assert_eq!(payload["suggestion"]["suggested"], "approve");
+}
+
+#[test]
+fn cli_error_format_json_reports_blocked_risky_autorun_status() {
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(SUGGEST_AUTORUN_ENV_VAR, "1")
+        .args(["--error-format", "json", "sett"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(payload["kind"], "parse_error");
+    assert_eq!(payload["autorun"]["status"], "blocked_risky");
+}
+
+#[test]
+fn cli_error_format_json_reports_enabled_autorun_status() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(SUGGEST_AUTORUN_ENV_VAR, "1")
+        .env(SUGGEST_AUTORUN_DELAY_ENV_VAR, "0")
+        .args([
+            "--root",
+            temp_dir.path().to_str().unwrap(),
+            "--error-format",
+            "json",
+            "lits",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(&stderr).unwrap();
+    assert_eq!(payload["kind"], "parse_error");
+    assert_eq!(payload["autorun"]["status"], "enabled");
+    assert_eq!(payload["autorun"]["delay_ms"], 0);
+
+    let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
+    assert!(stdout.contains('['));
 }
 
 #[test]
@@ -5344,7 +5402,10 @@ fn cli_daemon_check_passes() {
     let mut last_bind_error = String::new();
 
     for _ in 0..DAEMON_WAIT_ATTEMPTS {
-        let bind = format!("127.0.0.1:{}", reserve_loopback_port());
+        let Some(port) = reserve_loopback_port() else {
+            return;
+        };
+        let bind = format!("127.0.0.1:{port}");
         let output = std::process::Command::new(binary)
             .args(["--root", root, "daemon", "--check", "--bind", &bind])
             .output()
@@ -5409,7 +5470,9 @@ fn cli_daemon_check_rejects_zero_port_bind() {
 fn cli_daemon_check_fails_when_bind_is_in_use() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let busy_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let Some(busy_listener) = bind_loopback_listener() else {
+        return;
+    };
     let bind = busy_listener.local_addr().unwrap().to_string();
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
@@ -5429,7 +5492,9 @@ fn cli_daemon_check_fails_when_bind_is_in_use() {
 fn cli_daemon_ping_roundtrip_over_tcp() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 1);
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 1) else {
+        return;
+    };
 
     let mut stream = connect_with_retry(&bind);
     stream.write_all(br#"{"action":"ping"}"#).unwrap();
@@ -5455,7 +5520,9 @@ fn cli_daemon_ping_roundtrip_over_tcp() {
 fn cli_daemon_agent_override_isolated_per_agent() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 3);
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 3) else {
+        return;
+    };
 
     let mut set_stream = connect_with_retry(&bind);
     set_stream
@@ -5500,11 +5567,13 @@ fn cli_daemon_agent_override_isolated_per_agent() {
 fn cli_daemon_token_rejects_missing_and_accepts_valid_token() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry_and_env(
+    let Some((mut child, bind)) = spawn_daemon_with_retry_and_env(
         temp_dir.path(),
         2,
         &[("GLOVES_DAEMON_TOKEN", "test-token")],
-    );
+    ) else {
+        return;
+    };
 
     let mut unauthorized_stream = connect_with_retry(&bind);
     unauthorized_stream
@@ -5540,7 +5609,9 @@ fn cli_daemon_token_rejects_missing_and_accepts_valid_token() {
 fn cli_daemon_invalid_request_returns_error_and_continues() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 2);
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 2) else {
+        return;
+    };
 
     let mut stream = connect_with_retry(&bind);
     stream.write_all(br#"{"action":"ping""#).unwrap();
@@ -5570,7 +5641,9 @@ fn cli_daemon_invalid_request_returns_error_and_continues() {
 fn cli_daemon_set_generate_with_value_returns_error() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 1);
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 1) else {
+        return;
+    };
 
     let mut stream = connect_with_retry(&bind);
     stream
@@ -5593,7 +5666,9 @@ fn cli_daemon_set_generate_with_value_returns_error() {
 fn cli_daemon_set_rejects_non_positive_ttl() {
     let _guard = daemon_test_guard();
     let temp_dir = tempfile::tempdir().unwrap();
-    let (mut child, bind) = spawn_daemon_with_retry(temp_dir.path(), 2);
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 2) else {
+        return;
+    };
 
     let mut stream = connect_with_retry(&bind);
     stream

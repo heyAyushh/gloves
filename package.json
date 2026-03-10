@@ -1,0 +1,13 @@
+{
+  "name": "gloves-workspace",
+  "private": true,
+  "packageManager": "bun@1.3.8",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run --cwd packages/gloves-client build && bun run --cwd packages/openclaw-gloves build",
+    "test": "cargo build --bin gloves --bin gloves-mcp && bun test",
+    "docker:e2e": "bun run scripts/docker-e2e.ts"
+  }
+}

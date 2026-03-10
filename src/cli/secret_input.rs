@@ -97,3 +97,81 @@ pub(crate) fn resolve_secret_input(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_duration_value, resolve_daemon_secret_input, resolve_secret_input};
+    use chrono::Duration;
+
+    #[test]
+    fn parse_duration_value_accepts_supported_units() {
+        assert_eq!(
+            parse_duration_value("15m", "--ttl").unwrap(),
+            Duration::minutes(15)
+        );
+        assert_eq!(
+            parse_duration_value("2h", "--ttl").unwrap(),
+            Duration::hours(2)
+        );
+        assert_eq!(
+            parse_duration_value("3d", "--ttl").unwrap(),
+            Duration::days(3)
+        );
+    }
+
+    #[test]
+    fn parse_duration_value_rejects_invalid_literals() {
+        let short = parse_duration_value("9", "--ttl").unwrap_err();
+        assert!(short.to_string().contains("positive duration"));
+
+        let zero = parse_duration_value("0m", "--ttl").unwrap_err();
+        assert!(zero.to_string().contains("greater than zero"));
+
+        let invalid_unit = parse_duration_value("10w", "--ttl").unwrap_err();
+        assert!(invalid_unit.to_string().contains("unit must be one of"));
+    }
+
+    #[test]
+    fn resolve_daemon_secret_input_covers_generate_and_value_modes() {
+        let generated = resolve_daemon_secret_input(true, None).unwrap();
+        assert!(!generated.is_empty());
+
+        let explicit = resolve_daemon_secret_input(false, Some("secret".to_owned())).unwrap();
+        assert_eq!(explicit, b"secret");
+    }
+
+    #[test]
+    fn resolve_daemon_secret_input_rejects_invalid_combinations() {
+        let combined = resolve_daemon_secret_input(true, Some("secret".to_owned())).unwrap_err();
+        assert!(combined
+            .to_string()
+            .contains("generate cannot be combined with value"));
+
+        let missing = resolve_daemon_secret_input(false, None).unwrap_err();
+        assert!(missing.to_string().contains("requires value"));
+
+        let empty = resolve_daemon_secret_input(false, Some(String::new())).unwrap_err();
+        assert!(empty.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn resolve_secret_input_covers_generate_and_value_modes() {
+        let generated = resolve_secret_input(true, None, false).unwrap();
+        assert!(!generated.is_empty());
+
+        let explicit = resolve_secret_input(false, Some("secret".to_owned()), false).unwrap();
+        assert_eq!(explicit, b"secret");
+    }
+
+    #[test]
+    fn resolve_secret_input_rejects_invalid_sources() {
+        let combined = resolve_secret_input(true, Some("secret".to_owned()), false).unwrap_err();
+        assert!(combined.to_string().contains("--generate"));
+
+        let empty = resolve_secret_input(false, Some(String::new()), false).unwrap_err();
+        assert!(empty.to_string().contains("cannot be empty"));
+
+        let ambiguous = resolve_secret_input(false, Some("secret".to_owned()), true).unwrap_err();
+        assert!(ambiguous.to_string().contains("choose one input source"));
+    }
+}

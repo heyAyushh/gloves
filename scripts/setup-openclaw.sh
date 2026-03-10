@@ -24,7 +24,7 @@ TARGET_LINUX_X86_64="x86_64-unknown-linux-gnu"
 TARGET_MACOS_X86_64="x86_64-apple-darwin"
 TARGET_MACOS_ARM64="aarch64-apple-darwin"
 ARCHIVE_EXTENSION_TAR_GZ="tar.gz"
-SKILL_PACKAGES=("gloves-cli-usage" "gloves-setup-migrate")
+SKILL_PACKAGES=("gloves-cli-usage" "gloves-setup-migrate" "gloves-openclaw")
 
 REPO_ROOT="${DEFAULT_REPO_ROOT_CANDIDATE}"
 REPO_ROOT_EXPLICIT=false

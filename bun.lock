@@ -1,0 +1,25 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "gloves-workspace",
+    },
+    "packages/gloves-client": {
+      "name": "@gloves/client",
+      "version": "0.1.0",
+    },
+    "packages/openclaw-gloves": {
+      "name": "@openclaw/gloves",
+      "version": "0.1.0",
+      "dependencies": {
+        "@gloves/client": "workspace:*",
+      },
+    },
+  },
+  "packages": {
+    "@gloves/client": ["@gloves/client@workspace:packages/gloves-client"],
+
+    "@openclaw/gloves": ["@openclaw/gloves@workspace:packages/openclaw-gloves"],
+  }
+}

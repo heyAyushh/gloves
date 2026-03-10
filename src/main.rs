@@ -304,20 +304,16 @@ fn write_stdout_message(message: &str) -> i32 {
 }
 
 fn write_json_stdout(payload: &serde_json::Value) -> i32 {
-    let serialized = serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
-        "{\"kind\":\"runtime_error\",\"code\":\"E999\",\"message\":\"failed to serialize output\"}"
-            .to_owned()
-    });
+    let serialized =
+        serde_json::to_string_pretty(payload).expect("serializing JSON values should not fail");
     write_stdout_message(&format!("{serialized}\n"))
 }
 
 fn write_json_stderr(payload: &serde_json::Value) {
     let stderr = std::io::stderr();
     let mut handle = stderr.lock();
-    let serialized = serde_json::to_string_pretty(payload).unwrap_or_else(|_| {
-        "{\"kind\":\"runtime_error\",\"code\":\"E999\",\"message\":\"failed to serialize error\"}"
-            .to_owned()
-    });
+    let serialized =
+        serde_json::to_string_pretty(payload).expect("serializing JSON values should not fail");
     let _ = handle.write_all(format!("{serialized}\n").as_bytes());
     let _ = handle.flush();
 }
@@ -619,11 +615,26 @@ fn shell_words_join(args: &[String]) -> String {
 #[cfg(test)]
 mod unit_tests {
     use super::{
-        choose_best_suggestion, corrected_args_for_subcommand, decide_autorun,
-        extract_single_quoted_value, parse_error_format_from_args, parse_subcommand_candidates,
-        parse_subcommand_suggestion, AutoRunDecision, CliErrorFormat, PARSE_SUGGESTION_MARKER,
+        choose_best_suggestion, collect_error_hints, corrected_args_for_subcommand, decide_autorun,
+        env_truthy, extract_single_quoted_value, is_autorun_safe_command, levenshtein_distance,
+        option_token_len, parse_error_format_from_args, parse_subcommand_candidates,
+        parse_subcommand_suggestion, shell_words_join, top_level_command_index, AutoRunDecision,
+        CliErrorFormat, AUTORUN_DELAY_ENV, AUTORUN_ENV, AUTORUN_RISKY_ENV, PARSE_SUGGESTION_MARKER,
         PARSE_UNKNOWN_SUBCOMMAND_MARKER,
     };
+    use gloves::error::{GlovesError, ValidationError};
+    use std::{
+        env, io,
+        sync::{Mutex, OnceLock},
+    };
+
+    static AUTORUN_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn clear_autorun_env() {
+        env::remove_var(AUTORUN_ENV);
+        env::remove_var(AUTORUN_RISKY_ENV);
+        env::remove_var(AUTORUN_DELAY_ENV);
+    }
 
     #[test]
     fn parse_error_format_detects_json_long_form() {
@@ -648,10 +659,33 @@ mod unit_tests {
     }
 
     #[test]
+    fn parse_error_format_defaults_to_text_for_missing_or_unknown_values() {
+        let missing_value = parse_error_format_from_args(&["--error-format".to_owned()]);
+        assert_eq!(missing_value, CliErrorFormat::Text);
+
+        let unknown_value =
+            parse_error_format_from_args(&["--error-format=yaml".to_owned(), "list".to_owned()]);
+        assert_eq!(unknown_value, CliErrorFormat::Text);
+    }
+
+    #[test]
     fn extract_single_quoted_value_extracts_marker_value() {
         let text = "error: unrecognized subcommand 'aproov'";
         let value = extract_single_quoted_value(text, PARSE_UNKNOWN_SUBCOMMAND_MARKER).unwrap();
         assert_eq!(value, "aproov");
+    }
+
+    #[test]
+    fn extract_single_quoted_value_returns_none_when_marker_is_missing_or_unterminated() {
+        assert!(
+            extract_single_quoted_value("no quoted value", PARSE_UNKNOWN_SUBCOMMAND_MARKER)
+                .is_none()
+        );
+        assert!(extract_single_quoted_value(
+            "error: unrecognized subcommand 'aproov",
+            PARSE_UNKNOWN_SUBCOMMAND_MARKER,
+        )
+        .is_none());
     }
 
     #[test]
@@ -686,6 +720,14 @@ mod unit_tests {
     }
 
     #[test]
+    fn parse_subcommand_candidates_returns_empty_when_no_marker_matches() {
+        assert!(parse_subcommand_candidates("plain error").is_empty());
+        assert!(
+            parse_subcommand_candidates("tip: some similar subcommands exist: 'verify").is_empty()
+        );
+    }
+
+    #[test]
     fn choose_best_suggestion_prefers_smallest_distance() {
         let best = choose_best_suggestion(
             "versoin",
@@ -693,6 +735,13 @@ mod unit_tests {
         )
         .unwrap();
         assert_eq!(best, "version");
+    }
+
+    #[test]
+    fn choose_best_suggestion_and_distance_cover_empty_inputs() {
+        assert!(choose_best_suggestion("value", &[]).is_none());
+        assert_eq!(levenshtein_distance("", "value"), 5);
+        assert_eq!(levenshtein_distance("value", ""), 5);
     }
 
     #[test]
@@ -706,9 +755,255 @@ mod unit_tests {
     }
 
     #[test]
+    fn corrected_args_updates_top_level_command_after_global_options() {
+        let corrected = corrected_args_for_subcommand(
+            &[
+                "--root".to_owned(),
+                "/tmp/gloves".to_owned(),
+                "aproov".to_owned(),
+                "request-id".to_owned(),
+            ],
+            "aproov",
+            "approve",
+        )
+        .unwrap();
+        assert_eq!(
+            corrected,
+            vec![
+                "--root".to_owned(),
+                "/tmp/gloves".to_owned(),
+                "approve".to_owned(),
+                "request-id".to_owned(),
+            ]
+        );
+
+        assert!(parse_subcommand_suggestion(
+            "error: unrecognized subcommand 'aproov'\n\n  tip: some similar subcommands exist: 'approve'\n",
+            &["--".to_owned(), "aproov".to_owned()],
+        )
+        .is_none());
+    }
+
+    #[test]
     fn decide_autorun_defaults_to_disabled() {
+        let _lock = AUTORUN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_autorun_env();
         let decision = decide_autorun(&["version".to_owned()]);
         assert_eq!(decision, AutoRunDecision::Disabled);
+        clear_autorun_env();
+    }
+
+    #[test]
+    fn decide_autorun_enables_safe_commands_and_blocks_risky_ones() {
+        let _lock = AUTORUN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_autorun_env();
+        env::set_var(AUTORUN_ENV, "1");
+        env::remove_var(AUTORUN_RISKY_ENV);
+        env::set_var(AUTORUN_DELAY_ENV, "2500");
+        let safe = decide_autorun(&["help".to_owned()]);
+        assert_eq!(safe, AutoRunDecision::Enabled { delay_ms: 2500 });
+
+        let unsupported = decide_autorun(&["version".to_owned()]);
+        assert_eq!(unsupported, AutoRunDecision::BlockedRisky);
+
+        let risky = decide_autorun(&["set".to_owned()]);
+        assert_eq!(risky, AutoRunDecision::BlockedRisky);
+
+        env::set_var(AUTORUN_RISKY_ENV, "1");
+        env::set_var(AUTORUN_DELAY_ENV, "25000");
+        let risky_enabled = decide_autorun(&["set".to_owned()]);
+        assert_eq!(risky_enabled, AutoRunDecision::Enabled { delay_ms: 10_000 });
+
+        clear_autorun_env();
+    }
+
+    #[test]
+    fn autorun_safe_command_classification_covers_nested_read_only_paths() {
+        assert!(is_autorun_safe_command(&["help".to_owned()]));
+        assert!(is_autorun_safe_command(&[
+            "secrets".to_owned(),
+            "status".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "requests".to_owned(),
+            "list".to_owned()
+        ]));
+        assert!(!is_autorun_safe_command(&[
+            "requests".to_owned(),
+            "approve".to_owned()
+        ]));
+        assert!(!is_autorun_safe_command(&["set".to_owned()]));
+    }
+
+    #[test]
+    fn collect_error_hints_covers_runtime_variants() {
+        let invalid_ttl = collect_error_hints(&GlovesError::InvalidInput(
+            "--ttl must be greater than zero".to_owned(),
+        ));
+        assert!(invalid_ttl
+            .iter()
+            .any(|hint| hint.contains("positive day count")));
+
+        let invalid_pipe = collect_error_hints(&GlovesError::InvalidInput(
+            "secret piping is disabled until policy is configured".to_owned(),
+        ));
+        assert!(invalid_pipe
+            .iter()
+            .any(|hint| hint.contains("safe secret piping")));
+
+        let invalid_runtime = collect_error_hints(&GlovesError::InvalidInput(
+            "required binary not found: gocryptfs".to_owned(),
+        ));
+        assert!(invalid_runtime
+            .iter()
+            .any(|hint| hint.contains("missing runtime binary")));
+
+        let name_validation =
+            collect_error_hints(&GlovesError::Validation(ValidationError::InvalidName));
+        assert!(name_validation
+            .iter()
+            .any(|hint| hint.contains("secret names must")));
+
+        let traversal_validation =
+            collect_error_hints(&GlovesError::Validation(ValidationError::PathTraversal));
+        assert!(traversal_validation
+            .iter()
+            .any(|hint| hint.contains("cannot start with `/`")));
+
+        let forbidden = collect_error_hints(&GlovesError::Forbidden);
+        assert!(forbidden
+            .iter()
+            .any(|hint| hint.contains("blocked by policy")));
+
+        let not_found = collect_error_hints(&GlovesError::NotFound);
+        assert!(not_found
+            .iter()
+            .any(|hint| hint.contains("check existing secrets")));
+
+        let already_exists = collect_error_hints(&GlovesError::AlreadyExists);
+        assert!(already_exists
+            .iter()
+            .any(|hint| hint.contains("entry already exists")));
+
+        let unauthorized = collect_error_hints(&GlovesError::Unauthorized);
+        assert!(unauthorized
+            .iter()
+            .any(|hint| hint.contains("not authorized")));
+
+        let expired = collect_error_hints(&GlovesError::Expired);
+        assert!(expired.iter().any(|hint| hint.contains("has expired")));
+
+        let gpg_denied = collect_error_hints(&GlovesError::GpgDenied);
+        assert!(gpg_denied
+            .iter()
+            .any(|hint| hint.contains("GPG denied access")));
+
+        let integrity = collect_error_hints(&GlovesError::IntegrityViolation);
+        assert!(integrity
+            .iter()
+            .any(|hint| hint.contains("integrity verification failed")));
+
+        let io_hints = collect_error_hints(&GlovesError::Io(io::Error::other("disk")));
+        assert!(io_hints
+            .iter()
+            .any(|hint| hint.contains("path existence and permissions")));
+    }
+
+    #[test]
+    fn shell_join_and_option_token_len_handle_edge_cases() {
+        let joined = shell_words_join(&[
+            "gloves".to_owned(),
+            "value with spaces".to_owned(),
+            "nul\0trim".to_owned(),
+        ]);
+        assert!(joined.contains("'value with spaces'"));
+        assert!(!joined.contains('\0'));
+
+        let args = vec![
+            "--root".to_owned(),
+            "/tmp/gloves".to_owned(),
+            "--error-format=json".to_owned(),
+        ];
+        assert_eq!(option_token_len("--root", &args, 0), Some(2));
+        assert_eq!(option_token_len("--error-format=json", &args, 2), Some(1));
+        assert_eq!(option_token_len("--unknown", &args, 0), None);
+    }
+
+    #[test]
+    fn option_token_len_and_top_level_command_index_cover_missing_values_and_short_flags() {
+        let args = vec![
+            "-v".to_owned(),
+            "--root".to_owned(),
+            "/tmp/gloves".to_owned(),
+            "list".to_owned(),
+        ];
+        assert_eq!(top_level_command_index(&args), Some(3));
+        assert_eq!(
+            option_token_len("--root", &["--root".to_owned()], 0),
+            Some(1)
+        );
+        assert_eq!(
+            top_level_command_index(&["--".to_owned(), "list".to_owned()]),
+            None
+        );
+    }
+
+    #[test]
+    fn env_truthy_recognizes_supported_literals() {
+        let _lock = AUTORUN_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        clear_autorun_env();
+
+        env::set_var(AUTORUN_ENV, "true");
+        assert!(env_truthy(AUTORUN_ENV));
+        env::set_var(AUTORUN_ENV, " yes ");
+        assert!(env_truthy(AUTORUN_ENV));
+        env::set_var(AUTORUN_ENV, "ON");
+        assert!(env_truthy(AUTORUN_ENV));
+        env::set_var(AUTORUN_ENV, "nope");
+        assert!(!env_truthy(AUTORUN_ENV));
+
+        clear_autorun_env();
+    }
+
+    #[test]
+    fn autorun_safe_command_classification_covers_supported_nested_commands() {
+        assert!(is_autorun_safe_command(&[
+            "secrets".to_owned(),
+            "help".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "secrets".to_owned(),
+            "get".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "config".to_owned(),
+            "validate".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "access".to_owned(),
+            "paths".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "vault".to_owned(),
+            "status".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "vault".to_owned(),
+            "list".to_owned()
+        ]));
+        assert!(is_autorun_safe_command(&[
+            "gpg".to_owned(),
+            "fingerprint".to_owned()
+        ]));
     }
 
     #[test]

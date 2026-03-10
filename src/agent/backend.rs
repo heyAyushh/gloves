@@ -112,3 +112,89 @@ fn checksum_hex(bytes: &[u8]) -> String {
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AgentBackend;
+    use crate::{
+        agent::age_crypto,
+        error::GlovesError,
+        types::{SecretId, SecretValue},
+    };
+
+    #[test]
+    fn backend_encrypts_decrypts_grants_and_deletes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let backend = AgentBackend::new(temp_dir.path()).unwrap();
+        let secret_id = SecretId::new("agents/devy/api-key").unwrap();
+        let secret_value = SecretValue::new(b"sk-secret".to_vec());
+
+        let first_identity = temp_dir.path().join("devy.age");
+        age_crypto::generate_identity_file(&first_identity).unwrap();
+        let first_recipient = age_crypto::recipient_from_identity_file(&first_identity).unwrap();
+
+        let second_identity = temp_dir.path().join("main.age");
+        age_crypto::generate_identity_file(&second_identity).unwrap();
+        let second_recipient = age_crypto::recipient_from_identity_file(&second_identity).unwrap();
+
+        let ciphertext_path = backend
+            .encrypt(&secret_id, &secret_value, vec![first_recipient.clone()])
+            .unwrap();
+        assert!(ciphertext_path.exists());
+        assert_eq!(
+            backend
+                .decrypt(&secret_id, &first_identity)
+                .unwrap()
+                .expose(|value| String::from_utf8(value.to_vec())),
+            Ok("sk-secret".to_owned())
+        );
+        assert_eq!(backend.ciphertext_path(&secret_id), ciphertext_path);
+        assert_eq!(backend.ciphertext_checksum(&secret_id).unwrap().len(), 64);
+
+        backend
+            .grant(
+                &secret_id,
+                &first_identity,
+                vec![first_recipient, second_recipient],
+            )
+            .unwrap();
+        assert_eq!(
+            backend
+                .decrypt(&secret_id, &second_identity)
+                .unwrap()
+                .expose(|value| String::from_utf8(value.to_vec())),
+            Ok("sk-secret".to_owned())
+        );
+
+        backend.delete(&secret_id).unwrap();
+        assert!(!ciphertext_path.exists());
+        backend.delete(&secret_id).unwrap();
+    }
+
+    #[test]
+    fn backend_rejects_duplicate_and_empty_recipient_encryption() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let backend = AgentBackend::new(temp_dir.path()).unwrap();
+        let secret_id = SecretId::new("shared/database-url").unwrap();
+        let secret_value = SecretValue::new(b"postgres://db".to_vec());
+        let identity = temp_dir.path().join("devy.age");
+        age_crypto::generate_identity_file(&identity).unwrap();
+        let recipient = age_crypto::recipient_from_identity_file(&identity).unwrap();
+
+        backend
+            .encrypt(&secret_id, &secret_value, vec![recipient])
+            .unwrap();
+
+        let duplicate = backend
+            .encrypt(&secret_id, &secret_value, vec!["age1other".to_owned()])
+            .unwrap_err();
+        assert!(matches!(duplicate, GlovesError::AlreadyExists));
+
+        let empty = backend
+            .grant(&secret_id, &identity, Vec::new())
+            .unwrap_err();
+        assert!(
+            matches!(empty, GlovesError::Crypto(message) if message.contains("no recipients provided"))
+        );
+    }
+}

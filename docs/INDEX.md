@@ -5,6 +5,8 @@ This is the canonical documentation map for `gloves`.
 ## Start Here
 
 - [Quickstart](quickstart.md)
+- [Architecture](../ARCHITECTURE.md)
+- [Security](../SECURITY.md)
 - [Concepts and Parts](concepts-and-parts.md)
 
 ## By Role
@@ -54,6 +56,8 @@ Primary groups:
 ## Advanced References
 
 - [GLOVES Config Spec](../GLOVES_CONFIG_SPEC.md)
+- [Architecture](../ARCHITECTURE.md)
+- [Security](../SECURITY.md)
 - [Security Hardening](security-hardening.md)
 - [VM Multi-Agent Operations](vm-multi-agent-human-guide.md)
 - [Release Binaries](release-binaries.md)

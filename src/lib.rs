@@ -23,3 +23,5 @@ pub mod reaper;
 pub mod registry;
 /// Encrypted volume management.
 pub mod vault;
+
+mod namespaced_store;

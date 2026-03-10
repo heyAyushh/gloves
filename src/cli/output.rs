@@ -47,3 +47,21 @@ pub(crate) fn stderr_line(text: &str) -> io::Result<OutputStatus> {
             .and_then(|_| handle.flush()),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{map_result, OutputStatus};
+    use std::io;
+
+    #[test]
+    fn map_result_maps_written_broken_pipe_and_other_errors() {
+        assert_eq!(map_result(Ok(())).unwrap(), OutputStatus::Written);
+        assert_eq!(
+            map_result(Err(io::Error::from(io::ErrorKind::BrokenPipe))).unwrap(),
+            OutputStatus::BrokenPipe
+        );
+
+        let error = map_result(Err(io::Error::from(io::ErrorKind::PermissionDenied))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+}

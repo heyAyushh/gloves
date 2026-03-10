@@ -1,0 +1,13 @@
+{
+  "name": "@gloves/client",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "build": "bun run scripts/build-native.ts && bun build src/index.ts --outdir dist --target node",
+    "test": "bun test src"
+  }
+}

@@ -1,0 +1,146 @@
+use assert_cmd::Command;
+use serde_json::Value;
+use std::{fs, path::Path};
+
+fn repo_path(relative: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+#[test]
+fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
+    let contents = fs::read_to_string(repo_path("integrations/openclaw/gloves.json5")).unwrap();
+
+    assert!(contents.contains("command: \"gloves-mcp\""));
+    assert!(contents.contains("GLOVES_SESSION_TOKEN_PATH"));
+    assert!(contents.contains("package: \"@openclaw/gloves\""));
+    assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
+    assert!(contents.contains("root: \"~/.config/gloves\""));
+    assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
+    assert!(contents.contains("socketPath: \"~/.openclaw/gloves/daemon.sock\""));
+    assert!(contents.contains("GLOVES_SOCKET: \"/gloves.sock\""));
+    assert!(contents.contains("GLOVES_TOKEN_PATH: \"/run/gloves/token\""));
+    assert!(contents.contains("gloves_approve"));
+}
+
+#[test]
+fn gloves_openclaw_skill_teaches_redacted_and_pipe_first_workflow() {
+    let contents = fs::read_to_string(repo_path("skills/gloves-openclaw/SKILL.md")).unwrap();
+
+    assert!(contents.contains("gloves show <path> --redacted"));
+    assert!(contents.contains("gloves get <path> --format raw | <target-command>"));
+    assert!(contents.contains("gloves set <path> --stdin"));
+    assert!(contents.contains("gloves_set"));
+    assert!(contents.contains("gloves_approve"));
+    assert!(contents.contains("Never print, echo, or restate a secret value"));
+}
+
+#[test]
+fn bun_benchmark_reports_latency_summary_for_namespaced_get() {
+    if Command::new("bun").arg("--version").output().is_err() {
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let root_string = root.to_str().unwrap();
+    let secret_path = "agents/devy/api-keys/anthropic";
+    let gloves_binary = assert_cmd::cargo::cargo_bin!("gloves");
+
+    Command::new(gloves_binary)
+        .args(["--root", root_string, "set-identity", "--agent", "devy"])
+        .assert()
+        .success();
+
+    fs::create_dir_all(root.join("store")).unwrap();
+    fs::write(
+        root.join("store/.gloves.yaml"),
+        "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n",
+    )
+    .unwrap();
+
+    Command::new(gloves_binary)
+        .args([
+            "--root",
+            root_string,
+            "--agent",
+            "devy",
+            "set",
+            secret_path,
+            "--value",
+            "sk-ant-api03-benchmark",
+        ])
+        .assert()
+        .success();
+
+    let output = Command::new("bun")
+        .args([
+            "run",
+            repo_path("scripts/benchmark-gloves-get.ts")
+                .to_str()
+                .unwrap(),
+            "--root",
+            root_string,
+            "--agent",
+            "devy",
+            "--path",
+            secret_path,
+            "--iterations",
+            "3",
+            "--warmups",
+            "1",
+        ])
+        .env("GLOVES_BIN", gloves_binary)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["command"], "gloves get");
+    assert_eq!(payload["agent"], "devy");
+    assert_eq!(payload["path"], secret_path);
+    assert_eq!(payload["iterations"], 3);
+    assert_eq!(payload["warmups"], 1);
+    assert!(payload["avg_ms"].as_f64().unwrap() >= 0.0);
+    assert_eq!(payload["samples_ms"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
+    let security = fs::read_to_string(repo_path("SECURITY.md")).unwrap();
+    let architecture = fs::read_to_string(repo_path("ARCHITECTURE.md")).unwrap();
+    let readme = fs::read_to_string(repo_path("README.md")).unwrap();
+
+    assert!(security.contains("never appear in the LLM context"));
+    assert!(security.contains("brokered"));
+    assert!(architecture.contains("gloves-mcp"));
+    assert!(architecture.contains("@openclaw/gloves"));
+    assert!(readme.contains("@openclaw/gloves"));
+}
+
+#[test]
+fn docker_harness_locks_down_the_sandboxed_openclaw_flow() {
+    let package_json = fs::read_to_string(repo_path("package.json")).unwrap();
+    let runner = fs::read_to_string(repo_path("scripts/docker-e2e.ts")).unwrap();
+    let sandbox = fs::read_to_string(repo_path("docker/agent-sandbox.ts")).unwrap();
+    let dockerfile = fs::read_to_string(repo_path("docker/agent-sandbox.Dockerfile")).unwrap();
+    let daemon_dockerfile =
+        fs::read_to_string(repo_path("docker/gloves-daemon.Dockerfile")).unwrap();
+
+    assert!(package_json.contains("\"docker:e2e\""));
+    assert!(runner.contains("--network=none"));
+    assert!(runner.contains("--read-only"));
+    assert!(runner.contains("--cap-drop=ALL"));
+    assert!(runner.contains("/run/gloves/daemon.sock"));
+    assert!(runner.contains("/run/gloves/session-token"));
+    assert!(runner.contains("cross-agent access denied"));
+    assert!(runner.contains("secret plaintext leaked"));
+    assert!(sandbox.contains("gloves_get"));
+    assert!(sandbox.contains("gloves_rotate"));
+    assert!(sandbox.contains("conversation.json"));
+    assert!(dockerfile.contains("FROM oven/bun:1.3.8-slim"));
+    assert!(dockerfile.contains("ENTRYPOINT [\"bun\", \"docker/agent-sandbox.ts\"]"));
+    assert!(daemon_dockerfile.contains("cargo build --release --bin gloves --bin gloves-mcp"));
+    assert!(daemon_dockerfile.contains("ENTRYPOINT [\"gloves-mcp\"]"));
+}

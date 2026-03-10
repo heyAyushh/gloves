@@ -123,3 +123,83 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(parent)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::AgentRegistry;
+    use crate::{error::GlovesError, types::AgentId};
+    use std::fs;
+
+    #[test]
+    fn registry_bootstraps_registers_and_verifies_integrity() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("registry/agents.json");
+        let mut registry = AgentRegistry::load_or_create(&path, b"registry-secret").unwrap();
+        let main = AgentId::new("main").unwrap();
+        let devy = AgentId::new("devy").unwrap();
+
+        registry
+            .register(main.clone(), "age1main".to_owned(), None)
+            .unwrap();
+        registry
+            .register(devy.clone(), "age1devy".to_owned(), Some(main.clone()))
+            .unwrap();
+
+        assert_eq!(registry.get_pubkey(&main), Some("age1main"));
+        assert_eq!(registry.get_pubkey(&devy), Some("age1devy"));
+        assert!(registry.verify_integrity());
+
+        let reloaded = AgentRegistry::load_or_create(&path, b"registry-secret").unwrap();
+        assert_eq!(reloaded.get_pubkey(&devy), Some("age1devy"));
+        assert!(reloaded.verify_integrity());
+    }
+
+    #[test]
+    fn registry_rejects_duplicates_and_missing_vouchers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("registry.json");
+        let mut registry = AgentRegistry::load_or_create(&path, b"registry-secret").unwrap();
+        let main = AgentId::new("main").unwrap();
+        let devy = AgentId::new("devy").unwrap();
+        let unknown = AgentId::new("ghost").unwrap();
+
+        registry
+            .register(main.clone(), "age1main".to_owned(), None)
+            .unwrap();
+
+        let duplicate = registry
+            .register(main.clone(), "age1other".to_owned(), None)
+            .unwrap_err();
+        assert!(matches!(duplicate, GlovesError::AlreadyExists));
+
+        let missing_voucher = registry
+            .register(devy.clone(), "age1devy".to_owned(), None)
+            .unwrap_err();
+        assert!(matches!(missing_voucher, GlovesError::Forbidden));
+
+        let unknown_voucher = registry
+            .register(devy, "age1devy".to_owned(), Some(unknown))
+            .unwrap_err();
+        assert!(matches!(unknown_voucher, GlovesError::Forbidden));
+    }
+
+    #[test]
+    fn registry_detects_tampered_integrity_tag() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("registry.json");
+        let mut registry = AgentRegistry::load_or_create(&path, b"registry-secret").unwrap();
+        let main = AgentId::new("main").unwrap();
+        registry
+            .register(main.clone(), "age1main".to_owned(), None)
+            .unwrap();
+
+        let mut payload: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        payload["entries"]["main"] = serde_json::json!("age1tampered");
+        fs::write(&path, serde_json::to_vec_pretty(&payload).unwrap()).unwrap();
+
+        let tampered = AgentRegistry::load_or_create(&path, b"registry-secret").unwrap();
+        assert_eq!(tampered.get_pubkey(&main), Some("age1tampered"));
+        assert!(!tampered.verify_integrity());
+    }
+}

@@ -1,0 +1,36 @@
+{
+  mcp: {
+    servers: {
+      gloves: {
+        transport: "stdio",
+        command: "gloves-mcp",
+        args: [
+          "--config", "~/.config/gloves/gloves.toml",
+          "--agent", "${AGENT_ID}"
+        ],
+        env: {
+          GLOVES_SESSION_TOKEN_PATH: "~/.openclaw/gloves/session-token"
+        },
+        toolAnnotations: {
+          gloves_list: { readOnlyHint: true, destructiveHint: false },
+          gloves_show: { readOnlyHint: true, destructiveHint: false },
+          gloves_get: { readOnlyHint: true, destructiveHint: false },
+          gloves_set: { readOnlyHint: false, destructiveHint: false },
+          gloves_delete: { readOnlyHint: false, destructiveHint: true },
+          gloves_rotate: { readOnlyHint: false, destructiveHint: true }
+        }
+      }
+    }
+  },
+  plugins: {
+    gloves: {
+      package: "@openclaw/gloves",
+      config: {
+        socketPath: "~/.openclaw/gloves/daemon.sock",
+        tokenPath: "~/.openclaw/gloves/session-token",
+        injectMode: "env",
+        tmpfsPath: "/run/secrets"
+      }
+    }
+  }
+}

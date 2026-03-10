@@ -1,0 +1,62 @@
+{
+  mcp: {
+    servers: {
+      gloves: {
+        transport: "stdio",
+        command: "gloves-mcp",
+        args: [
+          "--config", "~/.config/gloves/gloves.toml",
+          "--agent", "${AGENT_ID}"
+        ],
+        env: {
+          GLOVES_SESSION_TOKEN_PATH: "~/.openclaw/gloves/session-token"
+        },
+        toolAnnotations: {
+          gloves_list: { readOnlyHint: true, destructiveHint: false },
+          gloves_show: { readOnlyHint: true, destructiveHint: false },
+          gloves_get: { readOnlyHint: true, destructiveHint: false },
+          gloves_set: { readOnlyHint: false, destructiveHint: false },
+          gloves_delete: { readOnlyHint: false, destructiveHint: true },
+          gloves_approve: { readOnlyHint: false, destructiveHint: false },
+          gloves_rotate: { readOnlyHint: false, destructiveHint: true }
+        }
+      }
+    }
+  },
+  plugins: {
+    gloves: {
+      package: "@openclaw/gloves",
+      config: {
+        root: "~/.config/gloves",
+        mcpConfigPath: "~/.config/gloves/gloves.toml",
+        tokenPath: "~/.openclaw/gloves/session-token",
+        socketPath: "~/.openclaw/gloves/daemon.sock",
+        injectMode: "env",
+        tmpfsPath: "/run/secrets"
+      }
+    }
+  },
+  agents: {
+    devy: {
+      sandbox: {
+        docker: {
+          network: "none",
+          readOnlyRoot: true,
+          capDrop: ["ALL"],
+          securityOpt: ["no-new-privileges:true"],
+          volumes: [
+            "~/.openclaw/gloves/daemon.sock:/gloves.sock",
+            "~/.openclaw/gloves/session-token:/run/gloves/token:ro"
+          ],
+          tmpfs: {
+            "/run/secrets": "size=10M,mode=0700,noexec,nosuid,nodev"
+          },
+          env: {
+            GLOVES_SOCKET: "/gloves.sock",
+            GLOVES_TOKEN_PATH: "/run/gloves/token"
+          }
+        }
+      }
+    }
+  }
+}
