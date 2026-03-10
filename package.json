@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "build": "bun run --cwd packages/gloves-client build && bun run --cwd packages/openclaw-gloves build",
-    "test": "cargo build --bin gloves --bin gloves-mcp && bun test"
+    "test": "cargo build --bin gloves --bin gloves-mcp && bun test",
+    "docker:e2e": "bun run scripts/docker-e2e.ts"
   }
 }

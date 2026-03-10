@@ -118,3 +118,29 @@ fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
     assert!(architecture.contains("@openclaw/gloves"));
     assert!(readme.contains("@openclaw/gloves"));
 }
+
+#[test]
+fn docker_harness_locks_down_the_sandboxed_openclaw_flow() {
+    let package_json = fs::read_to_string(repo_path("package.json")).unwrap();
+    let runner = fs::read_to_string(repo_path("scripts/docker-e2e.ts")).unwrap();
+    let sandbox = fs::read_to_string(repo_path("docker/agent-sandbox.ts")).unwrap();
+    let dockerfile = fs::read_to_string(repo_path("docker/agent-sandbox.Dockerfile")).unwrap();
+    let daemon_dockerfile =
+        fs::read_to_string(repo_path("docker/gloves-daemon.Dockerfile")).unwrap();
+
+    assert!(package_json.contains("\"docker:e2e\""));
+    assert!(runner.contains("--network=none"));
+    assert!(runner.contains("--read-only"));
+    assert!(runner.contains("--cap-drop=ALL"));
+    assert!(runner.contains("/run/gloves/daemon.sock"));
+    assert!(runner.contains("/run/gloves/session-token"));
+    assert!(runner.contains("cross-agent access denied"));
+    assert!(runner.contains("secret plaintext leaked"));
+    assert!(sandbox.contains("gloves_get"));
+    assert!(sandbox.contains("gloves_rotate"));
+    assert!(sandbox.contains("conversation.json"));
+    assert!(dockerfile.contains("FROM oven/bun:1.3.8-slim"));
+    assert!(dockerfile.contains("ENTRYPOINT [\"bun\", \"docker/agent-sandbox.ts\"]"));
+    assert!(daemon_dockerfile.contains("cargo build --release --bin gloves --bin gloves-mcp"));
+    assert!(daemon_dockerfile.contains("ENTRYPOINT [\"gloves-mcp\"]"));
+}

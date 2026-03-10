@@ -12,7 +12,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 
 use chrono::{DateTime, Duration, Utc};
 use clap::Parser;
@@ -27,13 +27,21 @@ use gloves::{
 use hmac::{Hmac, Mac};
 use rand::{Rng, RngExt};
 use regex::Regex;
+use rmcp::{
+    model::{
+        CallToolRequestParams, CallToolResult, CustomNotification, ErrorCode, Implementation,
+        InitializeRequestParams, ListToolsResult, Meta, PaginatedRequestParams, ProtocolVersion,
+        ServerCapabilities, ServerInfo, ServerNotification, Tool,
+    },
+    service::{RequestContext, RoleServer},
+    transport::stdio,
+    ErrorData as McpError, ServerHandler, ServiceExt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::Sha256;
+use tokio::task;
 use uuid::Uuid;
-
-const JSON_RPC_VERSION: &str = "2.0";
-const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 const AUTH_FAILED_CODE: i64 = -32001;
 const APPROVAL_DENIED_CODE: i64 = -32002;
 const APPROVAL_TIMEOUT_CODE: i64 = -32003;
@@ -49,10 +57,6 @@ const APPROVAL_POLL_INTERVAL_MILLIS: u64 = 25;
 const RULES_FILE_NAME: &str = ".gloves.yaml";
 const RECIPIENTS_FILE_NAME: &str = ".age-recipients";
 const PENDING_REQUESTS_FILE_NAME: &str = ".gloves-pending.json";
-const TOOLS_LIST_METHOD: &str = "tools/list";
-const TOOLS_CALL_METHOD: &str = "tools/call";
-const INITIALIZE_METHOD: &str = "initialize";
-const INITIALIZED_NOTIFICATION_METHOD: &str = "notifications/initialized";
 const SECRET_NOTIFICATION_METHOD: &str = "gloves/secret";
 const GLOVES_LIST_TOOL: &str = "gloves_list";
 const GLOVES_SHOW_TOOL: &str = "gloves_show";
@@ -161,6 +165,45 @@ struct ResolvedConfig {
 struct SessionContext {
     agent_id: AgentId,
     agent_recipient: String,
+}
+
+#[derive(Debug)]
+struct GlovesMcpServer {
+    config: ResolvedConfig,
+    expected_session_token: String,
+    fallback_agent: Option<String>,
+    allow_secret_notifications: bool,
+    session: Mutex<Option<SessionContext>>,
+}
+
+impl GlovesMcpServer {
+    fn new(
+        config: ResolvedConfig,
+        expected_session_token: String,
+        fallback_agent: Option<String>,
+        allow_secret_notifications: bool,
+    ) -> Self {
+        Self {
+            config,
+            expected_session_token,
+            fallback_agent,
+            allow_secret_notifications,
+            session: Mutex::new(None),
+        }
+    }
+
+    fn authenticated_session(&self) -> std::result::Result<SessionContext, McpError> {
+        self.session
+            .lock()
+            .map_err(|_| McpError::internal_error("session mutex poisoned", None))?
+            .clone()
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "session not initialized",
+                    Some(json!({ "reason": "missing_session" })),
+                )
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,14 +442,15 @@ impl MetricsState {
     }
 }
 
-fn main() {
-    if let Err(error) = run() {
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
         let _ = writeln!(io::stderr(), "{error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let cli = Cli::parse();
     let config = ResolvedConfig::load(&cli.config)?;
     let metrics_state = METRICS_STATE
@@ -430,25 +474,10 @@ fn run() -> Result<()> {
     )?;
 
     if config.socket_path.is_some() && !cli.stdio {
-        return run_socket_server(&config, &session_token, cli.agent.as_deref());
+        return run_socket_server(config, session_token, cli.agent).await;
     }
 
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut writer = stdout.lock();
-    let session = match authenticate_session(
-        &mut reader,
-        &mut writer,
-        &config,
-        &session_token,
-        cli.agent.as_deref(),
-    )? {
-        Some(session) => session,
-        None => return Ok(()),
-    };
-
-    serve_session(&mut reader, &mut writer, &config, &session, false)
+    run_stdio_server(config, session_token, cli.agent).await
 }
 
 impl ResolvedConfig {
@@ -560,10 +589,10 @@ impl ResolvedConfig {
 }
 
 #[cfg(unix)]
-fn run_socket_server(
-    config: &ResolvedConfig,
-    session_token: &str,
-    fallback_agent: Option<&str>,
+async fn run_socket_server(
+    config: ResolvedConfig,
+    session_token: String,
+    fallback_agent: Option<String>,
 ) -> Result<()> {
     let socket_path = config.socket_path.as_ref().ok_or_else(|| {
         GlovesError::InvalidInput("daemon.socket_path is required for socket mode".to_owned())
@@ -574,37 +603,56 @@ fn run_socket_server(
     if socket_path.exists() {
         fs::remove_file(socket_path)?;
     }
-    let listener = UnixListener::bind(socket_path)?;
-    let fallback_agent = fallback_agent.map(str::to_owned);
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(stream) => stream,
-            Err(error) => return Err(GlovesError::Io(error)),
-        };
-        let connection_config = config.clone();
-        let connection_token = session_token.to_owned();
-        let connection_agent = fallback_agent.clone();
-        thread::spawn(move || {
-            let _ = handle_socket_connection(
-                stream,
-                &connection_config,
-                &connection_token,
-                connection_agent.as_deref(),
-            );
+    let listener = UnixListener::bind(socket_path).map_err(GlovesError::Io)?;
+    loop {
+        let (stream, _) = listener.accept().await.map_err(GlovesError::Io)?;
+        let server = GlovesMcpServer::new(
+            config.clone(),
+            session_token.clone(),
+            fallback_agent.clone(),
+            true,
+        );
+        tokio::spawn(async move {
+            if let Err(error) = serve_rmcp_connection(server, stream).await {
+                let _ = writeln!(io::stderr(), "socket connection failed: {error}");
+            }
         });
     }
-    Ok(())
 }
 
 #[cfg(not(unix))]
-fn run_socket_server(
-    _config: &ResolvedConfig,
-    _session_token: &str,
-    _fallback_agent: Option<&str>,
+async fn run_socket_server(
+    _config: ResolvedConfig,
+    _session_token: String,
+    _fallback_agent: Option<String>,
 ) -> Result<()> {
     Err(GlovesError::InvalidInput(
         "daemon.socket_path is only supported on unix platforms".to_owned(),
     ))
+}
+
+async fn run_stdio_server(
+    config: ResolvedConfig,
+    session_token: String,
+    fallback_agent: Option<String>,
+) -> Result<()> {
+    let server = GlovesMcpServer::new(config, session_token, fallback_agent, false);
+    serve_rmcp_connection(server, stdio())
+        .await
+        .map_err(map_rmcp_error)
+}
+
+async fn serve_rmcp_connection<T, E, A>(
+    server: GlovesMcpServer,
+    transport: T,
+) -> std::result::Result<(), rmcp::RmcpError>
+where
+    T: rmcp::transport::IntoTransport<RoleServer, E, A>,
+    E: std::error::Error + Send + Sync + 'static,
+{
+    let service = server.serve(transport).await?;
+    service.waiting().await?;
+    Ok(())
 }
 
 fn start_http_control_server(
@@ -638,20 +686,26 @@ fn start_http_control_server(
     Ok(())
 }
 
-fn write_http_control_response(
-    stream: &mut TcpStream,
+fn write_http_control_response<S>(
+    stream: &mut S,
     config: &ResolvedConfig,
     metrics_state: &MetricsState,
-) -> Result<()> {
-    let mut request_reader = BufReader::new(stream.try_clone()?);
-    let mut request_line = String::new();
-    request_reader.read_line(&mut request_line)?;
-    let request_path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .to_owned();
-    let authorization_header = read_authorization_header(&mut request_reader)?;
+) -> Result<()>
+where
+    S: Read + Write,
+{
+    let (request_line, request_path, authorization_header) = {
+        let mut request_reader = BufReader::new(&mut *stream);
+        let mut request_line = String::new();
+        request_reader.read_line(&mut request_line)?;
+        let request_path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_owned();
+        let authorization_header = read_authorization_header(&mut request_reader)?;
+        (request_line, request_path, authorization_header)
+    };
 
     let (status_line, body) = if request_line.starts_with("GET /metrics ") && config.metrics_enabled
     {
@@ -668,9 +722,21 @@ fn write_http_control_response(
     } else {
         ("HTTP/1.1 404 Not Found", "not found\n".to_owned())
     };
+    write_http_response(stream, status_line, METRICS_RESPONSE_CONTENT_TYPE, &body)
+}
+
+fn write_http_response<W>(
+    stream: &mut W,
+    status_line: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<()>
+where
+    W: Write,
+{
     write!(
         stream,
-        "{status_line}\r\nContent-Type: {METRICS_RESPONSE_CONTENT_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "{status_line}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
     stream.flush()?;
@@ -820,27 +886,177 @@ fn secret_access_result_label(error: &GlovesError) -> &'static str {
     }
 }
 
-#[cfg(unix)]
-fn handle_socket_connection(
-    stream: UnixStream,
+fn mcp_server_info() -> ServerInfo {
+    ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        .with_protocol_version(ProtocolVersion::V_2025_06_18)
+        .with_server_info(Implementation::new("gloves-mcp", env!("CARGO_PKG_VERSION")))
+        .with_instructions("Gloves brokered secret transport".to_owned())
+}
+
+fn authenticate_initialize_request(
     config: &ResolvedConfig,
-    session_token: &str,
+    expected_session_token: &str,
+    meta: &Meta,
     fallback_agent: Option<&str>,
-) -> Result<()> {
-    let reader_stream = stream.try_clone()?;
-    let mut reader = BufReader::new(reader_stream);
-    let mut writer = stream;
-    let session = match authenticate_session(
-        &mut reader,
-        &mut writer,
-        config,
-        session_token,
-        fallback_agent,
-    )? {
-        Some(session) => session,
-        None => return Ok(()),
-    };
-    serve_session(&mut reader, &mut writer, config, &session, true)
+) -> std::result::Result<SessionContext, McpError> {
+    let provided_token = meta
+        .get("sessionToken")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if provided_token != expected_session_token {
+        let _ = append_audit_record(
+            config,
+            AuditRecord {
+                version: 1,
+                timestamp: Utc::now(),
+                event_type: "auth_failure",
+                agent_id: fallback_agent,
+                tool: None,
+                path: None,
+                result: "denied",
+                error: Some("invalid_token"),
+            },
+        );
+        return Err(McpError::new(
+            ErrorCode(AUTH_FAILED_CODE as i32),
+            "Session authentication failed",
+            Some(json!({ "reason": "invalid_token" })),
+        ));
+    }
+
+    let requested_agent = meta
+        .get("agentId")
+        .and_then(Value::as_str)
+        .or(fallback_agent)
+        .ok_or_else(|| McpError::invalid_params("initialize params must include agentId", None))?;
+    let agent_id = AgentId::new(requested_agent)
+        .map_err(|error| tuple_to_mcp_error_from_runtime(error.into()))?;
+    let agent_recipient =
+        load_agent_recipient(config, &agent_id).map_err(tuple_to_mcp_error_from_runtime)?;
+
+    Ok(SessionContext {
+        agent_id,
+        agent_recipient,
+    })
+}
+
+fn deserialize_tool_definitions() -> std::result::Result<Vec<Tool>, McpError> {
+    tool_definitions()
+        .into_iter()
+        .map(|tool| {
+            serde_json::from_value(tool).map_err(|error| {
+                McpError::internal_error(
+                    format!("failed to deserialize tool definition: {error}"),
+                    None,
+                )
+            })
+        })
+        .collect()
+}
+
+async fn send_secret_notification(
+    context: &RequestContext<RoleServer>,
+    secret_path: &str,
+    secret_value: &str,
+) -> std::result::Result<(), McpError> {
+    context
+        .peer
+        .send_notification(ServerNotification::CustomNotification(
+            CustomNotification::new(
+                SECRET_NOTIFICATION_METHOD,
+                Some(json!({
+                    "requestId": context.id,
+                    "path": secret_path,
+                    "value": secret_value
+                })),
+            ),
+        ))
+        .await
+        .map_err(|error| {
+            McpError::internal_error(format!("failed to send secret side-channel: {error}"), None)
+        })
+}
+
+impl ServerHandler for GlovesMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        mcp_server_info()
+    }
+
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> std::result::Result<ServerInfo, McpError> {
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request.clone());
+        }
+        let session = authenticate_initialize_request(
+            &self.config,
+            &self.expected_session_token,
+            &context.meta,
+            self.fallback_agent.as_deref(),
+        )?;
+        *self
+            .session
+            .lock()
+            .map_err(|_| McpError::internal_error("session mutex poisoned", None))? = Some(session);
+        Ok(mcp_server_info())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> std::result::Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
+            tools: deserialize_tool_definitions()?,
+            ..Default::default()
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> std::result::Result<CallToolResult, McpError> {
+        let session = self.authenticated_session()?;
+        let config = self.config.clone();
+        let request_value = serde_json::to_value(&request).map_err(|error| {
+            McpError::internal_error(format!("failed to serialize tool request: {error}"), None)
+        })?;
+        let execution =
+            task::spawn_blocking(move || handle_tool_call(&config, &session, Some(&request_value)))
+                .await
+                .map_err(|error| {
+                    McpError::internal_error(format!("tool task failed: {error}"), None)
+                })?;
+        let execution = execution.map_err(tuple_to_mcp_error)?;
+
+        if self.allow_secret_notifications {
+            if let (Some(secret_value), Some(secret_path)) = (
+                execution.secret_value.as_deref(),
+                execution.secret_path.as_deref(),
+            ) {
+                send_secret_notification(&context, secret_path, secret_value).await?;
+            }
+        }
+
+        serde_json::from_value(execution.payload).map_err(|error| {
+            McpError::internal_error(format!("failed to serialize tool response: {error}"), None)
+        })
+    }
+}
+
+fn map_rmcp_error(error: rmcp::RmcpError) -> GlovesError {
+    GlovesError::InvalidInput(error.to_string())
+}
+
+fn tuple_to_mcp_error(error: (i64, &'static str, Value)) -> McpError {
+    McpError::new(ErrorCode(error.0 as i32), error.1, Some(error.2))
+}
+
+fn tuple_to_mcp_error_from_runtime(error: GlovesError) -> McpError {
+    tuple_to_mcp_error(map_runtime_error(error))
 }
 
 impl ApprovalChannel {
@@ -862,185 +1078,6 @@ impl ApprovalChannel {
             Self::Webhook => "webhook",
         }
     }
-}
-
-fn authenticate_session<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    config: &ResolvedConfig,
-    session_token: &str,
-    fallback_agent: Option<&str>,
-) -> Result<Option<SessionContext>>
-where
-    R: BufRead,
-    W: Write,
-{
-    let Some(request) = read_json_line(reader)? else {
-        return Ok(None);
-    };
-    let request_id = request.get("id").cloned().unwrap_or(Value::Null);
-    if request.get("method").and_then(Value::as_str) != Some(INITIALIZE_METHOD) {
-        write_error_response(
-            writer,
-            request_id,
-            AUTH_FAILED_CODE,
-            "Session authentication failed",
-            json!({ "reason": "missing_initialize" }),
-        )?;
-        append_audit_record(
-            config,
-            AuditRecord {
-                version: 1,
-                timestamp: Utc::now(),
-                event_type: "auth_failure",
-                agent_id: fallback_agent,
-                tool: None,
-                path: None,
-                result: "denied",
-                error: Some("missing_initialize"),
-            },
-        )?;
-        return Ok(None);
-    }
-
-    let params = request
-        .get("params")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            GlovesError::InvalidInput("initialize params must be an object".to_owned())
-        })?;
-    let meta = params
-        .get("_meta")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            GlovesError::InvalidInput("initialize params must include _meta".to_owned())
-        })?;
-    let provided_token = meta
-        .get("sessionToken")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if provided_token != session_token {
-        write_error_response(
-            writer,
-            request_id,
-            AUTH_FAILED_CODE,
-            "Session authentication failed",
-            json!({ "reason": "invalid_token" }),
-        )?;
-        append_audit_record(
-            config,
-            AuditRecord {
-                version: 1,
-                timestamp: Utc::now(),
-                event_type: "auth_failure",
-                agent_id: fallback_agent,
-                tool: None,
-                path: None,
-                result: "denied",
-                error: Some("invalid_token"),
-            },
-        )?;
-        return Ok(None);
-    }
-
-    let requested_agent = meta
-        .get("agentId")
-        .and_then(Value::as_str)
-        .or(fallback_agent)
-        .ok_or_else(|| {
-            GlovesError::InvalidInput("initialize params must include agentId".to_owned())
-        })?;
-    let agent_id = AgentId::new(requested_agent)?;
-    let agent_recipient = load_agent_recipient(config, &agent_id)?;
-
-    write_result_response(
-        writer,
-        request_id,
-        json!({
-            "protocolVersion": MCP_PROTOCOL_VERSION,
-            "capabilities": {
-                "tools": {
-                    "listChanged": false
-                }
-            },
-            "serverInfo": {
-                "name": "gloves-mcp",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }),
-    )?;
-
-    Ok(Some(SessionContext {
-        agent_id,
-        agent_recipient,
-    }))
-}
-
-fn serve_session<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    config: &ResolvedConfig,
-    session: &SessionContext,
-    allow_secret_notifications: bool,
-) -> Result<()>
-where
-    R: BufRead,
-    W: Write,
-{
-    while let Some(request) = read_json_line(reader)? {
-        let method = request
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if method == INITIALIZED_NOTIFICATION_METHOD {
-            continue;
-        }
-
-        let request_id = request.get("id").cloned().unwrap_or(Value::Null);
-        match method {
-            TOOLS_LIST_METHOD => {
-                let result = json!({
-                    "tools": tool_definitions()
-                });
-                write_result_response(writer, request_id, result)?;
-            }
-            TOOLS_CALL_METHOD => {
-                let response = handle_tool_call(config, session, request.get("params"));
-                match response {
-                    Ok(result) => {
-                        if allow_secret_notifications {
-                            if let (Some(secret_value), Some(secret_path)) = (
-                                result.secret_value.as_deref(),
-                                result.secret_path.as_deref(),
-                            ) {
-                                write_secret_notification(
-                                    writer,
-                                    request_id.clone(),
-                                    secret_path,
-                                    secret_value,
-                                )?;
-                            }
-                        }
-                        write_result_response(writer, request_id, result.payload)?
-                    }
-                    Err((code, message, data)) => {
-                        write_error_response(writer, request_id, code, message, data)?
-                    }
-                }
-            }
-            _ => {
-                write_error_response(
-                    writer,
-                    request_id,
-                    INTERNAL_ERROR_CODE,
-                    "Unsupported method",
-                    json!({ "method": method }),
-                )?;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn handle_tool_call(
@@ -1606,11 +1643,37 @@ fn post_json(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
     }
     let parsed = parse_http_url(url)?;
     let mut stream = TcpStream::connect((parsed.host.as_str(), parsed.port))?;
+    post_json_over_stream(&mut stream, &parsed.host, &parsed.path, body, signature)
+}
+
+fn post_json_over_stream<S>(
+    stream: &mut S,
+    host: &str,
+    path: &str,
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<()>
+where
+    S: Read + Write,
+{
+    write_http_json_post_request(stream, host, path, body, signature)?;
+    stream.flush()?;
+    ensure_http_success_response(stream)
+}
+
+fn write_http_json_post_request<W>(
+    stream: &mut W,
+    host: &str,
+    path: &str,
+    body: &[u8],
+    signature: Option<&str>,
+) -> Result<()>
+where
+    W: Write,
+{
     write!(
         stream,
-        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
-        parsed.path,
-        parsed.host,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
     )?;
     if let Some(signature) = signature.filter(|value| !value.is_empty()) {
@@ -1618,10 +1681,15 @@ fn post_json(url: &str, body: &[u8], signature: Option<&str>) -> Result<()> {
     }
     write!(stream, "\r\n")?;
     stream.write_all(body)?;
-    stream.flush()?;
+    Ok(())
+}
 
+fn ensure_http_success_response<R>(reader: &mut R) -> Result<()>
+where
+    R: Read,
+{
     let mut response = String::new();
-    BufReader::new(stream).read_to_string(&mut response)?;
+    BufReader::new(reader).read_to_string(&mut response)?;
     if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
         return Err(GlovesError::InvalidInput(format!(
             "webhook returned non-success response: {}",
@@ -2168,95 +2236,6 @@ fn append_audit_record(config: &ResolvedConfig, record: AuditRecord<'_>) -> Resu
     Ok(())
 }
 
-fn read_json_line<R>(reader: &mut R) -> Result<Option<Value>>
-where
-    R: BufRead,
-{
-    let mut line = String::new();
-    let read = reader.read_line(&mut line)?;
-    if read == 0 {
-        return Ok(None);
-    }
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    serde_json::from_str(trimmed)
-        .map(Some)
-        .map_err(|error| GlovesError::InvalidInput(format!("invalid JSON-RPC payload: {error}")))
-}
-
-fn write_result_response<W>(writer: &mut W, request_id: Value, result: Value) -> Result<()>
-where
-    W: Write,
-{
-    write_json_line(
-        writer,
-        json!({
-            "jsonrpc": JSON_RPC_VERSION,
-            "id": request_id,
-            "result": result
-        }),
-    )
-}
-
-fn write_secret_notification<W>(
-    writer: &mut W,
-    request_id: Value,
-    path: &str,
-    value: &str,
-) -> Result<()>
-where
-    W: Write,
-{
-    write_json_line(
-        writer,
-        json!({
-            "jsonrpc": JSON_RPC_VERSION,
-            "method": SECRET_NOTIFICATION_METHOD,
-            "params": {
-                "requestId": request_id,
-                "path": path,
-                "value": value
-            }
-        }),
-    )
-}
-
-fn write_error_response<W>(
-    writer: &mut W,
-    request_id: Value,
-    code: i64,
-    message: &str,
-    data: Value,
-) -> Result<()>
-where
-    W: Write,
-{
-    write_json_line(
-        writer,
-        json!({
-            "jsonrpc": JSON_RPC_VERSION,
-            "id": request_id,
-            "error": {
-                "code": code,
-                "message": message,
-                "data": data
-            }
-        }),
-    )
-}
-
-fn write_json_line<W>(writer: &mut W, payload: Value) -> Result<()>
-where
-    W: Write,
-{
-    serde_json::to_writer(&mut *writer, &payload)?;
-    writer.write_all(b"\n")?;
-    writer.flush()?;
-    Ok(())
-}
-
 fn required_string_argument(
     arguments: &Map<String, Value>,
     key: &'static str,
@@ -2547,15 +2526,21 @@ fn tool_definitions() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use rmcp::service::NotificationContext;
+    use rmcp::{ClientHandler, RoleClient, ServiceExt};
 
+    use std::io::Cursor;
     use tempfile::TempDir;
+    use tokio::sync::{Mutex as AsyncMutex, Notify};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     #[cfg(unix)]
     static CURL_BIN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    #[cfg(unix)]
+    static PATH_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     const TEST_AGENT: &str = "devy";
     const TEST_OTHER_AGENT: &str = "webhook";
@@ -2563,6 +2548,41 @@ mod tests {
     const TEST_SECRET_VALUE: &str = "sk-ant-api03-unit-test";
     const TEST_SESSION_TOKEN: &str =
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    struct MemoryStream {
+        reader: Cursor<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl MemoryStream {
+        fn new(read_data: impl Into<Vec<u8>>) -> Self {
+            Self {
+                reader: Cursor::new(read_data.into()),
+                written: Vec::new(),
+            }
+        }
+
+        fn written_string(&self) -> String {
+            String::from_utf8(self.written.clone()).unwrap()
+        }
+    }
+
+    impl Read for MemoryStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reader.read(buf)
+        }
+    }
+
+    impl Write for MemoryStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     struct TestHarness {
         _temp: TempDir,
@@ -2636,6 +2656,64 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct SecretCapturingClient {
+        info: rmcp::model::ClientInfo,
+        signal: Arc<Notify>,
+        payload: Arc<AsyncMutex<Option<Value>>>,
+    }
+
+    impl SecretCapturingClient {
+        fn new(info: rmcp::model::ClientInfo) -> Self {
+            Self {
+                info,
+                signal: Arc::new(Notify::new()),
+                payload: Arc::new(AsyncMutex::new(None)),
+            }
+        }
+    }
+
+    impl ClientHandler for SecretCapturingClient {
+        fn get_info(&self) -> rmcp::model::ClientInfo {
+            self.info.clone()
+        }
+
+        async fn on_custom_notification(
+            &self,
+            notification: CustomNotification,
+            _context: NotificationContext<RoleClient>,
+        ) {
+            if notification.method == SECRET_NOTIFICATION_METHOD {
+                *self.payload.lock().await = notification.params;
+                self.signal.notify_one();
+            }
+        }
+    }
+
+    fn client_info_with_session_meta(
+        session_token: &str,
+        agent_id: &str,
+    ) -> rmcp::model::ClientInfo {
+        let mut client_info =
+            rmcp::model::ClientInfo::new(Default::default(), Implementation::new("test", "1.0.0"))
+                .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        let mut meta = Meta::new();
+        meta.insert("sessionToken".to_owned(), json!(session_token));
+        meta.insert("agentId".to_owned(), json!(agent_id));
+        client_info.meta = Some(meta);
+        client_info
+    }
+
+    fn send_http_control_request(
+        config: &ResolvedConfig,
+        metrics_state: MetricsState,
+        request: &str,
+    ) -> String {
+        let mut stream = MemoryStream::new(request.as_bytes());
+        write_http_control_response(&mut stream, config, &metrics_state).unwrap();
+        stream.written_string()
+    }
+
     #[test]
     fn resolved_config_load_reads_expected_paths() {
         let temp = TempDir::new().unwrap();
@@ -2666,6 +2744,55 @@ mod tests {
     }
 
     #[test]
+    fn resolved_config_load_requires_webhook_url_for_webhook_channel() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("gloves.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "[daemon]\nsession_token_path = {:?}\n[daemon.approval]\ndefault_channel = \"webhook\"\n[store]\npath = {:?}\n[identities]\npath = {:?}\n[audit]\npath = {:?}\n",
+                temp.path().join("session-token"),
+                temp.path().join("store"),
+                temp.path().join("identities"),
+                temp.path().join("audit"),
+            ),
+        )
+        .unwrap();
+
+        let error = ResolvedConfig::load(&config_path).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("daemon.approval.webhook_url is required"));
+    }
+
+    #[test]
+    fn resolved_config_load_defaults_webhook_callback_bind_and_token() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("gloves.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "[daemon]\nsession_token_path = {:?}\n[daemon.approval]\ndefault_channel = \"webhook\"\nwebhook_url = \"http://127.0.0.1:9000/approve\"\n[store]\npath = {:?}\n[identities]\npath = {:?}\n[audit]\npath = {:?}\n",
+                temp.path().join("session-token"),
+                temp.path().join("store"),
+                temp.path().join("identities"),
+                temp.path().join("audit"),
+            ),
+        )
+        .unwrap();
+
+        let resolved = ResolvedConfig::load(&config_path).unwrap();
+        assert_eq!(
+            resolved.metrics_bind.as_deref(),
+            Some(DEFAULT_METRICS_BIND_ADDRESS)
+        );
+        assert!(resolved
+            .webhook_callback_token
+            .as_deref()
+            .is_some_and(|token| !token.is_empty()));
+    }
+
+    #[test]
     fn write_session_token_creates_private_hex_file() {
         let temp = TempDir::new().unwrap();
         let token_path = temp.path().join("session-token");
@@ -2692,7 +2819,7 @@ mod tests {
         fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\ncat > \"{}\"\n",
+                "#!/bin/sh\nprintf '%s\n' \"$@\" > \"{}\"\n/bin/cat > \"{}\"\n",
                 args_path.display(),
                 body_path.display(),
             ),
@@ -2723,6 +2850,27 @@ mod tests {
         assert!(args.contains("X-Gloves-Signature: sha256=test-signature"));
         assert!(args.contains("https://hooks.example.test/approve"));
         assert_eq!(fs::read(body_path).unwrap(), body);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn https_webhook_delivery_reports_curl_failures() {
+        let _lock = CURL_BIN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join("mock-curl-fail.sh");
+        fs::write(&script_path, "#!/bin/sh\necho 'curl failed' >&2\nexit 22\n").unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let previous_curl_bin = env::var_os(WEBHOOK_CURL_BIN_ENV_VAR);
+        env::set_var(WEBHOOK_CURL_BIN_ENV_VAR, &script_path);
+        let error = post_json("https://hooks.example.test/approve", br#"{}"#, None).unwrap_err();
+        match previous_curl_bin {
+            Some(value) => env::set_var(WEBHOOK_CURL_BIN_ENV_VAR, value),
+            None => env::remove_var(WEBHOOK_CURL_BIN_ENV_VAR),
+        }
+
+        assert!(error.to_string().contains("HTTPS webhook delivery failed"));
+        assert!(error.to_string().contains("curl failed"));
     }
 
     #[test]
@@ -2794,6 +2942,31 @@ mod tests {
     }
 
     #[test]
+    fn write_http_control_response_serves_metrics_and_unknown_routes() {
+        let harness = TestHarness::new();
+        let mut config = harness.config.clone();
+        config.metrics_enabled = true;
+        let metrics = MetricsState::new();
+        metrics.record_secret_access(TEST_AGENT, TEST_SECRET_PATH, "approved");
+
+        let metrics_response = send_http_control_request(
+            &config,
+            metrics,
+            "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(metrics_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(metrics_response.contains("gloves_secret_access_total"));
+
+        let not_found_response = send_http_control_request(
+            &config,
+            MetricsState::new(),
+            "GET /missing HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        );
+        assert!(not_found_response.starts_with("HTTP/1.1 404 Not Found"));
+        assert!(not_found_response.ends_with("not found\n"));
+    }
+
+    #[test]
     fn webhook_callback_rejects_invalid_bearer_token() {
         let harness = TestHarness::new();
         let mut config = harness.config.clone();
@@ -2853,49 +3026,171 @@ mod tests {
     }
 
     #[test]
-    fn authenticate_session_accepts_valid_initialize_request() {
+    fn write_http_control_response_denies_pending_requests() {
         let harness = TestHarness::new();
-        let mut input = BufReader::new(Cursor::new(format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"{MCP_PROTOCOL_VERSION}\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"test\",\"version\":\"1.0.0\"}},\"_meta\":{{\"sessionToken\":\"{TEST_SESSION_TOKEN}\",\"agentId\":\"{TEST_AGENT}\"}}}}}}\n"
-        )));
-        let mut output = Vec::new();
+        let mut config = harness.config.clone();
+        config.webhook_callback_token = Some("expected-callback-token".to_owned());
+        let pending_store = pending_request_store(&config).unwrap();
+        let signing_key = generate_signing_key();
+        let request = pending_store
+            .create(
+                SecretId::new(TEST_SECRET_PATH).unwrap(),
+                harness.agent_id.clone(),
+                "integration denial".to_owned(),
+                Duration::seconds(30),
+                &signing_key,
+            )
+            .unwrap();
 
-        let session = authenticate_session(
-            &mut input,
-            &mut output,
-            &harness.config,
-            TEST_SESSION_TOKEN,
-            None,
-        )
-        .unwrap()
-        .unwrap();
+        let response = send_http_control_request(
+            &config,
+            MetricsState::new(),
+            &format!(
+                "POST /api/v1/deny/{request_id} HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer expected-callback-token\r\n\r\n",
+                request_id = request.id
+            ),
+        );
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("denied\n"));
 
-        assert_eq!(session.agent_id.as_str(), TEST_AGENT);
-        let response: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(response["result"]["serverInfo"]["name"], "gloves-mcp");
+        let stored_request = pending_store
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == request.id)
+            .unwrap();
+        assert_eq!(stored_request.status, RequestStatus::Denied);
     }
 
     #[test]
-    fn authenticate_session_rejects_invalid_token() {
+    fn authenticate_initialize_request_accepts_valid_meta() {
         let harness = TestHarness::new();
-        let mut input = BufReader::new(Cursor::new(format!(
-            "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"_meta\":{{\"sessionToken\":\"bad-token\",\"agentId\":\"{TEST_AGENT}\"}}}}}}\n"
-        )));
-        let mut output = Vec::new();
+        let mut request =
+            InitializeRequestParams::new(Default::default(), Implementation::new("test", "1.0.0"))
+                .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        let mut meta = rmcp::model::Meta::new();
+        meta.insert("sessionToken".to_owned(), json!(TEST_SESSION_TOKEN));
+        meta.insert("agentId".to_owned(), json!(TEST_AGENT));
+        request.meta = Some(meta);
 
-        let session = authenticate_session(
-            &mut input,
-            &mut output,
+        let session = authenticate_initialize_request(
             &harness.config,
             TEST_SESSION_TOKEN,
+            request.meta.as_ref().unwrap(),
             None,
         )
         .unwrap();
 
-        assert!(session.is_none());
-        let response: Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(response["error"]["code"], AUTH_FAILED_CODE);
-        assert_eq!(response["error"]["data"]["reason"], "invalid_token");
+        assert_eq!(session.agent_id.as_str(), TEST_AGENT);
+        assert_eq!(mcp_server_info().server_info.name, "gloves-mcp");
+    }
+
+    #[test]
+    fn authenticate_initialize_request_rejects_invalid_token() {
+        let harness = TestHarness::new();
+        let mut request =
+            InitializeRequestParams::new(Default::default(), Implementation::new("test", "1.0.0"))
+                .with_protocol_version(ProtocolVersion::V_2025_06_18);
+        let mut meta = rmcp::model::Meta::new();
+        meta.insert("sessionToken".to_owned(), json!("bad-token"));
+        meta.insert("agentId".to_owned(), json!(TEST_AGENT));
+        request.meta = Some(meta);
+
+        let error = authenticate_initialize_request(
+            &harness.config,
+            TEST_SESSION_TOKEN,
+            request.meta.as_ref().unwrap(),
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(i64::from(error.code.0), AUTH_FAILED_CODE);
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|value| value.get("reason"))
+                .and_then(Value::as_str),
+            Some("invalid_token")
+        );
+    }
+
+    #[test]
+    fn gloves_mcp_server_rejects_tool_calls_before_initialize() {
+        let harness = TestHarness::new();
+        let server = GlovesMcpServer::new(
+            harness.config.clone(),
+            TEST_SESSION_TOKEN.to_owned(),
+            Some(TEST_AGENT.to_owned()),
+            true,
+        );
+
+        let error = server.authenticated_session().unwrap_err();
+        assert_eq!(error.message, "session not initialized");
+        assert_eq!(
+            error.data.as_ref().and_then(|value| value.get("reason")),
+            Some(&json!("missing_session"))
+        );
+    }
+
+    #[tokio::test]
+    async fn gloves_mcp_server_supports_in_process_rmcp_secret_flow() {
+        let harness = TestHarness::new();
+        let recipient = load_agent_recipient(&harness.config, &harness.agent_id).unwrap();
+        harness.write_secret(TEST_SECRET_PATH, &[recipient], TEST_SECRET_VALUE);
+
+        let server = GlovesMcpServer::new(
+            harness.config.clone(),
+            TEST_SESSION_TOKEN.to_owned(),
+            Some(TEST_AGENT.to_owned()),
+            true,
+        );
+        let (server_transport, client_transport) = tokio::io::duplex(4096);
+        let server_task =
+            tokio::spawn(async move { serve_rmcp_connection(server, server_transport).await });
+
+        let client_handler = SecretCapturingClient::new(client_info_with_session_meta(
+            TEST_SESSION_TOKEN,
+            TEST_AGENT,
+        ));
+        let client = client_handler
+            .clone()
+            .serve(client_transport)
+            .await
+            .unwrap();
+
+        let tools = client.list_tools(Default::default()).await.unwrap();
+        assert!(tools.tools.iter().any(|tool| tool.name == GLOVES_GET_TOOL));
+
+        let get_result = client
+            .call_tool(
+                CallToolRequestParams::new(GLOVES_GET_TOOL).with_arguments(
+                    json!({ "path": TEST_SECRET_PATH })
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            get_result
+                .structured_content
+                .as_ref()
+                .and_then(|value| value.get("path"))
+                .and_then(Value::as_str),
+            Some(TEST_SECRET_PATH)
+        );
+
+        tokio::time::timeout(StdDuration::from_secs(5), client_handler.signal.notified())
+            .await
+            .unwrap();
+        let notification_payload = client_handler.payload.lock().await.clone().unwrap();
+        assert_eq!(notification_payload["path"], TEST_SECRET_PATH);
+        assert_eq!(notification_payload["value"], TEST_SECRET_VALUE);
+
+        client.cancel().await.unwrap();
+        server_task.await.unwrap().unwrap();
     }
 
     #[test]
@@ -3019,6 +3314,289 @@ mod tests {
     }
 
     #[test]
+    fn handle_set_tool_requires_environment_variable() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+        let path = "agents/devy/api-keys/openai";
+        let arguments = Map::from_iter([
+            ("path".to_owned(), json!(path)),
+            ("from_env".to_owned(), json!("GLOVES_TEST_MISSING_SECRET")),
+        ]);
+        env::remove_var("GLOVES_TEST_MISSING_SECRET");
+
+        let error = handle_set_tool(&harness.config, &session, &arguments).unwrap_err();
+        assert_eq!(error.0, INVALID_PARAMS_CODE);
+        assert!(error.2["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("environment variable `GLOVES_TEST_MISSING_SECRET` is not set"));
+    }
+
+    #[test]
+    fn handle_approve_tool_rejects_invalid_requests_and_decisions() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+
+        let invalid_uuid = Map::from_iter([
+            ("request_id".to_owned(), json!("not-a-uuid")),
+            ("decision".to_owned(), json!("approve")),
+        ]);
+        let uuid_error = handle_approve_tool(&harness.config, &session, &invalid_uuid).unwrap_err();
+        assert_eq!(uuid_error.0, INVALID_PARAMS_CODE);
+
+        let invalid_decision = Map::from_iter([
+            ("request_id".to_owned(), json!(Uuid::new_v4().to_string())),
+            ("decision".to_owned(), json!("later")),
+        ]);
+        let decision_error =
+            handle_approve_tool(&harness.config, &session, &invalid_decision).unwrap_err();
+        assert_eq!(decision_error.0, INVALID_PARAMS_CODE);
+        assert!(decision_error.2["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("`decision` must be `approve` or `deny`"));
+    }
+
+    #[test]
+    fn handle_rotate_tool_rejects_cross_agent_rotation() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+        let arguments = Map::from_iter([("agent_id".to_owned(), json!(TEST_OTHER_AGENT))]);
+
+        let error = handle_rotate_tool(&harness.config, &session, &arguments).unwrap_err();
+        assert_eq!(error.0, PERMISSION_DENIED_CODE);
+        assert_eq!(error.2["reason"], "cross_agent_rotation_denied");
+    }
+
+    #[test]
+    fn handle_set_and_delete_tools_cover_success_and_deny_paths() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+        let path = "agents/devy/api-keys/openai";
+        let env_var = "GLOVES_TEST_SET_SECRET";
+        let recipient = load_agent_recipient(&harness.config, &harness.agent_id).unwrap();
+        fs::write(
+            harness.config.store_path.join(RULES_FILE_NAME),
+            format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {recipient}\n"
+            ),
+        )
+        .unwrap();
+        env::set_var(env_var, "sk-live-test");
+
+        let set_arguments = Map::from_iter([
+            ("path".to_owned(), json!(path)),
+            ("from_env".to_owned(), json!(env_var)),
+        ]);
+        let set_result = handle_set_tool(&harness.config, &session, &set_arguments).unwrap();
+        env::remove_var(env_var);
+
+        assert_eq!(set_result.payload["structuredContent"]["path"], path);
+        assert_eq!(set_result.payload["structuredContent"]["agent"], TEST_AGENT);
+        assert!(set_result.secret_value.is_none());
+
+        let shown = show_secret(&harness.config, path).unwrap();
+        assert_eq!(shown.length, "sk-live-test".len());
+
+        let delete_arguments = Map::from_iter([("path".to_owned(), json!(path))]);
+        let delete_error =
+            handle_delete_tool(&harness.config, &session, &delete_arguments).unwrap_err();
+        assert_eq!(delete_error.0, APPROVAL_DENIED_CODE);
+        assert_eq!(delete_error.2["reason"], "destructive_operations_denied");
+    }
+
+    #[test]
+    fn handle_approve_tool_updates_pending_request_states() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+        let store = pending_request_store(&harness.config).unwrap();
+        let signing_key = generate_signing_key();
+        let first_request = store
+            .create(
+                SecretId::new(TEST_SECRET_PATH).unwrap(),
+                harness.agent_id.clone(),
+                "approve me".to_owned(),
+                Duration::seconds(30),
+                &signing_key,
+            )
+            .unwrap();
+        let second_request = store
+            .create(
+                SecretId::new(TEST_SECRET_PATH).unwrap(),
+                harness.agent_id.clone(),
+                "deny me".to_owned(),
+                Duration::seconds(30),
+                &signing_key,
+            )
+            .unwrap();
+
+        let approve_arguments = Map::from_iter([
+            ("request_id".to_owned(), json!(first_request.id.to_string())),
+            ("decision".to_owned(), json!("approve")),
+        ]);
+        let approve_result =
+            handle_approve_tool(&harness.config, &session, &approve_arguments).unwrap();
+        assert_eq!(
+            approve_result.payload["structuredContent"]["decision"],
+            "approve"
+        );
+
+        let deny_arguments = Map::from_iter([
+            (
+                "request_id".to_owned(),
+                json!(second_request.id.to_string()),
+            ),
+            ("decision".to_owned(), json!("deny")),
+        ]);
+        let deny_result = handle_approve_tool(&harness.config, &session, &deny_arguments).unwrap();
+        assert_eq!(deny_result.payload["structuredContent"]["decision"], "deny");
+
+        let requests = store.load_all().unwrap();
+        let approved = requests
+            .iter()
+            .find(|request| request.id == first_request.id)
+            .unwrap();
+        assert_eq!(approved.status, RequestStatus::Fulfilled);
+        let denied = requests
+            .iter()
+            .find(|request| request.id == second_request.id)
+            .unwrap();
+        assert_eq!(denied.status, RequestStatus::Denied);
+    }
+
+    #[test]
+    fn wait_for_external_approval_handles_approved_and_denied_requests() {
+        let approval_timeout_seconds = 3;
+        let harness = TestHarness::new();
+        let mut config = harness.config.clone();
+        config.approval_channel = ApprovalChannel::Tty;
+        config.approval_timeout_seconds = approval_timeout_seconds;
+        let session = harness.session_for(&harness.agent_id);
+
+        let approve_config = config.clone();
+        let approve_agent = harness.agent_id.clone();
+        let approve_secret = TEST_SECRET_PATH.to_owned();
+        let approver = std::thread::spawn(move || {
+            let store = pending_request_store(&approve_config).unwrap();
+            let deadline =
+                std::time::Instant::now() + StdDuration::from_secs(approval_timeout_seconds);
+            loop {
+                if let Some(request) = store
+                    .load_all()
+                    .unwrap()
+                    .into_iter()
+                    .find(|request| request.secret_name.as_str() == approve_secret)
+                {
+                    store.approve(request.id, approve_agent.clone()).unwrap();
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "approval request missing"
+                );
+                std::thread::sleep(StdDuration::from_millis(10));
+            }
+        });
+        let approved =
+            wait_for_external_approval(&config, &session, GLOVES_GET_TOOL, TEST_SECRET_PATH)
+                .unwrap();
+        approver.join().unwrap();
+        assert_eq!(approved.status, "approved");
+
+        let deny_secret = "agents/devy/api-keys/stripe";
+        let deny_config = config.clone();
+        let deny_agent = harness.agent_id.clone();
+        let denier = std::thread::spawn(move || {
+            let store = pending_request_store(&deny_config).unwrap();
+            let deadline =
+                std::time::Instant::now() + StdDuration::from_secs(approval_timeout_seconds);
+            loop {
+                if let Some(request) = store
+                    .load_all()
+                    .unwrap()
+                    .into_iter()
+                    .find(|request| request.secret_name.as_str() == deny_secret)
+                {
+                    store.deny(request.id, deny_agent.clone()).unwrap();
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "denial request missing"
+                );
+                std::thread::sleep(StdDuration::from_millis(10));
+            }
+        });
+        let denied = wait_for_external_approval(&config, &session, GLOVES_GET_TOOL, deny_secret)
+            .unwrap_err();
+        denier.join().unwrap();
+        assert_eq!(denied.0, APPROVAL_DENIED_CODE);
+        assert_eq!(denied.2["reason"], "request_denied");
+    }
+
+    #[test]
+    fn map_runtime_error_covers_identity_and_runtime_variants() {
+        let identity_error = map_runtime_error(GlovesError::InvalidInput(
+            "identity file not found: /tmp/devy.age".to_owned(),
+        ));
+        assert_eq!(identity_error.0, IDENTITY_ERROR_CODE);
+
+        let invalid = map_runtime_error(GlovesError::InvalidInput("bad input".to_owned()));
+        assert_eq!(invalid.0, INVALID_PARAMS_CODE);
+
+        let forbidden = map_runtime_error(GlovesError::Forbidden);
+        assert_eq!(forbidden.0, PERMISSION_DENIED_CODE);
+
+        let already_exists = map_runtime_error(GlovesError::AlreadyExists);
+        assert_eq!(already_exists.2["reason"], "already_exists");
+
+        let expired = map_runtime_error(GlovesError::Expired);
+        assert_eq!(expired.2["reason"], "expired");
+
+        let gpg_denied = map_runtime_error(GlovesError::GpgDenied);
+        assert_eq!(gpg_denied.2["reason"], "gpg_denied");
+
+        let integrity = map_runtime_error(GlovesError::IntegrityViolation);
+        assert_eq!(integrity.0, CRYPTO_ERROR_CODE);
+    }
+
+    #[test]
+    fn approval_and_argument_helpers_cover_edge_cases() {
+        assert_eq!(
+            ApprovalChannel::parse("AUTO").unwrap(),
+            ApprovalChannel::Auto
+        );
+        assert_eq!(ApprovalChannel::Webhook.as_str(), "webhook");
+        assert!(ApprovalChannel::parse("smtp").is_err());
+
+        let mut arguments = Map::new();
+        arguments.insert("value".to_owned(), json!("secret"));
+        arguments.insert("empty".to_owned(), json!("   "));
+        arguments.insert("number".to_owned(), json!(42));
+        assert_eq!(
+            required_string_argument(&arguments, "value").unwrap(),
+            "secret"
+        );
+        assert_eq!(optional_string_argument(&arguments, "empty").unwrap(), None);
+        assert_eq!(
+            optional_string_argument(&arguments, "missing").unwrap(),
+            None
+        );
+        assert_eq!(
+            optional_string_argument(&arguments, "number")
+                .unwrap_err()
+                .0,
+            INVALID_PARAMS_CODE
+        );
+        assert_eq!(
+            required_string_argument(&arguments, "missing")
+                .unwrap_err()
+                .0,
+            INVALID_PARAMS_CODE
+        );
+    }
+
+    #[test]
     fn map_runtime_error_preserves_security_specific_codes() {
         let permission_error = map_runtime_error(GlovesError::Unauthorized);
         assert_eq!(permission_error.0, PERMISSION_DENIED_CODE);
@@ -3028,6 +3606,22 @@ mod tests {
 
         let crypto_error = map_runtime_error(GlovesError::Crypto("boom".to_owned()));
         assert_eq!(crypto_error.0, CRYPTO_ERROR_CODE);
+    }
+
+    #[test]
+    fn map_rmcp_error_and_tool_deserialization_preserve_payload_shape() {
+        let mapped = map_rmcp_error(rmcp::RmcpError::TaskError("bad frame".to_owned()));
+        assert!(mapped.to_string().contains("bad frame"));
+
+        let mcp_error = tuple_to_mcp_error(invalid_params_error("bad input"));
+        assert_eq!(i64::from(mcp_error.code.0), INVALID_PARAMS_CODE);
+        assert_eq!(mcp_error.message, "Invalid params");
+
+        let runtime_error = tuple_to_mcp_error_from_runtime(GlovesError::Unauthorized);
+        assert_eq!(i64::from(runtime_error.code.0), PERMISSION_DENIED_CODE);
+
+        let tools = deserialize_tool_definitions().unwrap();
+        assert_eq!(tools.len(), tool_definitions().len());
     }
 
     #[test]
@@ -3058,13 +3652,351 @@ mod tests {
     }
 
     #[test]
+    fn path_and_recipient_helpers_resolve_namespaces_and_merge_rules() {
+        let harness = TestHarness::new();
+        let namespace = Path::new("agents/devy");
+        ensure_private_dir(&harness.config.store_path.join(namespace)).unwrap();
+        fs::write(
+            harness.config.store_path.join(RULES_FILE_NAME),
+            "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - age1-rule\n      - age1-shared\n",
+        )
+        .unwrap();
+        write_namespace_recipients(
+            &harness.config,
+            namespace,
+            &["age1-namespace".to_owned(), "age1-shared".to_owned()],
+            true,
+        )
+        .unwrap();
+        fs::write(
+            namespace_recipients_file(&harness.config, namespace),
+            "# ignored\nage1-namespace\n\nage1-shared\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_recipients(&harness.config, TEST_SECRET_PATH, namespace).unwrap();
+        assert_eq!(
+            resolved,
+            vec![
+                "age1-namespace".to_owned(),
+                "age1-rule".to_owned(),
+                "age1-shared".to_owned(),
+            ]
+        );
+        assert_eq!(
+            namespace_for_secret_path(TEST_SECRET_PATH).unwrap(),
+            PathBuf::from("agents").join(TEST_AGENT)
+        );
+        assert_eq!(
+            namespace_for_secret_path("shared/database-url").unwrap(),
+            PathBuf::from("shared")
+        );
+        assert_eq!(scope_agent("shared/database-url"), "shared");
+        assert!(namespace_for_secret_path("agents").is_err());
+        assert!(validated_relative_path("../escape").is_err());
+    }
+
+    #[test]
+    fn resolve_approval_covers_auto_deny_and_timeout_paths() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+
+        let auto_resolution =
+            resolve_approval(&harness.config, &session, GLOVES_GET_TOOL, TEST_SECRET_PATH).unwrap();
+        assert_eq!(auto_resolution.status, "auto");
+
+        let deny_error = resolve_approval(
+            &harness.config,
+            &session,
+            GLOVES_DELETE_TOOL,
+            TEST_SECRET_PATH,
+        )
+        .unwrap_err();
+        assert_eq!(deny_error.0, APPROVAL_DENIED_CODE);
+
+        let mut tty_config = harness.config.clone();
+        tty_config.approval_channel = ApprovalChannel::Tty;
+        tty_config.approval_timeout_seconds = 0;
+        let timeout_error =
+            resolve_approval(&tty_config, &session, GLOVES_GET_TOOL, TEST_SECRET_PATH).unwrap_err();
+        assert_eq!(timeout_error.0, APPROVAL_TIMEOUT_CODE);
+
+        let audit_file = harness
+            .config
+            .audit_path
+            .join(format!("{}.jsonl", Utc::now().format("%Y-%m-%d")));
+        let contents = fs::read_to_string(audit_file).unwrap();
+        assert!(contents.contains("\"event_type\":\"approval_denied\""));
+        assert!(contents.contains("\"event_type\":\"approval_requested\""));
+    }
+
+    #[test]
+    fn send_webhook_approval_request_requires_callback_bind() {
+        let harness = TestHarness::new();
+        let session = harness.session_for(&harness.agent_id);
+        let mut config = harness.config.clone();
+        config.webhook_url = Some("http://127.0.0.1:9000/approve".to_owned());
+        config.metrics_bind = None;
+
+        let error = send_webhook_approval_request(
+            &config,
+            &session,
+            GLOVES_GET_TOOL,
+            TEST_SECRET_PATH,
+            Uuid::new_v4(),
+            Utc::now(),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("webhook callbacks require an HTTP bind address"));
+    }
+
+    #[test]
+    fn config_path_helpers_cover_default_relative_absolute_and_missing_values() {
+        let temp = TempDir::new().unwrap();
+        let config_dir = temp.path();
+        let absolute = temp.path().join("daemon.sock");
+
+        assert_eq!(
+            resolve_config_path(Some("store"), config_dir, None, "store.path").unwrap(),
+            config_dir.join("store")
+        );
+        assert_eq!(
+            resolve_config_path(None, config_dir, Some("audit"), "audit.path").unwrap(),
+            config_dir.join("audit")
+        );
+        assert_eq!(
+            resolve_config_path(
+                Some(absolute.to_str().unwrap()),
+                config_dir,
+                None,
+                "daemon.socket_path"
+            )
+            .unwrap(),
+            absolute
+        );
+        assert_eq!(
+            resolve_optional_config_path(Some("daemon.sock"), config_dir).unwrap(),
+            Some(config_dir.join("daemon.sock"))
+        );
+        assert_eq!(
+            resolve_optional_config_path(None, config_dir).unwrap(),
+            None
+        );
+
+        let error =
+            resolve_config_path(None, config_dir, None, "daemon.session_token_path").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing required configuration field"));
+    }
+
+    #[test]
+    fn post_json_sends_http_payload_and_reports_non_success_responses() {
+        let body = br#"{"hello":"world"}"#;
+        let mut success_stream =
+            MemoryStream::new("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        post_json_over_stream(
+            &mut success_stream,
+            "localhost",
+            "/approve",
+            body,
+            Some("sha256=test-signature"),
+        )
+        .unwrap();
+
+        let written_request = success_stream.written_string();
+        let mut reader = BufReader::new(Cursor::new(written_request.into_bytes()));
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).unwrap();
+        let mut headers = BTreeMap::new();
+        let mut content_length = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            let (name, value) = line.split_once(':').unwrap();
+            let value = value.trim().to_owned();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value.parse().unwrap();
+            }
+            headers.insert(name.to_ascii_lowercase(), value);
+        }
+        let mut received_body = vec![0_u8; content_length];
+        reader.read_exact(&mut received_body).unwrap();
+
+        assert_eq!(request_line.trim(), "POST /approve HTTP/1.1");
+        assert_eq!(headers.get("host"), Some(&"localhost".to_owned()));
+        assert_eq!(
+            headers.get("x-gloves-signature"),
+            Some(&"sha256=test-signature".to_owned())
+        );
+        assert_eq!(received_body, body);
+
+        let mut error_stream = MemoryStream::new(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let error = post_json_over_stream(&mut error_stream, "localhost", "/reject", b"{}", None)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("webhook returned non-success response"));
+    }
+
+    #[test]
+    fn http_helper_functions_cover_auth_and_callback_edge_cases() {
+        let harness = TestHarness::new();
+        let mut config = harness.config.clone();
+        config.webhook_callback_token = Some("expected-callback-token".to_owned());
+
+        let mut reader = BufReader::new(Cursor::new(
+            b"Host: localhost\r\nAuthorization: Bearer expected-callback-token\r\n\r\n".to_vec(),
+        ));
+        assert_eq!(
+            read_authorization_header(&mut reader).unwrap(),
+            Some("Bearer expected-callback-token".to_owned())
+        );
+
+        let missing_token_error =
+            handle_webhook_callback(&harness.config, "/api/v1/approve/not-a-uuid", None, true)
+                .unwrap_err();
+        assert!(missing_token_error
+            .to_string()
+            .contains("webhook callback token is not configured"));
+
+        let invalid_uuid_error = handle_webhook_callback(
+            &config,
+            "/api/v1/approve/not-a-uuid",
+            Some("Bearer expected-callback-token"),
+            true,
+        )
+        .unwrap_err();
+        assert!(invalid_uuid_error
+            .to_string()
+            .contains("invalid webhook request id"));
+    }
+
+    #[test]
+    fn approval_histogram_lines_escape_labels_and_emit_summaries() {
+        let mut lines = Vec::new();
+        append_approval_histogram_lines(
+            &mut lines,
+            &[
+                ("de\"vy".to_owned(), "web\\hook".to_owned(), 0.4),
+                ("de\"vy".to_owned(), "web\\hook".to_owned(), 6.0),
+            ],
+        );
+
+        assert_eq!(
+            escape_metric_label("line\\break\"test\n"),
+            "line\\\\break\\\"test\\n"
+        );
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("channel=\"web\\\\hook\"")));
+        assert!(lines.iter().any(|line| line.contains("agent=\"de\\\"vy\"")));
+        assert!(lines.iter().any(|line| line.contains("le=\"+Inf\"")));
+        assert!(lines.iter().any(|line| line.contains("_sum")));
+        assert!(lines.iter().any(|line| line.contains("_count")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_gloves_rotate_surfaces_subprocess_failures() {
+        let _lock = PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let harness = TestHarness::new();
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join(GLOVES_BINARY_NAME);
+        fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'rotate failed for test' >&2\nexit 1\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let previous_path = env::var_os("PATH");
+        env::set_var("PATH", temp.path());
+        let error = run_gloves_rotate(&harness.config, TEST_AGENT).unwrap_err();
+        match previous_path {
+            Some(value) => env::set_var("PATH", value),
+            None => env::remove_var("PATH"),
+        }
+
+        assert!(error.to_string().contains("rotate failed for test"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_gloves_rotate_reports_empty_stderr_failures() {
+        let _lock = PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let harness = TestHarness::new();
+        let temp = TempDir::new().unwrap();
+        let script_path = temp.path().join(GLOVES_BINARY_NAME);
+        fs::write(&script_path, "#!/bin/sh\nexit 1\n").unwrap();
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let previous_path = env::var_os("PATH");
+        env::set_var("PATH", temp.path());
+        let error = run_gloves_rotate(&harness.config, TEST_AGENT).unwrap_err();
+        match previous_path {
+            Some(value) => env::set_var("PATH", value),
+            None => env::remove_var("PATH"),
+        }
+
+        assert!(error
+            .to_string()
+            .contains("gloves rotate failed without stderr output"));
+    }
+
+    #[test]
     fn expand_tilde_uses_home_directory() {
+        let _lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
         let home = env::var(HOME_ENV_VAR).unwrap();
+        assert_eq!(expand_tilde("~").unwrap(), home);
         let expanded = expand_tilde("~/gloves-test").unwrap();
         assert_eq!(
             expanded,
             Path::new(&home).join("gloves-test").display().to_string()
         );
+
+        let previous_home = env::var_os(HOME_ENV_VAR);
+        env::remove_var(HOME_ENV_VAR);
+        let missing_home_error = expand_tilde("~").unwrap_err();
+        match previous_home {
+            Some(value) => env::set_var(HOME_ENV_VAR, value),
+            None => env::remove_var(HOME_ENV_VAR),
+        }
+        assert!(missing_home_error
+            .to_string()
+            .contains("HOME must be set to expand `~`"));
+    }
+
+    #[test]
+    fn resolve_config_paths_handle_required_relative_and_optional_values() {
+        let temp = TempDir::new().unwrap();
+        let config_dir = temp.path();
+
+        let relative = resolve_config_path(Some("store"), config_dir, None, "store.path").unwrap();
+        assert_eq!(relative, config_dir.join("store"));
+
+        let defaulted = resolve_config_path(None, config_dir, Some("audit"), "audit.path").unwrap();
+        assert_eq!(defaulted, config_dir.join("audit"));
+
+        let optional = resolve_optional_config_path(Some("socket.sock"), config_dir).unwrap();
+        assert_eq!(optional, Some(config_dir.join("socket.sock")));
+        assert_eq!(
+            resolve_optional_config_path(None, config_dir).unwrap(),
+            None
+        );
+
+        let error =
+            resolve_config_path(None, config_dir, None, "daemon.session_token_path").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing required configuration field"));
     }
 
     #[test]
