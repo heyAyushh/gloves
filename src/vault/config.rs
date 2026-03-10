@@ -64,3 +64,41 @@ impl VaultConfigFile {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        VaultConfigFile, DEFAULT_IDLE_TIMEOUT_MINUTES, DEFAULT_VAULT_TTL_MINUTES,
+        MAX_VAULT_TTL_MINUTES,
+    };
+    use crate::types::Owner;
+    use chrono::Utc;
+    use std::path::PathBuf;
+
+    #[test]
+    fn new_vault_config_file_uses_secure_defaults() {
+        let created_at = Utc::now();
+        let config = VaultConfigFile::new(
+            "primary".to_owned(),
+            Owner::Agent,
+            PathBuf::from("/cipher"),
+            PathBuf::from("/mount"),
+            "vault/primary".to_owned(),
+            created_at,
+        );
+
+        assert_eq!(config.vault.name, "primary");
+        assert_eq!(config.vault.owner, Owner::Agent);
+        assert_eq!(config.vault.cipher_dir, PathBuf::from("/cipher"));
+        assert_eq!(config.vault.default_mountpoint, PathBuf::from("/mount"));
+        assert_eq!(config.vault.default_ttl_minutes, DEFAULT_VAULT_TTL_MINUTES);
+        assert_eq!(config.vault.max_ttl_minutes, MAX_VAULT_TTL_MINUTES);
+        assert_eq!(
+            config.vault.idle_timeout_minutes,
+            DEFAULT_IDLE_TIMEOUT_MINUTES
+        );
+        assert_eq!(config.vault.secret_name, "vault/primary");
+        assert_eq!(config.vault.created_at, created_at);
+        assert!(config.hooks.is_none());
+    }
+}

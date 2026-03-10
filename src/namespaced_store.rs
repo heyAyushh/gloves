@@ -795,8 +795,16 @@ mod tests {
         namespace_for_secret_path, replace_recipient_lines, scope_agent, validated_relative_path,
         CreationRule, CreationRulesFile, NamespacedStore, RecipientList, RULES_FILE_NAME,
     };
-    use crate::{agent::age_crypto, error::GlovesError, types::AgentId};
+    use crate::{
+        agent::age_crypto,
+        error::GlovesError,
+        types::{AgentId, SecretId},
+    };
     use std::{fs, path::Path, path::PathBuf};
+
+    fn write_creation_rules(root: &Path, contents: &str) {
+        fs::write(root.join("store").join(RULES_FILE_NAME), contents).unwrap();
+    }
 
     #[test]
     fn recipient_list_accepts_csv_and_array_values() {
@@ -1033,5 +1041,227 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(unauthorized, GlovesError::Unauthorized));
+    }
+
+    #[test]
+    fn set_get_and_show_secret_round_trip_updates_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let agent = AgentId::new("devy").unwrap();
+        let identity = store.create_identity(&agent, false).unwrap();
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n",
+                identity.public_key
+            ),
+        );
+
+        let secret_id = SecretId::new("agents/devy/api-keys/anthropic").unwrap();
+        let shown_after_set = store
+            .set_secret(&secret_id, &agent, b"sk-test-123")
+            .unwrap();
+        assert!(shown_after_set.exists);
+        assert_eq!(shown_after_set.length, 11);
+        assert_eq!(shown_after_set.agent, "devy");
+        assert!(shown_after_set.file_size > 0);
+        assert!(shown_after_set.last_accessed.is_none());
+        assert_eq!(
+            shown_after_set.encrypted_to,
+            vec![identity.public_key.clone()]
+        );
+
+        let shown_before_get = store.show_secret(&secret_id).unwrap();
+        assert!(shown_before_get.last_accessed.is_none());
+
+        let read = store.get_secret(&secret_id, &agent).unwrap();
+        assert_eq!(read.name, "agents/devy/api-keys/anthropic");
+        assert_eq!(read.value, "sk-test-123");
+        assert_eq!(read.length, 11);
+        assert_eq!(read.agent, "devy");
+        assert_eq!(read.encrypted_to, vec![identity.public_key]);
+
+        let shown_after_get = store.show_secret(&secret_id).unwrap();
+        assert!(shown_after_get.last_accessed.is_some());
+        assert_eq!(shown_after_get.last_rotated, shown_before_get.last_rotated);
+    }
+
+    #[test]
+    fn get_secret_rejects_missing_identity_and_unauthorized_agents() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let devy = AgentId::new("devy").unwrap();
+        let devy_identity = store.create_identity(&devy, false).unwrap();
+        let main = AgentId::new("main").unwrap();
+        let _main_identity = store.create_identity(&main, false).unwrap();
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n",
+                devy_identity.public_key
+            ),
+        );
+
+        let secret_id = SecretId::new("agents/devy/api-keys/openai").unwrap();
+        store.set_secret(&secret_id, &devy, b"sk-openai").unwrap();
+
+        let unauthorized = store.get_secret(&secret_id, &main).unwrap_err();
+        assert!(matches!(unauthorized, GlovesError::Unauthorized));
+
+        fs::remove_file(temp.path().join("identities/devy.age")).unwrap();
+        let missing_identity = store.get_secret(&secret_id, &devy).unwrap_err();
+        assert!(missing_identity
+            .to_string()
+            .contains("identity file not found"));
+    }
+
+    #[test]
+    fn update_keys_supports_dry_run_and_reencrypts_with_new_recipients() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let devy = AgentId::new("devy").unwrap();
+        let devy_identity = store.create_identity(&devy, false).unwrap();
+        let main = AgentId::new("main").unwrap();
+        let main_identity = store.create_identity(&main, false).unwrap();
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n",
+                devy_identity.public_key
+            ),
+        );
+
+        let secret_id = SecretId::new("agents/devy/api-keys/anthropic").unwrap();
+        store
+            .set_secret(&secret_id, &devy, b"secret-value")
+            .unwrap();
+
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n      - {}\n",
+                devy_identity.public_key, main_identity.public_key
+            ),
+        );
+
+        let dry_run = store
+            .update_keys(
+                Some("agents/devy"),
+                Some(devy_identity.identity_path.as_path()),
+                true,
+            )
+            .unwrap();
+        assert_eq!(dry_run.updated, 1);
+        assert_eq!(dry_run.unchanged, 0);
+        assert_eq!(dry_run.skipped, 0);
+        assert!(dry_run.dry_run);
+        let before_reencrypt = store.show_secret(&secret_id).unwrap();
+        assert_eq!(
+            before_reencrypt.encrypted_to,
+            vec![devy_identity.public_key.clone()]
+        );
+
+        let reencrypted = store
+            .update_keys(
+                Some("agents/devy"),
+                Some(devy_identity.identity_path.as_path()),
+                false,
+            )
+            .unwrap();
+        assert_eq!(reencrypted.updated, 1);
+        assert!(!reencrypted.dry_run);
+
+        let after_reencrypt = store.show_secret(&secret_id).unwrap();
+        let mut expected_recipients = vec![
+            devy_identity.public_key.clone(),
+            main_identity.public_key.clone(),
+        ];
+        expected_recipients.sort();
+        assert_eq!(after_reencrypt.encrypted_to, expected_recipients);
+        assert_eq!(
+            store.get_secret(&secret_id, &main).unwrap().value,
+            "secret-value"
+        );
+    }
+
+    #[test]
+    fn rotate_identity_reencrypts_secret_and_revokes_old_identity_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let agent = AgentId::new("devy").unwrap();
+        let identity = store.create_identity(&agent, false).unwrap();
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n",
+                identity.public_key
+            ),
+        );
+
+        let secret_id = SecretId::new("agents/devy/api-keys/github").unwrap();
+        store.set_secret(&secret_id, &agent, b"ghp_test").unwrap();
+
+        let rotation = store.rotate_identity(&agent, false).unwrap();
+        assert_eq!(rotation.agent, "devy");
+        assert_ne!(rotation.old_public_key, rotation.new_public_key);
+        assert_eq!(rotation.updated, 1);
+        assert!(rotation
+            .archived_identity_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(".revoked-"));
+
+        let shown = store.show_secret(&secret_id).unwrap();
+        assert_eq!(shown.encrypted_to, vec![rotation.new_public_key.clone()]);
+        assert_eq!(
+            store.get_secret(&secret_id, &agent).unwrap().value,
+            "ghp_test"
+        );
+        assert!(age_crypto::decrypt_file(
+            &temp.path().join("store/agents/devy/api-keys/github.age"),
+            &rotation.archived_identity_path,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rotate_identity_restore_path_runs_when_reencrypt_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = NamespacedStore::new(temp.path());
+        store.init_layout().unwrap();
+
+        let agent = AgentId::new("devy").unwrap();
+        let identity = store.create_identity(&agent, false).unwrap();
+        write_creation_rules(
+            temp.path(),
+            &format!(
+                "version: 1\ncreation_rules:\n  - path_regex: ^agents/devy/.*$\n    age:\n      - {}\n",
+                identity.public_key
+            ),
+        );
+        let secret_id = SecretId::new("agents/devy/api-keys/anthropic").unwrap();
+        store.set_secret(&secret_id, &agent, b"sk-test").unwrap();
+
+        fs::remove_file(temp.path().join("identities/devy.age")).unwrap();
+        let error = store.rotate_identity(&agent, false).unwrap_err();
+        assert!(error.to_string().contains("identity file not found"));
+        assert!(
+            fs::read_to_string(temp.path().join("store").join(RULES_FILE_NAME))
+                .unwrap()
+                .contains(&identity.public_key)
+        );
+        assert!(!fs::read_dir(temp.path().join("identities"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .any(|name| name.contains(".next-")));
     }
 }

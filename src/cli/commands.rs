@@ -3060,10 +3060,11 @@ fn path_operation_label(operation: &PathOperation) -> &'static str {
 mod tests {
     use super::{
         audit_event_name, audit_event_summary, bytes_to_hex, format_audit_record_line,
-        latest_audit_records, load_audit_records, parse_policy_url_argument,
-        parse_policy_url_prefix, parse_tui_bootstrap_args, path_operation_label,
-        policy_url_matches_prefix, secret_bytes_json_value, validate_pipe_url_prefix, AuditRecord,
-        ErrorFormatArg, PathOperation, VaultModeArg, SECRET_PIPE_URL_POLICY_ENV_VAR,
+        is_binary_available, is_executable_file, latest_audit_records, load_audit_records,
+        parse_policy_url_argument, parse_policy_url_prefix, parse_tui_bootstrap_args,
+        path_operation_label, policy_url_matches_prefix, secret_bytes_json_value,
+        validate_pipe_url_prefix, AuditRecord, ErrorFormatArg, PathOperation, VaultModeArg,
+        SECRET_PIPE_URL_POLICY_ENV_VAR,
     };
     #[cfg(unix)]
     use super::{
@@ -3076,9 +3077,17 @@ mod tests {
     };
     use chrono::{Duration, Utc};
     #[cfg(unix)]
-    use std::{fs, path::Path};
+    use std::{
+        env, fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        sync::{Mutex, OnceLock},
+    };
     #[cfg(unix)]
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    static PATH_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn parse_policy_url_prefix_rejects_query_and_fragment() {
@@ -3485,6 +3494,40 @@ mod tests {
         assert_eq!(path_operation_label(&PathOperation::Write), "write");
         assert_eq!(path_operation_label(&PathOperation::List), "list");
         assert_eq!(path_operation_label(&PathOperation::Mount), "mount");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executable_detection_checks_modes_and_path_resolution() {
+        let temp_dir = tempdir().unwrap();
+        let binary_dir = temp_dir.path().join("bin");
+        fs::create_dir_all(&binary_dir).unwrap();
+        let binary_path = binary_dir.join("gloves-helper");
+        fs::write(&binary_path, "#!/bin/sh\nexit 0\n").unwrap();
+
+        let mut non_executable_permissions = fs::metadata(&binary_path).unwrap().permissions();
+        non_executable_permissions.set_mode(0o644);
+        fs::set_permissions(&binary_path, non_executable_permissions).unwrap();
+        assert!(!is_executable_file(&binary_path));
+        assert!(!is_binary_available(binary_path.to_str().unwrap()));
+
+        let mut executable_permissions = fs::metadata(&binary_path).unwrap().permissions();
+        executable_permissions.set_mode(0o755);
+        fs::set_permissions(&binary_path, executable_permissions).unwrap();
+        assert!(is_executable_file(&binary_path));
+        assert!(is_binary_available(binary_path.to_str().unwrap()));
+
+        let _lock = PATH_ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let original_path = env::var_os("PATH");
+        env::set_var("PATH", &binary_dir);
+        assert!(is_binary_available("gloves-helper"));
+        assert!(!is_binary_available("missing-helper"));
+        env::remove_var("PATH");
+        assert!(!is_binary_available("gloves-helper"));
+        match original_path {
+            Some(value) => env::set_var("PATH", value),
+            None => env::remove_var("PATH"),
+        }
     }
 
     #[cfg(unix)]
