@@ -2714,6 +2714,12 @@ mod tests {
         stream.written_string()
     }
 
+    fn test_lock(lock: &'static OnceLock<Mutex<()>>) -> std::sync::MutexGuard<'static, ()> {
+        lock.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn resolved_config_load_reads_expected_paths() {
         let temp = TempDir::new().unwrap();
@@ -2811,7 +2817,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn https_webhook_delivery_uses_configured_curl_binary() {
-        let _lock = CURL_BIN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _lock = test_lock(&CURL_BIN_LOCK);
         let temp = TempDir::new().unwrap();
         let script_path = temp.path().join("mock-curl.sh");
         let args_path = temp.path().join("curl-args.txt");
@@ -2855,10 +2861,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn https_webhook_delivery_reports_curl_failures() {
-        let _lock = CURL_BIN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _lock = test_lock(&CURL_BIN_LOCK);
         let temp = TempDir::new().unwrap();
         let script_path = temp.path().join("mock-curl-fail.sh");
-        fs::write(&script_path, "#!/bin/sh\necho 'curl failed' >&2\nexit 22\n").unwrap();
+        fs::write(
+            &script_path,
+            "#!/bin/sh\n/bin/cat >/dev/null\necho 'curl failed' >&2\nexit 22\n",
+        )
+        .unwrap();
         fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
 
         let previous_curl_bin = env::var_os(WEBHOOK_CURL_BIN_ENV_VAR);
@@ -3906,7 +3916,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_gloves_rotate_surfaces_subprocess_failures() {
-        let _lock = PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _lock = test_lock(&PATH_LOCK);
         let harness = TestHarness::new();
         let temp = TempDir::new().unwrap();
         let script_path = temp.path().join(GLOVES_BINARY_NAME);
@@ -3931,7 +3941,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn run_gloves_rotate_reports_empty_stderr_failures() {
-        let _lock = PATH_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _lock = test_lock(&PATH_LOCK);
         let harness = TestHarness::new();
         let temp = TempDir::new().unwrap();
         let script_path = temp.path().join(GLOVES_BINARY_NAME);
@@ -3953,7 +3963,7 @@ mod tests {
 
     #[test]
     fn expand_tilde_uses_home_directory() {
-        let _lock = HOME_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _lock = test_lock(&HOME_LOCK);
         let home = env::var(HOME_ENV_VAR).unwrap();
         assert_eq!(expand_tilde("~").unwrap(), home);
         let expanded = expand_tilde("~/gloves-test").unwrap();
