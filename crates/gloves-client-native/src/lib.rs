@@ -52,7 +52,7 @@ struct JsonRpcError {
     message: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ToolCallResult {
     response: Value,
     secret_value: Option<String>,
@@ -805,4 +805,432 @@ fn create_set_env_name(path: &str) -> String {
 
 fn native_error(message: &str) -> Error {
     Error::new(Status::GenericFailure, message.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs, io,
+        path::{Path, PathBuf},
+        sync::{Mutex, OnceLock},
+        thread,
+    };
+
+    #[cfg(unix)]
+    use std::{
+        os::unix::{fs::PermissionsExt, net::UnixListener},
+        time::Duration as StdDuration,
+    };
+
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_root = PathBuf::from("/tmp");
+        let base_dir = if temp_root.is_dir() {
+            temp_root
+        } else {
+            std::env::temp_dir()
+        };
+        let path = base_dir.join(format!(
+            "gloves-client-native-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn cleanup_dir(path: &Path) {
+        let _ = fs::remove_dir_all(path);
+    }
+
+    fn test_config(gloves_mcp_bin: &Path, token_path: &Path) -> NativeClientConfig {
+        NativeClientConfig {
+            _root: "/tmp/gloves".to_owned(),
+            agent_id: "devy".to_owned(),
+            mcp_config_path: "/tmp/gloves.toml".to_owned(),
+            token_path: token_path.display().to_string(),
+            socket_path: None,
+            gloves_mcp_bin: gloves_mcp_bin.display().to_string(),
+            cwd: None,
+            timeout_ms: 2_000,
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_executable_script(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn success_script_contents() -> &'static str {
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "native-session-token" > "$GLOVES_SESSION_TOKEN_PATH"
+IFS= read -r _init_line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"gloves","version":"0.1.0"}}}'
+IFS= read -r _initialized_line
+IFS= read -r request_line
+case "$request_line" in
+  *'"name":"gloves_list"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"secrets":["agents/devy/api-keys/anthropic","shared/database-url"]}}}'
+    ;;
+  *'"name":"gloves_show"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"name":"agents/devy/api-keys/anthropic","exists":true,"length":9,"agent":"devy","encrypted_to":["age1devy"],"created":"2026-03-01T00:00:00Z","modified":"2026-03-02T00:00:00Z","last_rotated":"2026-03-03T00:00:00Z","last_accessed":"2026-03-04T00:00:00Z","file_size":247}}}'
+    ;;
+  *'"name":"gloves_get"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","method":"gloves/secret","params":{"requestId":2,"value":"sk-native"}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"approval_status":"approved"}}}'
+    ;;
+  *'"name":"gloves_set"'*)
+    env | grep '^GLOVES_SET_' >/dev/null
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"stored":true}}}'
+    ;;
+  *'"name":"gloves_delete"'*|*'"name":"gloves_rotate"'*|*'"name":"gloves_approve"'*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"ok":true}}}'
+    ;;
+  *)
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"unexpected tool"}}'
+    ;;
+esac
+"#
+    }
+
+    #[cfg(unix)]
+    fn error_script_contents() -> &'static str {
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "native-session-token" > "$GLOVES_SESSION_TOKEN_PATH"
+IFS= read -r _init_line
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"gloves","version":"0.1.0"}}}'
+IFS= read -r _initialized_line
+IFS= read -r _request_line
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32005,"message":"permission denied"}}'
+"#
+    }
+
+    #[cfg(unix)]
+    fn script_config(script_body: &str) -> (PathBuf, NativeClientConfig) {
+        let temp_dir = unique_temp_dir("stdio");
+        let script_path = temp_dir.join("fake-gloves-mcp.sh");
+        let token_path = temp_dir.join("session-token");
+        write_executable_script(&script_path, script_body);
+        (temp_dir.clone(), test_config(&script_path, &token_path))
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn native_client_exposes_all_task_entrypoints() {
+        let client = NativeGlovesClient::new(
+            "/tmp/gloves".to_owned(),
+            "devy".to_owned(),
+            "/tmp/gloves.toml".to_owned(),
+            "/tmp/token".to_owned(),
+            Some("/tmp/gloves.sock".to_owned()),
+            None,
+            Some("gloves-mcp".to_owned()),
+            Some("/tmp".to_owned()),
+            Some(250),
+        );
+
+        let _ = client.list(Some("agents/devy".to_owned()));
+        let _ = client.show("agents/devy/api-keys/anthropic".to_owned());
+        let _ = client.get("agents/devy/api-keys/anthropic".to_owned());
+        let _ = client.set(
+            "agents/devy/api-keys/anthropic".to_owned(),
+            "sk-native".to_owned(),
+        );
+        let _ = client.delete("agents/devy/api-keys/anthropic".to_owned());
+        let _ = client.rotate("devy".to_owned());
+        let _ = client.approve("req-123".to_owned(), "approve".to_owned(), None);
+    }
+
+    #[test]
+    fn helper_functions_parse_metadata_and_errors() {
+        let metadata = parse_metadata(Some(&json!({
+            "name": "agents/devy/api-keys/anthropic",
+            "exists": true,
+            "length": 42,
+            "agent": "devy",
+            "encrypted_to": ["age1devy"],
+            "created": "2026-03-01T00:00:00Z",
+            "modified": "2026-03-02T00:00:00Z",
+            "last_rotated": "2026-03-03T00:00:00Z",
+            "last_accessed": "2026-03-04T00:00:00Z",
+            "file_size": 247
+        })))
+        .unwrap();
+        assert_eq!(metadata.name, "agents/devy/api-keys/anthropic");
+        assert_eq!(metadata.length, 42);
+        assert_eq!(metadata.file_size, 247);
+        assert_eq!(
+            metadata.last_accessed.as_deref(),
+            Some("2026-03-04T00:00:00Z")
+        );
+
+        let missing = parse_metadata(Some(&json!({ "exists": true }))).unwrap_err();
+        assert!(missing.reason.contains("missing `name`"));
+
+        let required_string_error = required_string(&json!({}), "name").unwrap_err();
+        assert!(required_string_error.reason.contains("missing `name`"));
+        let required_u32_error = required_u32(&json!({}), "length").unwrap_err();
+        assert!(required_u32_error.reason.contains("missing `length`"));
+
+        assert_eq!(
+            format_response_error(&json!({"error": {"message": "denied"}})),
+            "denied"
+        );
+        assert_eq!(
+            format_response_error(&json!({"result": {}})),
+            "gloves native client request failed"
+        );
+        assert_eq!(native_error("boom").status, Status::GenericFailure);
+    }
+
+    #[test]
+    fn token_and_name_helpers_cover_success_and_timeout_paths() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("tokens");
+        let token_path = temp_dir.join("session-token");
+        let token_path_string = token_path.display().to_string();
+
+        assert!(read_token_file(&token_path_string).is_none());
+        fs::write(&token_path, "  native-token \n").unwrap();
+        assert_eq!(
+            read_token_file(&token_path_string).as_deref(),
+            Some("native-token")
+        );
+
+        assert_eq!(
+            wait_for_token(&token_path_string, 10).unwrap(),
+            "native-token"
+        );
+
+        let old_token = token_path.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            fs::write(old_token, "next-token").unwrap();
+        });
+        assert_eq!(
+            wait_for_fresh_token(&token_path_string, Some("native-token"), 250).unwrap(),
+            "next-token"
+        );
+
+        let timeout_error =
+            wait_for_fresh_token(&token_path_string, Some("next-token"), 10).unwrap_err();
+        assert!(timeout_error
+            .reason
+            .contains("timed out waiting for session token"));
+
+        let missing_error =
+            wait_for_token(&temp_dir.join("missing").display().to_string(), 10).unwrap_err();
+        assert!(missing_error
+            .reason
+            .contains("timed out waiting for session token"));
+
+        let stdio_token_path = create_stdio_token_path(&token_path_string);
+        assert!(stdio_token_path.starts_with(&format!("{token_path_string}.stdio-")));
+        let set_env_name = create_set_env_name("agents/devy/api-keys/anthropic-key");
+        assert!(set_env_name.starts_with("GLOVES_SET_ANTHROPIC_KEY_"));
+
+        cleanup_dir(&temp_dir);
+    }
+
+    #[test]
+    fn read_and_write_protocol_helpers_cover_success_and_failure() {
+        let mut output = Vec::new();
+        write_json_line(&mut output, &json!({"jsonrpc": "2.0", "id": 1})).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "{\"id\":1,\"jsonrpc\":\"2.0\"}\n"
+        );
+
+        let write_error = write_json_line(&mut BrokenWriter, &json!({"id": 1})).unwrap_err();
+        assert!(write_error
+            .reason
+            .contains("failed to write JSON-RPC payload"));
+
+        let mut reader = BufReader::new(
+            br#"{"jsonrpc":"2.0","method":"gloves/secret","params":{"requestId":2,"value":"sk-native"}}
+{"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"approval_status":"approved"}}}
+"#
+            .as_slice(),
+        );
+        let result = read_response(&mut reader, Some(json!(2))).unwrap();
+        assert_eq!(result.secret_value.as_deref(), Some("sk-native"));
+        assert_eq!(
+            result
+                .response
+                .get("result")
+                .and_then(|value| value.get("structuredContent"))
+                .and_then(|value| value.get("approval_status"))
+                .and_then(Value::as_str),
+            Some("approved")
+        );
+
+        let eof_error = read_response(&mut BufReader::new(&b""[..]), Some(json!(2))).unwrap_err();
+        assert!(eof_error
+            .reason
+            .contains("closed before sending a response"));
+
+        let parse_error =
+            read_response(&mut BufReader::new(&b"not-json\n"[..]), Some(json!(2))).unwrap_err();
+        assert!(parse_error
+            .reason
+            .contains("failed to parse gloves-mcp response"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdio_tasks_cover_success_and_error_paths() {
+        let _lock = test_lock();
+        let (success_dir, success_config) = script_config(success_script_contents());
+
+        let mut list_task = ListSecretsTask {
+            config: success_config.clone(),
+            prefix: Some("agents/devy".to_owned()),
+        };
+        assert_eq!(
+            <ListSecretsTask as Task>::compute(&mut list_task).unwrap(),
+            vec![
+                "agents/devy/api-keys/anthropic".to_owned(),
+                "shared/database-url".to_owned()
+            ]
+        );
+
+        let mut show_task = ShowSecretTask {
+            config: success_config.clone(),
+            path: "agents/devy/api-keys/anthropic".to_owned(),
+        };
+        let metadata = <ShowSecretTask as Task>::compute(&mut show_task).unwrap();
+        assert_eq!(metadata.agent, "devy");
+
+        let mut get_task = GetSecretTask {
+            config: success_config.clone(),
+            path: "agents/devy/api-keys/anthropic".to_owned(),
+        };
+        let get_result = <GetSecretTask as Task>::compute(&mut get_task).unwrap();
+        assert_eq!(get_result.value, "sk-native");
+        assert_eq!(get_result.approval_status, "approved");
+
+        let mut set_task = SetSecretTask {
+            config: success_config.clone(),
+            path: "agents/devy/api-keys/anthropic".to_owned(),
+            value: "sk-native".to_owned(),
+        };
+        <SetSecretTask as Task>::compute(&mut set_task).unwrap();
+
+        let mut delete_task = DeleteSecretTask {
+            config: success_config.clone(),
+            path: "agents/devy/api-keys/anthropic".to_owned(),
+        };
+        <DeleteSecretTask as Task>::compute(&mut delete_task).unwrap();
+
+        let mut rotate_task = RotateAgentTask {
+            config: success_config.clone(),
+            agent_id: "devy".to_owned(),
+        };
+        <RotateAgentTask as Task>::compute(&mut rotate_task).unwrap();
+
+        let mut approve_task = ApproveRequestTask {
+            config: success_config.clone(),
+            request_id: "req-123".to_owned(),
+            decision: "approve".to_owned(),
+            reason: Some("needed".to_owned()),
+        };
+        <ApproveRequestTask as Task>::compute(&mut approve_task).unwrap();
+
+        let (error_dir, error_config) = script_config(error_script_contents());
+        let error = list_secrets(&error_config, None).unwrap_err();
+        assert!(error.reason.contains("permission denied (-32005)"));
+
+        cleanup_dir(&success_dir);
+        cleanup_dir(&error_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_transport_covers_handshake_and_tool_dispatch() {
+        let _lock = test_lock();
+        let temp_dir = unique_temp_dir("socket");
+        let socket_path = temp_dir.join("s.sock");
+        let token_path = temp_dir.join("session-token");
+        fs::write(&token_path, "socket-token").unwrap();
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(StdDuration::from_millis(500)))
+                .unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+            let mut initialize = String::new();
+            reader.read_line(&mut initialize).unwrap();
+            let initialize_request: Value = serde_json::from_str(initialize.trim_end()).unwrap();
+            assert_eq!(
+                initialize_request.get("method").and_then(Value::as_str),
+                Some(INITIALIZE_METHOD)
+            );
+            write_json_line(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"gloves","version":"0.1.0"}}}),
+            )
+            .unwrap();
+
+            let mut initialized = String::new();
+            reader.read_line(&mut initialized).unwrap();
+            let initialized_message: Value = serde_json::from_str(initialized.trim_end()).unwrap();
+            assert_eq!(
+                initialized_message.get("method").and_then(Value::as_str),
+                Some(INITIALIZED_NOTIFICATION)
+            );
+
+            let mut tool_call = String::new();
+            reader.read_line(&mut tool_call).unwrap();
+            let tool_request: Value = serde_json::from_str(tool_call.trim_end()).unwrap();
+            assert_eq!(
+                tool_request.get("method").and_then(Value::as_str),
+                Some(TOOLS_CALL_METHOD)
+            );
+            write_json_line(
+                &mut stream,
+                &json!({"jsonrpc":"2.0","id":2,"result":{"structuredContent":{"secrets":["shared/database-url"]}}}),
+            )
+            .unwrap();
+        });
+
+        let mut config = test_config(Path::new("/bin/false"), &token_path);
+        config.socket_path = Some(socket_path.display().to_string());
+        let listed = list_secrets(&config, None).unwrap();
+        assert_eq!(listed, vec!["shared/database-url".to_owned()]);
+
+        server.join().unwrap();
+        cleanup_dir(&temp_dir);
+    }
 }
