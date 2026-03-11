@@ -121,10 +121,12 @@ mode = "auto"
 
 [defaults]
 agent_id = "default-agent"
-secret_ttl_days = 1
+secret_ttl_days = 30
 vault_mount_ttl = "1h"
 vault_secret_ttl_days = 365
 vault_secret_length_bytes = 64
+
+# Use `gloves secrets set ... --ttl never` when one secret should not expire.
 
 # Agent path visibility and allowed operations.
 # Agent IDs must satisfy existing AgentId validation rules.

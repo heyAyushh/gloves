@@ -2051,6 +2051,126 @@ fn cli_set_generate() {
 }
 
 #[test]
+fn cli_set_without_ttl_uses_default_and_reports_expiry_in_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--json",
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "default_ttl_secret",
+            "--value",
+            "secret-value",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["result"]["ttl_days"].as_i64(), Some(30));
+
+    let metadata_path = temp_dir.path().join("meta/default_ttl_secret.json");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
+    assert_eq!(payload["result"]["expires_at"], metadata["expires_at"]);
+
+    let created = DateTime::parse_from_rfc3339(metadata["created_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    let expires = DateTime::parse_from_rfc3339(payload["result"]["expires_at"].as_str().unwrap())
+        .unwrap()
+        .with_timezone(&Utc);
+    assert_eq!(expires - created, chrono::Duration::days(30));
+}
+
+#[test]
+fn cli_set_text_output_includes_expiry_timestamp() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "visible_expiry",
+            "--value",
+            "secret-value",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).unwrap();
+    assert!(stdout.contains("TTL: 30 days"));
+    assert!(stdout.contains("expires at "));
+}
+
+#[test]
+fn cli_set_ttl_never_reports_non_expiring_and_survives_verify() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().to_str().unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--json",
+            "--root",
+            root,
+            "secrets",
+            "set",
+            "never_expire_secret",
+            "--value",
+            "secret-value",
+            "--ttl",
+            "never",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let payload: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(payload["result"]["ttl_days"], serde_json::Value::Null);
+    assert_eq!(payload["result"]["expires_at"], serde_json::Value::Null);
+    assert_eq!(payload["result"]["never_expires"], true);
+
+    let metadata_path = temp_dir.path().join("meta/never_expire_secret.json");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(metadata_path).unwrap()).unwrap();
+    assert_eq!(metadata["expires_at"], serde_json::Value::Null);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--root", root, "verify"])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .env(GET_PIPE_ALLOWLIST_ENV_VAR, TEST_PIPE_COMMAND)
+        .args([
+            "--root",
+            root,
+            "secrets",
+            "get",
+            "never_expire_secret",
+            "--pipe-to",
+            TEST_PIPE_COMMAND,
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("secret-value"));
+}
+
+#[test]
 fn cli_set_duplicate_secret_fails() {
     let temp_dir = tempfile::tempdir().unwrap();
     let root = temp_dir.path().to_str().unwrap();
@@ -3932,7 +4052,7 @@ fn cli_set_rejects_non_positive_ttl() {
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("--ttl must be greater than zero"));
     assert!(stderr.contains("use a positive day count"));
-    assert!(stderr.contains("--ttl 1"));
+    assert!(stderr.contains("omit `--ttl` to use the configured default"));
 
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args([
@@ -5691,6 +5811,57 @@ fn cli_daemon_set_rejects_non_positive_ttl() {
     let mut second_reader = BufReader::new(second_stream);
     second_reader.read_line(&mut second_response_line).unwrap();
     assert!(second_response_line.contains("\"status\":\"ok\""));
+
+    let status = child.wait().unwrap();
+    assert!(status.success());
+}
+
+#[test]
+fn cli_daemon_set_accepts_never_ttl() {
+    let _guard = daemon_test_guard();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let Some((mut child, bind)) = spawn_daemon_with_retry(temp_dir.path(), 4) else {
+        return;
+    };
+
+    let mut set_stream = connect_with_retry(&bind);
+    set_stream
+        .write_all(br#"{"action":"set","name":"x","value":"abc","ttl_days":"never"}"#)
+        .unwrap();
+    set_stream.write_all(b"\n").unwrap();
+    let mut set_response = String::new();
+    let mut set_reader = BufReader::new(set_stream);
+    set_reader.read_line(&mut set_response).unwrap();
+    assert!(set_response.contains("\"status\":\"ok\""));
+    assert!(set_response.contains("\"never_expires\":true"));
+    assert!(set_response.contains("\"expires_at\":null"));
+
+    let mut verify_stream = connect_with_retry(&bind);
+    verify_stream.write_all(br#"{"action":"verify"}"#).unwrap();
+    verify_stream.write_all(b"\n").unwrap();
+    let mut verify_response = String::new();
+    let mut verify_reader = BufReader::new(verify_stream);
+    verify_reader.read_line(&mut verify_response).unwrap();
+    assert!(verify_response.contains("\"status\":\"ok\""));
+
+    let mut get_stream = connect_with_retry(&bind);
+    get_stream
+        .write_all(br#"{"action":"get","name":"x"}"#)
+        .unwrap();
+    get_stream.write_all(b"\n").unwrap();
+    let mut get_response = String::new();
+    let mut get_reader = BufReader::new(get_stream);
+    get_reader.read_line(&mut get_response).unwrap();
+    assert!(get_response.contains("\"status\":\"ok\""));
+    assert!(get_response.contains("\"secret\":\"abc\""));
+
+    let mut ping_stream = connect_with_retry(&bind);
+    ping_stream.write_all(br#"{"action":"ping"}"#).unwrap();
+    ping_stream.write_all(b"\n").unwrap();
+    let mut ping_response = String::new();
+    let mut ping_reader = BufReader::new(ping_stream);
+    ping_reader.read_line(&mut ping_response).unwrap();
+    assert!(ping_response.contains("\"status\":\"ok\""));
 
     let status = child.wait().unwrap();
     assert!(status.success());

@@ -15,9 +15,19 @@ This document describes the current `gloves` architecture in the repository.
 - `@gloves/client`
   - Bun/TypeScript client that speaks to `gloves-mcp`
   - currently uses MCP for authorization and metadata, then falls back to local CLI reads for plaintext retrieval
-- `@openclaw/gloves`
-  - OpenClaw-facing plugin that registers `gloves_get`, `gloves_list`, `gloves_show`, and `gloves_rotate`
+- `@gloves/adapter-core`
+  - shared runtime-agnostic adapter helpers for env/tmpfs injection and secret-source resolution
+- `@gloves/openclaw`
+  - OpenClaw-facing adapter that registers `gloves_get`, `gloves_list`, `gloves_show`, and `gloves_rotate`
   - injects plaintext into environment variables or tmpfs instead of returning it in tool output
+
+## Adapter Boundary
+
+`gloves-mcp` is the canonical machine-facing interface for runtime integrations.
+OpenClaw support lives in `@gloves/openclaw` as an adapter over that interface rather than a
+core product boundary. `@openclaw/gloves` remains available as a deprecated compatibility shim.
+Additional runtimes should follow the same pattern with sibling adapters over
+`@gloves/adapter-core`.
 
 ## Store Layout
 
@@ -44,7 +54,7 @@ The current OpenClaw-oriented store layout is:
 
 Current OpenClaw plugin reads work like this:
 
-1. `@openclaw/gloves` receives a `gloves_get` tool call.
+1. `@gloves/openclaw` receives a `gloves_get` tool call.
 2. `@gloves/client` opens an MCP session to `gloves-mcp`.
 3. `gloves-mcp` validates the session token and agent id.
 4. `gloves-mcp` applies approval policy and returns only redacted metadata.

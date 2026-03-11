@@ -25,7 +25,7 @@
   },
   plugins: {
     gloves: {
-      package: "@openclaw/gloves",
+      package: "@gloves/openclaw",
       config: {
         root: "~/.config/gloves",
         mcpConfigPath: "~/.config/gloves/gloves.toml",

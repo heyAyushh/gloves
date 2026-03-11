@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.7
+
 ### Minor Changes
 
 - Added the OpenClaw namespaced secret workflow:
@@ -9,7 +11,7 @@
   - `gloves set`, `get`, `show`, `updatekeys`, and `rotate` now support agent-scoped OpenClaw secret paths and redacted metadata output.
 - Added first-class OpenClaw integration artifacts:
   - Published `gloves.json5` bridge config and `SKILL.md` guidance for agent-safe secret handling.
-  - Added Bun-based `@gloves/client` and `@openclaw/gloves` packages, including native addon loading and environment/tmpfs injection flows.
+  - Added Bun-based `@gloves/client`, `@gloves/adapter-core`, and `@gloves/openclaw` packages, including native addon loading and environment/tmpfs injection flows.
 - Rebuilt `gloves-mcp` around `rmcp` with brokered secret delivery:
   - Supports stdio and Unix-socket sessions with session-token authentication.
   - Exposes typed `gloves_*` tools with redacted responses, approval gating, audit logging, webhook callbacks, and metrics output.
@@ -18,7 +20,12 @@
 
 ### Patch Changes
 
+- Added non-expiring secret TTL support for CLI and daemon secret writes:
+  - `gloves secrets set ... --ttl never` and daemon `set` requests with `"ttl_days":"never"` now create secrets without an expiry timestamp.
+  - Non-expiring secrets survive `gloves verify`, and machine-readable `set` responses now expose `never_expires`.
+- Raised the built-in secret/request TTL default from 1 day to 30 days and surfaced secret expiry state in `gloves secrets set` output.
 - Hardened OpenClaw approval and transport behavior with HTTPS webhook delivery, tmpfs startup validation, and more explicit configuration/runtime errors.
+- Restored `@openclaw/gloves` as a deprecated compatibility shim that re-exports `@gloves/openclaw`.
 - Added architecture and security documentation for the brokered-credentials model and linked the new operator guidance from the README.
 - Expanded Rust and Bun regression coverage across the CLI, daemon, namespaced store, vault flows, and OpenClaw integration paths, lifting repo-wide Rust line coverage above 90%.
 

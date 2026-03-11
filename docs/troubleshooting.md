@@ -49,6 +49,27 @@ gloves config validate
 
 Then review `[secrets.acl.<agent>]` in config.
 
+## Secrets disappear after some time
+
+Cause:
+
+- `gloves verify` reaps expired secrets.
+- The built-in `defaults.secret_ttl_days` is 30 unless your config overrides it.
+
+Checks:
+
+```bash
+gloves list
+gloves audit --limit 50
+```
+
+Notes:
+
+- `gloves secrets set` prints the expiry timestamp when it creates an expiring secret.
+- `gloves secrets set ... --ttl never` creates a non-expiring secret that `gloves verify` will not reap.
+- Set `[defaults] secret_ttl_days = <days>` in `.gloves.toml` to change the default.
+- Pass `--ttl <days>` when one secret needs a shorter or longer lifetime than the default.
+
 ## `gpg fingerprint` says key not found
 
 Create key first:

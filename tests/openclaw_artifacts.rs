@@ -12,7 +12,7 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
 
     assert!(contents.contains("command: \"gloves-mcp\""));
     assert!(contents.contains("GLOVES_SESSION_TOKEN_PATH"));
-    assert!(contents.contains("package: \"@openclaw/gloves\""));
+    assert!(contents.contains("package: \"@gloves/openclaw\""));
     assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
     assert!(contents.contains("root: \"~/.config/gloves\""));
     assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
@@ -115,8 +115,8 @@ fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
     assert!(security.contains("never appear in the LLM context"));
     assert!(security.contains("brokered"));
     assert!(architecture.contains("gloves-mcp"));
-    assert!(architecture.contains("@openclaw/gloves"));
-    assert!(readme.contains("@openclaw/gloves"));
+    assert!(architecture.contains("@gloves/openclaw"));
+    assert!(readme.contains("@gloves/openclaw"));
 }
 
 #[test]

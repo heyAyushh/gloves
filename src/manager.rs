@@ -41,8 +41,8 @@ pub struct SecretsManager {
 pub struct SetSecretOptions {
     /// Secret owner domain.
     pub owner: Owner,
-    /// Secret lifetime.
-    pub ttl: Duration,
+    /// Secret lifetime. `None` means the secret never expires.
+    pub ttl: Option<Duration>,
     /// Creator identity.
     pub created_by: AgentId,
     /// Authorized recipients by logical id.
@@ -89,7 +89,7 @@ impl SecretsManager {
             id: secret_id.clone(),
             owner: options.owner,
             created_at: now,
-            expires_at: now + options.ttl,
+            expires_at: options.ttl.map(|ttl| now + ttl),
             recipients: options.recipients,
             created_by: options.created_by.clone(),
             last_accessed: None,
@@ -120,7 +120,7 @@ impl SecretsManager {
     ) -> Result<SecretValue> {
         let mut meta = self.metadata_store.load(secret_id)?;
 
-        if meta.expires_at <= Utc::now() {
+        if matches!(meta.expires_at, Some(expires_at) if expires_at <= Utc::now()) {
             return Err(GlovesError::Expired);
         }
 

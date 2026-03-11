@@ -10,6 +10,7 @@ use std::{
 use std::os::unix::fs::PermissionsExt;
 
 use chrono::Duration;
+use serde_json::Value;
 
 use crate::{
     audit::{AuditEvent, AuditLog},
@@ -46,7 +47,7 @@ enum DaemonRequest {
         #[serde(default)]
         generate: bool,
         value: Option<String>,
-        ttl_days: Option<i64>,
+        ttl_days: Option<Value>,
     },
     Revoke {
         name: String,
@@ -460,8 +461,11 @@ fn execute_daemon_request_with_actor(
             let recipient = runtime::load_or_create_recipient_for_agent(paths, &creator)?;
             let mut recipients = HashSet::new();
             recipients.insert(creator.clone());
-            let ttl_days =
-                runtime::validate_ttl_days(ttl_days.unwrap_or(DEFAULT_TTL_DAYS), "ttl_days")?;
+            let ttl = runtime::parse_secret_ttl_json_value(
+                ttl_days.as_ref(),
+                DEFAULT_TTL_DAYS,
+                "ttl_days",
+            )?;
             let secret_value =
                 SecretValue::new(secret_input::resolve_daemon_secret_input(generate, value)?);
             manager.set(
@@ -469,16 +473,22 @@ fn execute_daemon_request_with_actor(
                 secret_value,
                 crate::manager::SetSecretOptions {
                     owner: Owner::Agent,
-                    ttl: Duration::days(ttl_days),
+                    ttl: ttl.duration(),
                     created_by: creator,
                     recipients,
                     recipient_keys: vec![recipient],
                 },
             )?;
+            let expires_at = manager.metadata_store.load(&secret_id)?.expires_at;
             log_daemon_command_executed(paths, actor, "set", Some(secret_id.as_str().to_owned()));
             Ok((
                 "ok".to_owned(),
-                Some(serde_json::json!({ "id": secret_id.as_str() })),
+                Some(serde_json::json!({
+                    "id": secret_id.as_str(),
+                    "ttl_days": ttl.ttl_days(),
+                    "expires_at": expires_at,
+                    "never_expires": ttl.never_expires(),
+                })),
             ))
         }
         DaemonRequest::Revoke { name } => {

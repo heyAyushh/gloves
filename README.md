@@ -63,7 +63,7 @@ gloves requests help approve
 gloves --root .openclaw/secrets init
 
 # create one secret
-gloves --root .openclaw/secrets secrets set service/token --generate --ttl 1
+gloves --root .openclaw/secrets secrets set service/token --generate
 
 # read secret
 gloves --root .openclaw/secrets secrets get service/token
@@ -71,6 +71,8 @@ gloves --root .openclaw/secrets secrets get service/token
 # list entries
 gloves --root .openclaw/secrets list
 ```
+
+If you omit `--ttl`, `gloves` uses `defaults.secret_ttl_days` from config; the built-in default is 30 days. Use `--ttl never` for a non-expiring secret. `gloves secrets set` prints the expiry timestamp for expiring secrets and says `never expires` otherwise.
 
 For complete setup and human/agent workflows, use [Quickstart](docs/quickstart.md).
 
@@ -80,7 +82,9 @@ The repository now includes:
 
 - `gloves-mcp` for redacted MCP tool access
 - `@gloves/client` as the Bun/TypeScript bridge
-- `@openclaw/gloves` as the OpenClaw plugin package
+- `@gloves/adapter-core` as the shared adapter helper package
+- `@gloves/openclaw` as the OpenClaw adapter package
+- `@openclaw/gloves` as a deprecated compatibility alias for existing consumers
 - `integrations/openclaw/gloves.json5` as the reference config snippet
 
 Current plugin reads keep secret values out of the MCP result body and inject them into the sandbox environment or tmpfs instead.

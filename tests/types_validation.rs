@@ -110,7 +110,7 @@ fn secret_meta_roundtrip() {
         id: secret_id,
         owner: Owner::Agent,
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::days(1),
+        expires_at: Some(Utc::now() + Duration::days(1)),
         recipients,
         created_by: creator,
         last_accessed: None,
@@ -123,6 +123,27 @@ fn secret_meta_roundtrip() {
     assert_eq!(decoded.id.as_str(), meta.id.as_str());
     assert_eq!(decoded.owner, meta.owner);
     assert_eq!(decoded.recipients, meta.recipients);
+}
+
+#[test]
+fn secret_meta_roundtrip_without_expiry() {
+    let secret_id = SecretId::new("meta_without_expiry").unwrap();
+    let creator = AgentId::new("creator").unwrap();
+    let meta = SecretMeta {
+        id: secret_id,
+        owner: Owner::Agent,
+        created_at: Utc::now(),
+        expires_at: None,
+        recipients: HashSet::new(),
+        created_by: creator,
+        last_accessed: None,
+        access_count: 0,
+        checksum: "abc".to_owned(),
+    };
+
+    let bytes = serde_json::to_vec(&meta).unwrap();
+    let decoded: SecretMeta = serde_json::from_slice(&bytes).unwrap();
+    assert!(decoded.expires_at.is_none());
 }
 
 #[test]

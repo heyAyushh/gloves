@@ -12,11 +12,14 @@ use std::path::PathBuf;
 use chrono::Duration;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::{config::VaultMode, error::Result, types::Owner};
+use crate::{
+    config::VaultMode, error::Result, types::Owner,
+    DEFAULT_SECRET_TTL_DAYS as DEFAULT_CONFIG_SECRET_TTL_DAYS,
+};
 
 const DEFAULT_AGENT_ID: &str = "default-agent";
 const DEFAULT_ROOT_DIR: &str = ".openclaw/secrets";
-const DEFAULT_TTL_DAYS: i64 = 1;
+const DEFAULT_TTL_DAYS: i64 = DEFAULT_CONFIG_SECRET_TTL_DAYS;
 const DEFAULT_TTL_SECONDS: i64 = 86_400;
 const DEFAULT_DAEMON_REQUEST_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_DAEMON_BIND: &str = "127.0.0.1:7788";
@@ -32,7 +35,7 @@ const ERROR_CODE_ARG_HELP: &str = "Error code from CLI stderr (example: `E102`).
 const ERROR_FORMAT_ARG_HELP: &str = "Error output format (`text` or `json`).";
 const CLI_AFTER_HELP: &str = r#"Examples:
   gloves --root .openclaw/secrets init
-  gloves --root .openclaw/secrets secrets set service/token --generate --ttl 1
+  gloves --root .openclaw/secrets secrets set service/token --generate
   gloves --root .openclaw/secrets secrets get service/token --pipe-to cat
   gloves --root .openclaw/secrets request prod/db --reason "run migration"
   gloves --root .openclaw/secrets requests list
@@ -55,12 +58,15 @@ More help:
   gloves help vault
 "#;
 const SET_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves secrets set service/token --generate --ttl 1
+  gloves secrets set service/token --generate
+  gloves secrets set long-lived/token --generate --ttl never
   printf 'secret-value' | gloves secrets set service/token --stdin --ttl 7
 
 Tips:
   - Use `--generate` or `--stdin` for safer input handling.
-  - `--ttl` expects a positive number of days (example: `--ttl 1`).
+  - `--ttl` accepts a positive number of days or `never`.
+  - Omitting `--ttl` uses `defaults.secret_ttl_days` from config.
+  - `gloves secrets set` prints the expiry timestamp or says `never expires`.
 "#;
 const REQUEST_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves request prod/db --reason "run migration"
@@ -145,7 +151,7 @@ Tips:
   - `help` works both at the top level and inside command groups.
 "#;
 const SECRETS_COMMAND_AFTER_HELP: &str = r#"Examples:
-  gloves secrets set service/token --generate --ttl 1
+  gloves secrets set service/token --generate
   gloves secrets get service/token
   gloves secrets grant service/token --to agent-b
   gloves secrets revoke service/token
@@ -641,9 +647,9 @@ pub enum SecretsCommand {
         /// Read secret value from stdin (trims trailing CR/LF).
         #[arg(long)]
         stdin: bool,
-        /// TTL in days.
+        /// TTL in days, or `never`. Omit to use the configured default.
         #[arg(long)]
-        ttl: Option<i64>,
+        ttl: Option<String>,
     },
     /// Gets a secret value.
     #[command(after_help = GET_COMMAND_AFTER_HELP)]
@@ -812,7 +818,7 @@ mod unit_tests {
     use super::{
         runtime::{
             load_or_create_identity_for_agent, load_or_create_signing_key_for_agent,
-            validate_ttl_days,
+            parse_secret_ttl_argument, validate_ttl_days, SecretTtl,
         },
         secret_input::{parse_duration_value, resolve_secret_input},
         ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand, SecretReadFormatArg,
@@ -882,6 +888,18 @@ mod unit_tests {
     fn validate_ttl_days_accepts_positive_value() {
         let ttl_days = validate_ttl_days(7, "--ttl").unwrap();
         assert_eq!(ttl_days, 7);
+    }
+
+    #[test]
+    fn parse_secret_ttl_argument_accepts_never() {
+        let ttl = parse_secret_ttl_argument(Some("never"), 30, "--ttl").unwrap();
+        assert_eq!(ttl, SecretTtl::Never);
+    }
+
+    #[test]
+    fn parse_secret_ttl_argument_uses_default_days_when_omitted() {
+        let ttl = parse_secret_ttl_argument(None, 30, "--ttl").unwrap();
+        assert_eq!(ttl, SecretTtl::Days(30));
     }
 
     #[test]
@@ -1008,7 +1026,7 @@ mod unit_tests {
             cli.command,
             Command::Secrets {
                 command: SecretsCommand::Set { name, generate, ttl, .. }
-            } if name == "service/token" && generate && ttl == Some(1)
+            } if name == "service/token" && generate && ttl.as_deref() == Some("1")
         ));
     }
 

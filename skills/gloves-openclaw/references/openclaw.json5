@@ -24,7 +24,7 @@
   },
   plugins: {
     gloves: {
-      package: "@openclaw/gloves",
+      package: "@gloves/openclaw",
       config: {
         socketPath: "~/.openclaw/gloves/daemon.sock",
         tokenPath: "~/.openclaw/gloves/session-token",

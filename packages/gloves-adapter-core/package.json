@@ -1,12 +1,9 @@
 {
-  "name": "@openclaw/gloves",
+  "name": "@gloves/adapter-core",
   "version": "0.1.0",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
-  },
-  "dependencies": {
-    "@gloves/openclaw": "workspace:*"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node",

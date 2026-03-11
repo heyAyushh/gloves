@@ -17,6 +17,7 @@ This repository uses branch-based release channels with tag-driven publishing.
 The publish workflow also enforces:
 - tag version equals `Cargo.toml` version
 - tag commit belongs to an allowed branch for that channel
+- crates publish in dependency order: `gloves-core`, `gloves-config`, then `gloves`
 
 ## Release Outputs
 

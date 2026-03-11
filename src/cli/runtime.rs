@@ -7,6 +7,7 @@ use std::{
 use chrono::Duration;
 use ed25519_dalek::SigningKey;
 use rand::RngExt;
+use serde_json::Value;
 
 use crate::{
     agent::{age_crypto, backend::AgentBackend, meta::MetadataStore},
@@ -21,6 +22,32 @@ use crate::{
 
 const REQUEST_ID_COMMAND_HINT: &str = "To find a valid request id:\n  gloves requests list\nThen run one of:\n  gloves requests approve <request-id>\n  gloves requests deny <request-id>\n  (legacy shortcuts)\n  gloves approve <request-id>\n  gloves deny <request-id>";
 const REQUEST_ID_EXAMPLE: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SecretTtl {
+    Days(i64),
+    Never,
+}
+
+impl SecretTtl {
+    pub(crate) fn duration(self) -> Option<Duration> {
+        match self {
+            Self::Days(days) => Some(Duration::days(days)),
+            Self::Never => None,
+        }
+    }
+
+    pub(crate) fn ttl_days(self) -> Option<i64> {
+        match self {
+            Self::Days(days) => Some(days),
+            Self::Never => None,
+        }
+    }
+
+    pub(crate) fn never_expires(self) -> bool {
+        matches!(self, Self::Never)
+    }
+}
 
 pub(crate) fn init_layout(paths: &SecretsPaths) -> Result<()> {
     ensure_private_dir(paths.root())?;
@@ -114,6 +141,53 @@ pub(crate) fn validate_ttl_days(ttl_days: i64, field_name: &str) -> Result<i64> 
     Ok(ttl_days)
 }
 
+pub(crate) fn parse_secret_ttl_argument(
+    ttl_literal: Option<&str>,
+    default_ttl_days: i64,
+    field_name: &str,
+) -> Result<SecretTtl> {
+    match ttl_literal {
+        Some(ttl_literal) => parse_secret_ttl_literal(ttl_literal, field_name),
+        None => Ok(SecretTtl::Days(default_ttl_days)),
+    }
+}
+
+pub(crate) fn parse_secret_ttl_json_value(
+    ttl_value: Option<&Value>,
+    default_ttl_days: i64,
+    field_name: &str,
+) -> Result<SecretTtl> {
+    match ttl_value {
+        None | Some(Value::Null) => Ok(SecretTtl::Days(default_ttl_days)),
+        Some(Value::String(ttl_literal)) => parse_secret_ttl_literal(ttl_literal, field_name),
+        Some(Value::Number(ttl_days)) => {
+            let ttl_days = ttl_days.as_i64().ok_or_else(|| {
+                GlovesError::InvalidInput(format!(
+                    "{field_name} must be a positive whole-day count or `never`"
+                ))
+            })?;
+            Ok(SecretTtl::Days(validate_ttl_days(ttl_days, field_name)?))
+        }
+        Some(_) => Err(GlovesError::InvalidInput(format!(
+            "{field_name} must be a positive whole-day count or `never`"
+        ))),
+    }
+}
+
+fn parse_secret_ttl_literal(ttl_literal: &str, field_name: &str) -> Result<SecretTtl> {
+    let ttl_literal = ttl_literal.trim();
+    if ttl_literal.eq_ignore_ascii_case("never") {
+        return Ok(SecretTtl::Never);
+    }
+
+    let ttl_days = ttl_literal.parse::<i64>().map_err(|_| {
+        GlovesError::InvalidInput(format!(
+            "{field_name} must be a positive whole-day count or `never`"
+        ))
+    })?;
+    Ok(SecretTtl::Days(validate_ttl_days(ttl_days, field_name)?))
+}
+
 pub(crate) fn parse_request_uuid(request_id: &str) -> Result<uuid::Uuid> {
     let request_id = request_id.trim();
     if request_id.is_empty() {
@@ -159,7 +233,7 @@ pub(crate) fn ensure_agent_vault_secret(
         SecretValue::new(secret_bytes),
         SetSecretOptions {
             owner: Owner::Agent,
-            ttl: Duration::days(ttl_days),
+            ttl: Some(Duration::days(ttl_days)),
             created_by: creator.clone(),
             recipients,
             recipient_keys: vec![recipient],

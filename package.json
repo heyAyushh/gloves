@@ -6,7 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run --cwd packages/gloves-client build && bun run --cwd packages/openclaw-gloves build",
+    "build": "bun run --cwd packages/gloves-client build && bun run --cwd packages/gloves-adapter-core build && bun run --cwd packages/gloves-openclaw build && bun run --cwd packages/openclaw-gloves build",
     "test": "cargo build --bin gloves --bin gloves-mcp && bun test",
     "docker:e2e": "bun run scripts/docker-e2e.ts"
   }

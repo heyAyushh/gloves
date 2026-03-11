@@ -52,7 +52,7 @@ gloves --agent human-ops requests approve <request-id>
 
 # default agent creates agent-owned copy and grants it
 gloves --agent default-agent secrets get shared/main-password | \
-  gloves --agent default-agent secrets set shared/bootstrap-password --stdin --ttl 1
+  gloves --agent default-agent secrets set shared/bootstrap-password --stdin --ttl never
 
 gloves --agent default-agent secrets grant shared/bootstrap-password --to agent-a
 gloves --agent default-agent secrets grant shared/bootstrap-password --to agent-b

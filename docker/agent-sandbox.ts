@@ -6,7 +6,7 @@ import { join } from "node:path";
 import glovesPlugin, {
   type PluginAPI,
   type PluginToolDefinition,
-} from "../packages/openclaw-gloves/src/index";
+} from "../packages/gloves-openclaw/src/index";
 
 type ConversationRecord =
   | { tool: string; response: Record<string, unknown> }

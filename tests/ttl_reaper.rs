@@ -35,7 +35,7 @@ fn reaps_expired() {
             id: secret_id.clone(),
             owner: Owner::Agent,
             created_at: Utc::now() - Duration::days(2),
-            expires_at: Utc::now() - Duration::days(1),
+            expires_at: Some(Utc::now() - Duration::days(1)),
             recipients,
             created_by: AgentId::new("agent-a").unwrap(),
             last_accessed: None,
@@ -74,7 +74,46 @@ fn keeps_valid() {
             id: secret_id.clone(),
             owner: Owner::Agent,
             created_at: Utc::now() - Duration::hours(1),
-            expires_at: Utc::now() + Duration::days(1),
+            expires_at: Some(Utc::now() + Duration::days(1)),
+            recipients,
+            created_by: AgentId::new("agent-a").unwrap(),
+            last_accessed: None,
+            access_count: 0,
+            checksum: String::new(),
+        })
+        .unwrap();
+
+    TtlReaper::reap(&backend, &meta_store, &audit).unwrap();
+
+    assert!(backend.ciphertext_path(&secret_id).exists());
+    assert!(meta_store.load(&secret_id).is_ok());
+}
+
+#[test]
+fn keeps_never_expiring_secret() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let backend = AgentBackend::new(temp_dir.path().join("store")).unwrap();
+    let meta_store = MetadataStore::new(temp_dir.path().join("meta")).unwrap();
+    let audit = AuditLog::new(temp_dir.path().join("audit.jsonl")).unwrap();
+
+    let secret_id = SecretId::new("never").unwrap();
+    let identity = generate_identity(temp_dir.path(), "agent-a");
+    backend
+        .encrypt(
+            &secret_id,
+            &SecretValue::new(b"persistent".to_vec()),
+            vec![identity.recipient],
+        )
+        .unwrap();
+
+    let mut recipients = HashSet::new();
+    recipients.insert(AgentId::new("agent-a").unwrap());
+    meta_store
+        .save(&SecretMeta {
+            id: secret_id.clone(),
+            owner: Owner::Agent,
+            created_at: Utc::now() - Duration::days(30),
+            expires_at: None,
             recipients,
             created_by: AgentId::new("agent-a").unwrap(),
             last_accessed: None,
@@ -113,7 +152,7 @@ fn logs_expiry_event() {
             id: secret_id,
             owner: Owner::Agent,
             created_at: Utc::now() - Duration::days(2),
-            expires_at: Utc::now() - Duration::days(1),
+            expires_at: Some(Utc::now() - Duration::days(1)),
             recipients,
             created_by: AgentId::new("agent-a").unwrap(),
             last_accessed: None,

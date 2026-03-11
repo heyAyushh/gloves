@@ -27,7 +27,7 @@ impl TtlReaper {
         audit_log: &AuditLog,
     ) -> Result<()> {
         for meta in metadata_store.list()? {
-            if meta.expires_at <= Utc::now() {
+            if matches!(meta.expires_at, Some(expires_at) if expires_at <= Utc::now()) {
                 let ciphertext_path = agent_backend.ciphertext_path(&meta.id);
                 secure_delete_file(&ciphertext_path)?;
                 metadata_store.delete(&meta.id)?;

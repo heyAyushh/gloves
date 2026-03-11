@@ -18,7 +18,8 @@ const DEFAULT_DAEMON_BIND: &str = "127.0.0.1:7788";
 const DEFAULT_DAEMON_IO_TIMEOUT_SECONDS: u64 = 5;
 const DEFAULT_DAEMON_REQUEST_LIMIT_BYTES: usize = 16 * 1024;
 const DEFAULT_AGENT_ID: &str = "default-agent";
-const DEFAULT_SECRET_TTL_DAYS: i64 = 1;
+/// Built-in default secret and request TTL in days when config does not override it.
+pub const DEFAULT_SECRET_TTL_DAYS: i64 = 30;
 const DEFAULT_VAULT_MOUNT_TTL: &str = "1h";
 const DEFAULT_VAULT_SECRET_TTL_DAYS: i64 = 365;
 const DEFAULT_VAULT_SECRET_LENGTH_BYTES: usize = 64;

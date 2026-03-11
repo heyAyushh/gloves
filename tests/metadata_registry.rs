@@ -21,7 +21,7 @@ fn meta_save_load_roundtrip() {
         id: secret_id.clone(),
         owner: Owner::Agent,
         created_at: Utc::now(),
-        expires_at: Utc::now() + Duration::hours(1),
+        expires_at: Some(Utc::now() + Duration::hours(1)),
         recipients,
         created_by: AgentId::new("agent-a").unwrap(),
         last_accessed: None,
@@ -34,6 +34,7 @@ fn meta_save_load_roundtrip() {
     assert_eq!(loaded.id, meta.id);
     assert_eq!(loaded.owner, meta.owner);
     assert_eq!(loaded.created_by, meta.created_by);
+    assert_eq!(loaded.expires_at, meta.expires_at);
 }
 
 #[test]
@@ -230,7 +231,7 @@ fn meta_list_ignores_non_json_files() {
             id: SecretId::new("nested/token").unwrap(),
             owner: Owner::Agent,
             created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(1),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
             recipients,
             created_by: AgentId::new("agent-a").unwrap(),
             last_accessed: None,

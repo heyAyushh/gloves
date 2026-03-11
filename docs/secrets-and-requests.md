@@ -24,6 +24,8 @@ Create from generated value:
 gloves secrets set svc/github/token --generate --ttl 7
 ```
 
+Use `--ttl never` when a specific agent-owned secret should stay available until you revoke or rotate it.
+
 Create from stdin:
 
 ```bash

@@ -412,34 +412,48 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     runtime::load_or_create_recipient_for_agent(&state.paths, &creator)?;
                 let mut recipients = HashSet::new();
                 recipients.insert(creator.clone());
-                let ttl_days = runtime::validate_ttl_days(
-                    ttl.unwrap_or(state.default_secret_ttl_days),
+                let ttl = runtime::parse_secret_ttl_argument(
+                    ttl.as_deref(),
+                    state.default_secret_ttl_days,
                     "--ttl",
                 )?;
                 let value =
                     SecretValue::new(secret_input::resolve_secret_input(generate, value, stdin)?);
                 manager.set(
-                    secret_id,
+                    secret_id.clone(),
                     value,
                     crate::manager::SetSecretOptions {
                         owner: Owner::Agent,
-                        ttl: Duration::days(ttl_days),
+                        ttl: ttl.duration(),
                         created_by: creator,
                         recipients,
                         recipient_keys: vec![recipient],
                     },
                 )?;
+                let expires_at = manager.metadata_store.load(&secret_id)?.expires_at;
+                let never_expires = ttl.never_expires();
+                let text = match expires_at {
+                    Some(expires_at) => format!(
+                        "secret {} created (TTL: {} days, expires at {})",
+                        secret_name,
+                        ttl.ttl_days().unwrap_or_default(),
+                        expires_at.to_rfc3339()
+                    ),
+                    None => format!("secret {} created (TTL: never, never expires)", secret_name),
+                };
                 log_command_executed(&state.paths, &state.default_agent_id, "set", Some(name));
                 if let Some(code) = emit_command_json_or_text(
                     "secrets-set",
                     serde_json::json!({
                         "secret": secret_name,
                         "status": "created",
-                        "ttl_days": ttl_days,
+                        "ttl_days": ttl.ttl_days(),
+                        "expires_at": expires_at,
+                        "never_expires": never_expires,
                         "owner": "agent",
                         "created_by": creator_str,
                     }),
-                    &format!("secret {} created (TTL: {} days)", secret_name, ttl_days),
+                    &text,
                     json_output,
                 )? {
                     return Ok(code);

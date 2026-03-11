@@ -66,7 +66,7 @@ fn set_agent_secret() {
             SecretValue::new(b"shh".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator,
                 recipients,
                 recipient_keys: vec![identity.recipient],
@@ -75,6 +75,34 @@ fn set_agent_secret() {
         .unwrap();
 
     assert_eq!(created, id);
+}
+
+#[test]
+fn set_agent_secret_without_expiry() {
+    let (manager, temp_dir) = build_manager(HumanBackend::new());
+
+    let id = SecretId::new("service/token").unwrap();
+    let creator = AgentId::new("agent-a").unwrap();
+    let mut recipients = HashSet::new();
+    recipients.insert(creator.clone());
+    let identity = identity_for(&temp_dir, "agent-a");
+
+    manager
+        .set(
+            id.clone(),
+            SecretValue::new(b"shh".to_vec()),
+            SetSecretOptions {
+                owner: Owner::Agent,
+                ttl: None,
+                created_by: creator,
+                recipients,
+                recipient_keys: vec![identity.recipient],
+            },
+        )
+        .unwrap();
+
+    let metadata = manager.metadata_store.load(&id).unwrap();
+    assert!(metadata.expires_at.is_none());
 }
 
 #[test]
@@ -90,7 +118,7 @@ fn set_human_forbidden() {
         SecretValue::new(b"shh".to_vec()),
         SetSecretOptions {
             owner: Owner::Human,
-            ttl: Duration::hours(1),
+            ttl: Some(Duration::hours(1)),
             created_by: creator,
             recipients,
             recipient_keys: vec![],
@@ -116,7 +144,7 @@ fn set_rolls_back_ciphertext_when_metadata_save_fails() {
         SecretValue::new(b"value".to_vec()),
         SetSecretOptions {
             owner: Owner::Agent,
-            ttl: Duration::hours(1),
+            ttl: Some(Duration::hours(1)),
             created_by: creator,
             recipients,
             recipient_keys: vec![identity.recipient],
@@ -145,7 +173,7 @@ fn set_rolls_back_metadata_and_ciphertext_when_audit_fails() {
         SecretValue::new(b"value".to_vec()),
         SetSecretOptions {
             owner: Owner::Agent,
-            ttl: Duration::hours(1),
+            ttl: Some(Duration::hours(1)),
             created_by: creator,
             recipients,
             recipient_keys: vec![identity.recipient],
@@ -173,7 +201,7 @@ fn get_routes_agent() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient.clone()],
@@ -207,7 +235,7 @@ fn get_routes_human() {
             id: id.clone(),
             owner: Owner::Human,
             created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(1),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
             recipients: HashSet::new(),
             created_by: creator.clone(),
             last_accessed: None,
@@ -252,7 +280,7 @@ fn get_human_without_approval_forbidden() {
             id: id.clone(),
             owner: Owner::Human,
             created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(1),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
             recipients: HashSet::new(),
             created_by: creator.clone(),
             last_accessed: None,
@@ -283,7 +311,7 @@ fn get_expired() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::seconds(-1),
+                ttl: Some(Duration::seconds(-1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient.clone()],
@@ -313,7 +341,7 @@ fn get_unauthorized() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator,
                 recipients,
                 recipient_keys: vec![identity.recipient],
@@ -349,7 +377,7 @@ fn get_agent_without_identity_is_unauthorized() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient],
@@ -379,7 +407,7 @@ fn get_increments_access() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient.clone()],
@@ -410,7 +438,7 @@ fn get_tampered_ciphertext_fails_integrity() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient.clone()],
@@ -445,7 +473,7 @@ fn get_with_empty_checksum_allows_legacy_metadata() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient.clone()],
@@ -501,7 +529,7 @@ fn grant_agent_ok() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![creator_identity.recipient.clone()],
@@ -540,7 +568,7 @@ fn grant_human_forbidden() {
             id: id.clone(),
             owner: Owner::Human,
             created_at: Utc::now(),
-            expires_at: Utc::now() + Duration::hours(1),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
             recipients: HashSet::new(),
             created_by: creator.clone(),
             last_accessed: None,
@@ -579,7 +607,7 @@ fn grant_by_non_creator_forbidden() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator,
                 recipients,
                 recipient_keys: vec![creator_identity.recipient],
@@ -615,7 +643,7 @@ fn revoke_by_creator() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient],
@@ -644,7 +672,7 @@ fn revoke_by_noncreator() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator,
                 recipients,
                 recipient_keys: vec![identity.recipient],
@@ -676,7 +704,7 @@ fn list_all() {
             SecretValue::new(b"agent-secret".to_vec()),
             SetSecretOptions {
                 owner: Owner::Agent,
-                ttl: Duration::hours(1),
+                ttl: Some(Duration::hours(1)),
                 created_by: creator.clone(),
                 recipients,
                 recipient_keys: vec![identity.recipient],

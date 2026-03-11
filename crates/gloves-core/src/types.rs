@@ -85,8 +85,9 @@ pub struct SecretMeta {
     pub owner: Owner,
     /// Secret creation timestamp.
     pub created_at: DateTime<Utc>,
-    /// Secret expiry timestamp.
-    pub expires_at: DateTime<Utc>,
+    /// Secret expiry timestamp, when the secret is configured to expire.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
     /// Agents authorized for decryption.
     pub recipients: HashSet<AgentId>,
     /// Agent that created the secret.

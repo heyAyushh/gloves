@@ -96,7 +96,7 @@ The command arguments are syntactically valid but semantically unsupported.
 
 Common fixes:
   - Run `gloves help [topic...]` for exact argument usage.
-  - For TTL fields, use a positive day value (example: `--ttl 1`).
+  - For TTL fields, use a positive day value, `never`, or omit `--ttl` to use the configured default.
   - For piping policy errors, configure `GLOVES_GET_PIPE_ALLOWLIST` or `.gloves.toml` policy."#;
 const ERROR_EXPLANATION_E101: &str = r#"E101 invalid secret identifier
 

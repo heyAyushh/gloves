@@ -24,10 +24,12 @@ gloves --root .openclaw/secrets init
 ## 3) Create and read an agent-owned secret
 
 ```bash
-gloves --root .openclaw/secrets secrets set service/token --generate --ttl 1
+gloves --root .openclaw/secrets secrets set service/token --generate
 gloves --root .openclaw/secrets secrets get service/token
 gloves --root .openclaw/secrets list
 ```
+
+If you omit `--ttl`, `gloves` uses `defaults.secret_ttl_days`; the built-in default is 30 days. Use `--ttl never` for a non-expiring secret. The create command prints the expiry timestamp for expiring secrets and says `never expires` for long-lived ones.
 
 ## 4) Create a human-owned secret and request access
 

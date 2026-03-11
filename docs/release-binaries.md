@@ -21,6 +21,7 @@ cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features --locked
 cargo doc --no-deps
+cargo publish --dry-run --locked
 ```
 
 ## 3) Tag and push
@@ -36,6 +37,10 @@ git push origin v0.5.0
 
 ## 4) Release outputs
 
+- crates.io publishes in dependency order:
+  - `gloves-core`
+  - `gloves-config`
+  - `gloves`
 - `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `gloves-<version>-x86_64-apple-darwin.tar.gz`
 - `gloves-<version>-aarch64-apple-darwin.tar.gz`

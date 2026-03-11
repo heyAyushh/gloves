@@ -1,12 +1,12 @@
 [package]
 name = "gloves-config"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 description = "Configuration parsing and validation for gloves"
 license = "MIT"
 
 [dependencies]
-gloves-core = { path = "../gloves-core" }
+gloves-core = { path = "../gloves-core", version = "0.5.7" }
 
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.0.1"

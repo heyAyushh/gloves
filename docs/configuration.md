@@ -24,11 +24,13 @@ root = ".openclaw/secrets"
 
 [defaults]
 agent_id = "default-agent"
-secret_ttl_days = 1
+secret_ttl_days = 30
 
 [vault]
 mode = "auto"
 ```
+
+Built-in default `secret_ttl_days` is 30. Override it when you need shorter or longer retention. For one-off secrets that should not expire, use `gloves secrets set ... --ttl never`. The create command prints the resolved expiry timestamp for expiring secrets and reports `never expires` otherwise.
 
 ## Agent Path Visibility and Operations
 
