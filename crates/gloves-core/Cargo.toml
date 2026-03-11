@@ -4,6 +4,9 @@ version = "0.5.7"
 edition = "2021"
 description = "Core types and errors for gloves"
 license = "MIT"
+repository = "https://github.com/heyAyushh/gloves"
+homepage = "https://github.com/heyAyushh/gloves"
+documentation = "https://docs.rs/gloves-core"
 
 [dependencies]
 chrono = { version = "0.4.43", features = ["serde"] }

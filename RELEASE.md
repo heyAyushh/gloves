@@ -18,6 +18,8 @@ The publish workflow also enforces:
 - tag version equals `Cargo.toml` version
 - tag commit belongs to an allowed branch for that channel
 - crates publish in dependency order: `gloves-core`, `gloves-config`, then `gloves`
+- `CARGO_REGISTRY_TOKEN` must be a crates.io API token with publish rights for
+  `gloves-core`, `gloves-config`, and `gloves`
 
 ## Release Outputs
 
@@ -49,6 +51,16 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo doc --no-deps
 cargo publish --dry-run --locked
+```
+
+`cargo publish --dry-run --locked` validates the root crate once its dependency
+versions already exist on crates.io. On a fresh release, also dry-run the crates
+in publish order:
+
+```bash
+cargo publish -p gloves-core --dry-run --locked
+cargo package -p gloves-config --list
+cargo package -p gloves --list
 ```
 
 Update release files before tagging:
@@ -122,3 +134,14 @@ git push -u origin release/1.5
 ```
 
 Apply fixes on `release/1.5`, then create stable tags (`v1.5.Z`) from that branch.
+
+## Troubleshooting
+
+If the `Publish to crates.io` job fails with `403 Forbidden`, the workflow reached
+crates.io with a token that does not have publish permission for one or more
+workspace crates. Rotate or replace `CARGO_REGISTRY_TOKEN` with a crates.io token
+that can publish `gloves-core`, `gloves-config`, and `gloves`, then rerun the tag
+workflow.
+
+GitHub release assets can still succeed when crates.io publishing fails. Treat the
+release as incomplete until the crates.io publish job is green.

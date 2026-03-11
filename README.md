@@ -4,6 +4,7 @@
 [![Tests](https://github.com/heyAyushh/gloves/actions/workflows/test.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/test.yml)
 [![Coverage](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml/badge.svg)](https://github.com/heyAyushh/gloves/actions/workflows/coverage.yml)
 [![crates.io](https://img.shields.io/crates/v/gloves.svg)](https://crates.io/crates/gloves)
+[![docs.rs](https://img.shields.io/docsrs/gloves)](https://docs.rs/gloves)
 
 `gloves` is a secure secrets control plane for multi-agent runtimes and human operators.
 
@@ -20,7 +21,10 @@ It provides:
 
 Start here: [Documentation Index](docs/INDEX.md)
 
-Fast links:
+API and crate docs: [docs.rs/gloves](https://docs.rs/gloves)
+
+<details>
+<summary>Browse guides</summary>
 
 - [Quickstart](docs/quickstart.md)
 - [Architecture](ARCHITECTURE.md)
@@ -34,6 +38,8 @@ Fast links:
 - [VM Multi-Agent Operations](docs/vm-multi-agent-human-guide.md)
 - [Security Hardening](docs/security-hardening.md)
 - [Release Binaries](docs/release-binaries.md)
+
+</details>
 
 ## Command Model
 
@@ -97,6 +103,9 @@ Current plugin reads keep secret values out of the MCP result body and inject th
 curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash
 ```
 
+<details>
+<summary>Other install options</summary>
+
 ### From crates.io
 
 ```bash
@@ -110,6 +119,8 @@ git clone https://github.com/openclaw/gloves
 cd gloves
 cargo install --path .
 ```
+
+</details>
 
 ## Security and Policy
 

@@ -12,7 +12,8 @@ Back to docs map: [Documentation Index](INDEX.md)
   - alpha tags: `vX.Y.Z-alpha.N` from `canary`
 - `Cargo.toml` version must match tag version (without `v`)
 - required workflows (`CI`, `Tests`, `Coverage`) must pass
-- `CARGO_REGISTRY_TOKEN` must be configured
+- `CARGO_REGISTRY_TOKEN` must be configured with crates.io publish rights for
+  `gloves-core`, `gloves-config`, and `gloves`
 
 ## 2) Local verification
 
@@ -22,6 +23,14 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features --locked
 cargo doc --no-deps
 cargo publish --dry-run --locked
+```
+
+For a fresh version, also validate the publish chain directly:
+
+```bash
+cargo publish -p gloves-core --dry-run --locked
+cargo package -p gloves-config --list
+cargo package -p gloves --list
 ```
 
 ## 3) Tag and push
@@ -53,6 +62,16 @@ git push origin v0.5.0
 curl -fsSL https://raw.githubusercontent.com/openclaw/gloves/main/scripts/setup-openclaw.sh | bash -s -- --release-ref vX.Y.Z
 gloves --version
 ```
+
+## 6) Troubleshooting
+
+If the `Publish to crates.io` job fails with `403 Forbidden`, the workflow token
+exists but does not have permission to publish the crate that failed. Update
+`CARGO_REGISTRY_TOKEN` with a crates.io token that can publish all three workspace
+crates, then rerun the release.
+
+If binary builds and the GitHub release succeed while crates.io publish fails, the
+release is only partially complete.
 
 ## Related Docs
 
