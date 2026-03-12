@@ -130,7 +130,49 @@ gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
   vault unmount agent_data
 ```
 
-## 4) Sidecar Daemon
+## 4) OpenClaw Gateway Deployment
+
+For OpenClaw, use the packaged `@openclaw/gloves` plugin and let it start `gloves-mcp` over stdio. Keep the `gloves` store, identities, and session token on the host side. Do not bind a daemon socket or host binary directories into the sandbox.
+
+Example OpenClaw config shape:
+
+```json5
+{
+  plugins: {
+    entries: {
+      gloves: {
+        enabled: true,
+        config: {
+          root: "~/.openclaw/secrets",
+          mcpConfigPath: "~/.config/gloves/gloves.toml",
+          tokenPath: "~/.openclaw/gloves/session-token",
+          glovesMcpBin: "gloves-mcp",
+          injectMode: "env",
+          timeoutMs: 10000
+        }
+      }
+    }
+  },
+  agents: {
+    relationships: {
+      tools: {
+        alsoAllow: ["group:plugins:gloves"]
+      }
+    }
+  }
+}
+```
+
+Operational expectations:
+
+- install `@openclaw/gloves` on the Gateway host
+- keep `gloves-mcp` available on the host `PATH` or provide `glovesMcpBin`
+- allow the plugin tool group only for the agents that should read or write secrets
+- prefer env or tmpfs injection, not project-tree writes
+
+## 5) Host Automation Daemon
+
+Use the loopback daemon only for direct host-side automation or other runtimes that need a long-lived local broker.
 
 Preflight:
 
@@ -144,7 +186,7 @@ Run:
 gloves --config /etc/gloves/prod.gloves.toml daemon --bind 127.0.0.1:7788
 ```
 
-## 5) Operational Cadence
+## 6) Operational Cadence
 
 Per deploy:
 
@@ -167,12 +209,13 @@ gloves --config /etc/gloves/prod.gloves.toml access paths --agent agent-main --j
 gloves --config /etc/gloves/prod.gloves.toml access paths --agent human-ops --json
 ```
 
-## 6) Checklist
+## 7) Checklist
 
 - explicit `--agent` everywhere
 - least-privilege ACL per role
 - short TTL for temporary secrets
-- loopback daemon bind only
+- OpenClaw uses plugin tools plus stdio
+- host automation keeps daemon bind loopback-only
 - periodic verify and audit review
 
 ## Related Docs

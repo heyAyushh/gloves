@@ -30,7 +30,7 @@ async function main() {
   const root = requiredEnv("GLOVES_ROOT");
   const mcpConfigPath = requiredEnv("GLOVES_MCP_CONFIG");
   const tokenPath = requiredEnv("GLOVES_TOKEN_PATH");
-  const socketPath = requiredEnv("GLOVES_SOCKET");
+  const glovesMcpBin = process.env.GLOVES_MCP_BIN || "/usr/local/bin/gloves-mcp";
   const artifactsDir = requiredEnv("GLOVES_ARTIFACTS_DIR");
   const injectAs = process.env.GLOVES_INJECT_AS || DEFAULT_INJECT_ENV;
 
@@ -46,7 +46,7 @@ async function main() {
     root,
     mcpConfigPath,
     tokenPath,
-    socketPath,
+    glovesMcpBin,
     injectMode: "both",
     tmpfsPath: TMPFS_PATH,
   });

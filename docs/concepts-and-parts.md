@@ -15,7 +15,8 @@ This guide explains the runtime model for `gloves`.
 - Grant: explicit sharing of an existing agent-owned secret with another agent.
 - Audit event: immutable event record for operations and security-significant actions.
 - Vault: encrypted filesystem workflow (`vault init/mount/exec/unmount`).
-- Daemon: loopback TCP sidecar exposing command execution API.
+- Daemon: loopback TCP sidecar exposing command execution API for direct host-side automation.
+- MCP bridge: `gloves-mcp`, the machine-facing interface used by the OpenClaw plugin flow.
 
 ## Runtime Parts
 
@@ -51,7 +52,7 @@ Default root is `.openclaw/secrets` unless overridden with `--root` or config.
 
 ```mermaid
 flowchart LR
-    A["Agent or Human caller"] --> B["gloves CLI or TUI"]
+    A["Agent or Human caller"] --> B["gloves CLI, TUI, or OpenClaw plugin"]
     B --> C["Identity and policy checks"]
     C --> D["Secrets / Requests / Vault execution"]
     D --> E["Audit event"]

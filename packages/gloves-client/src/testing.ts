@@ -7,7 +7,7 @@ export type GlovesFixture = {
   root: string;
   mcpConfigPath: string;
   tokenPath: string;
-  socketPath: string;
+  socketPath?: string;
   glovesBin: string;
   glovesMcpBin: string;
   secretPath: string;
@@ -28,6 +28,8 @@ const REPO_ROOT = resolve(import.meta.dir, "../../..");
 const GLOVES_CLIENT_PACKAGE_ROOT = resolve(import.meta.dir, "..");
 const FIXTURE_WAIT_TIMEOUT_MS = 5_000;
 const FIXTURE_WAIT_INTERVAL_MS = 25;
+const SOCKET_TRANSPORT = "socket";
+const STDIO_TRANSPORT = "stdio";
 
 let cachedBinaries: BinaryPaths | null = null;
 let nativeAddonReady = false;
@@ -52,13 +54,17 @@ export function ensureGlovesBinaries(): BinaryPaths {
   return cachedBinaries;
 }
 
-export function createGlovesFixture(options?: { approvalChannel?: string }): GlovesFixture {
+export function createGlovesFixture(options?: {
+  approvalChannel?: string;
+  transport?: typeof SOCKET_TRANSPORT | typeof STDIO_TRANSPORT;
+}): GlovesFixture {
   const binaries = ensureGlovesBinaries();
   const tempRoot = mkdtempSync(join(tmpdir(), "gloves-bun-"));
   const root = join(tempRoot, "root");
   const mcpConfigPath = join(tempRoot, GLOVES_CONFIG_NAME);
   const tokenPath = join(tempRoot, "session-token");
-  const socketPath = join(tempRoot, "gloves.sock");
+  const transport = options?.transport ?? SOCKET_TRANSPORT;
+  const socketPath = transport === SOCKET_TRANSPORT ? join(tempRoot, "gloves.sock") : undefined;
   mkdirSync(root, { recursive: true });
 
   runGlovesCommand(binaries.glovesBin, root, ["set-identity", "--agent", "devy"]);
@@ -79,8 +85,12 @@ export function createGlovesFixture(options?: { approvalChannel?: string }): Glo
     socketPath,
     options?.approvalChannel ?? DEFAULT_APPROVAL_CHANNEL,
   );
-  const daemon = startGlovesDaemon(binaries.glovesMcpBin, mcpConfigPath);
-  waitForDaemonStartup(tokenPath, socketPath);
+  const daemon = transport === SOCKET_TRANSPORT
+    ? startGlovesDaemon(binaries.glovesMcpBin, mcpConfigPath)
+    : null;
+  if (socketPath) {
+    waitForDaemonStartup(tokenPath, socketPath);
+  }
 
   return {
     root,
@@ -92,7 +102,7 @@ export function createGlovesFixture(options?: { approvalChannel?: string }): Glo
     secretPath: SECRET_PATH,
     secretValue: SECRET_VALUE,
     cleanup() {
-      daemon.kill("SIGKILL");
+      daemon?.kill("SIGKILL");
       rmSync(tempRoot, { recursive: true, force: true });
     },
   };
@@ -132,13 +142,15 @@ function writeMcpConfig(
   root: string,
   configPath: string,
   tokenPath: string,
-  socketPath: string,
+  socketPath: string | undefined,
   approvalChannel: string,
 ): void {
+  const socketLine = socketPath
+    ? `socket_path = ${JSON.stringify(socketPath)}\n`
+    : "";
   const contents = `[daemon]
 session_token_path = ${JSON.stringify(tokenPath)}
-socket_path = ${JSON.stringify(socketPath)}
-[daemon.approval]
+${socketLine}[daemon.approval]
 default_channel = ${JSON.stringify(approvalChannel)}
 timeout_seconds = 5
 [store]

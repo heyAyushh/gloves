@@ -61,6 +61,25 @@ describe("@gloves/client", () => {
     expect(secret.approvalStatus).toBe("auto");
   });
 
+  test("uses stdio MCP sessions when socketPath is omitted", async () => {
+    fixture = createGlovesFixture({ transport: "stdio" });
+    const client = await GlovesClient.connect({
+      root: fixture.root,
+      agentId: "devy",
+      mcpConfigPath: fixture.mcpConfigPath,
+      tokenPath: fixture.tokenPath,
+      glovesBin: "/definitely-unused-gloves-binary",
+      glovesMcpBin: fixture.glovesMcpBin,
+    });
+
+    const listed = await client.list("agents/devy");
+    expect(listed).toContain(fixture.secretPath);
+
+    const secret = await client.get(fixture.secretPath);
+    expect(secret.value).toBe(fixture.secretValue);
+    expect(secret.metadata.name).toBe(fixture.secretPath);
+  });
+
   test("stores secrets via env-backed MCP writes", async () => {
     fixture = createGlovesFixture();
     const client = await GlovesClient.connect({

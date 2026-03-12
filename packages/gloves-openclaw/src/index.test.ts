@@ -186,6 +186,41 @@ describe("@gloves/openclaw", () => {
     ).rejects.toThrow("MISSING_SECRET");
   });
 
+  test("uses stdio MCP sessions when socketPath is omitted from plugin config", async () => {
+    fixture = createGlovesFixture({ transport: "stdio" });
+    const tools = new Map<string, PluginToolDefinition>();
+    const envSet = mock(() => {});
+
+    const plugin = glovesPlugin({
+      root: fixture.root,
+      mcpConfigPath: fixture.mcpConfigPath,
+      tokenPath: fixture.tokenPath,
+      glovesMcpBin: fixture.glovesMcpBin,
+      injectMode: "env",
+    });
+
+    const api: PluginAPI = {
+      agent: { id: "devy" },
+      sandbox: {
+        env: { set: envSet, get() { return undefined; } },
+      },
+      registerTool(name, definition) {
+        tools.set(name, definition);
+      },
+      onShutdown() {},
+    };
+
+    await plugin.init(api);
+
+    const getResult = await tools.get("gloves_get")!.handler({
+      path: fixture.secretPath,
+      inject_as: "ANTHROPIC_API_KEY",
+    });
+
+    expect(envSet).toHaveBeenCalledWith("ANTHROPIC_API_KEY", fixture.secretValue);
+    expect(getResult.injected).toBe(true);
+  });
+
   test("approves a pending gloves_get request through the plugin tool surface", async () => {
     fixture = createGlovesFixture({ approvalChannel: "tty" });
     const tools = new Map<string, PluginToolDefinition>();

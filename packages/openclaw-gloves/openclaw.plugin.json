@@ -1,0 +1,66 @@
+{
+  "id": "gloves",
+  "name": "Gloves",
+  "description": "Brokered secret access for OpenClaw agents via host-side gloves-mcp sessions.",
+  "capabilities": {
+    "tools": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "root",
+      "mcpConfigPath",
+      "tokenPath",
+      "injectMode"
+    ],
+    "properties": {
+      "root": {
+        "type": "string",
+        "description": "Host path to the gloves runtime root."
+      },
+      "mcpConfigPath": {
+        "type": "string",
+        "description": "Host path to the gloves-mcp TOML config file."
+      },
+      "tokenPath": {
+        "type": "string",
+        "description": "Host path where gloves-mcp writes the session token."
+      },
+      "glovesMcpBin": {
+        "type": "string",
+        "description": "Optional absolute host path to the gloves-mcp binary when it is not already on the Gateway PATH."
+      },
+      "glovesBin": {
+        "type": "string",
+        "description": "Optional gloves CLI path retained for compatibility."
+      },
+      "socketPath": {
+        "type": "string",
+        "description": "Optional legacy Unix socket path. Omit to use the recommended stdio launch path."
+      },
+      "cwd": {
+        "type": "string",
+        "description": "Optional working directory for spawned gloves-mcp sessions."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "minimum": 1,
+        "description": "Per-request timeout in milliseconds."
+      },
+      "injectMode": {
+        "type": "string",
+        "enum": [
+          "env",
+          "tmpfs",
+          "both"
+        ],
+        "description": "How decrypted values are injected into the sandbox."
+      },
+      "tmpfsPath": {
+        "type": "string",
+        "description": "Required when injectMode includes tmpfs."
+      }
+    }
+  }
+}

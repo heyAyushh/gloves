@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.5.8
+
+### Patch Changes
+
+- Aligned the recommended OpenClaw integration with current plugin runtime behavior:
+  - Added `@openclaw/gloves` plugin packaging metadata and generic reference config for host-side plugin tools.
+  - Updated the documented OpenClaw path to launch `gloves-mcp` over stdio instead of bind-mounted sandbox sockets.
+  - Kept Unix-socket transport available as a compatibility path for non-OpenClaw runtimes.
+- Fixed `gloves-mcp` stdio sessions so secret notifications are emitted correctly when `socketPath` is omitted.
+- Reworked the Docker end-to-end harness to exercise the plugin stdio flow instead of the legacy daemon socket path.
+- Refreshed architecture, security, and operator docs to reflect the supported OpenClaw deployment model and remove user-specific host paths.
+- Added regression coverage for stdio-only MCP sessions, plugin config without `socketPath`, updated OpenClaw artifacts, and the modernized Docker harness.
+
 ## 0.5.7
 
 ### Minor Changes

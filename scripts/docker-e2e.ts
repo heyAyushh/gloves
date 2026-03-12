@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
 import {
-  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -12,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { join, resolve } from "node:path";
 
 import { ensureGlovesBinaries } from "../packages/gloves-client/src/testing";
@@ -23,9 +22,6 @@ type DockerFixture = {
   runtimeDir: string;
   artifactsDir: string;
   mcpConfigPath: string;
-  tokenPath: string;
-  socketPath: string;
-  daemonLogPath: string;
   agentStdoutPath: string;
   agentStderrPath: string;
   ownSecretPath: string;
@@ -42,8 +38,6 @@ type ScriptOptions = {
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const TEMP_ROOT = join(REPO_ROOT, ".tmp");
 const IMAGE_TAG_DEFAULT = "gloves-agent-sandbox:e2e";
-const SOCKET_WAIT_TIMEOUT_MS = 5_000;
-const SOCKET_WAIT_INTERVAL_MS = 25;
 const DOCKER_TIMEOUT_MS = 180_000;
 const OWN_SECRET_PATH = "agents/devy/api-keys/anthropic";
 const OWN_SECRET_VALUE = "sk-ant-api03-docker-e2e";
@@ -131,9 +125,6 @@ function createFixture(glovesBin: string): DockerFixture {
   const runtimeDir = join(tempDir, "runtime");
   const artifactsDir = join(tempDir, "artifacts");
   const mcpConfigPath = join(runtimeDir, "gloves.toml");
-  const tokenPath = join(runtimeDir, "session-token");
-  const socketPath = join(runtimeDir, "daemon.sock");
-  const daemonLogPath = join(tempDir, "daemon.stderr.log");
   const agentStdoutPath = join(tempDir, "agent.stdout.log");
   const agentStderrPath = join(tempDir, "agent.stderr.log");
 
@@ -177,7 +168,6 @@ function createFixture(glovesBin: string): DockerFixture {
     [
       "[daemon]",
       'session_token_path = "/run/gloves/session-token"',
-      'socket_path = "/run/gloves/daemon.sock"',
       "[daemon.approval]",
       'default_channel = "auto"',
       "timeout_seconds = 5",
@@ -197,9 +187,6 @@ function createFixture(glovesBin: string): DockerFixture {
     runtimeDir,
     artifactsDir,
     mcpConfigPath,
-    tokenPath,
-    socketPath,
-    daemonLogPath,
     agentStdoutPath,
     agentStderrPath,
     ownSecretPath: OWN_SECRET_PATH,
@@ -227,58 +214,6 @@ function dockerGid(): number {
   return typeof process.getgid === "function" ? process.getgid() : 1000;
 }
 
-function startDaemonContainer(daemonImageTag: string, fixture: DockerFixture): string {
-  const containerName = `gloves-daemon-${Date.now()}`;
-  const result = runChecked("docker", [
-    "run",
-    "--detach",
-    "--name",
-    containerName,
-    "--network=none",
-    "--read-only",
-    "--cap-drop=ALL",
-    "--security-opt=no-new-privileges:true",
-    "--tmpfs",
-    "/tmp:size=64M,noexec,nosuid,nodev",
-    "--user",
-    dockerUser(),
-    "--volume",
-    `${fixture.root}:/data/root`,
-    "--volume",
-    `${fixture.runtimeDir}:/run/gloves`,
-    daemonImageTag,
-    "--config",
-    "/run/gloves/gloves.toml",
-  ]);
-  return result.stdout.trim();
-}
-
-function captureDaemonLogs(containerName: string, daemonLogPath: string) {
-  const result = runChecked("docker", ["logs", containerName], { allowFailure: true });
-  writeFileSync(daemonLogPath, `${result.stdout ?? ""}${result.stderr ?? ""}`);
-}
-
-function waitForDaemon(tokenPath: string, socketPath: string) {
-  const deadline = Date.now() + SOCKET_WAIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (readToken(tokenPath) && existsSync(socketPath)) {
-      return;
-    }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, SOCKET_WAIT_INTERVAL_MS);
-  }
-
-  throw new Error(`timed out waiting for daemon startup at ${socketPath}`);
-}
-
-function readToken(tokenPath: string): string | null {
-  try {
-    const token = readFileSync(tokenPath, "utf8").trim();
-    return token.length > 0 ? token : null;
-  } catch {
-    return null;
-  }
-}
-
 function runSandboxContainer(imageTag: string, fixture: DockerFixture) {
   const baseArgs = [
     "run",
@@ -298,13 +233,13 @@ function runSandboxContainer(imageTag: string, fixture: DockerFixture) {
     "--env",
     "TMPDIR=/tmp",
     "--env",
-    "GLOVES_ROOT=/unused-root",
+    "GLOVES_ROOT=/data/root",
     "--env",
     "GLOVES_MCP_CONFIG=/run/gloves/gloves.toml",
     "--env",
     "GLOVES_TOKEN_PATH=/run/gloves/session-token",
     "--env",
-    "GLOVES_SOCKET=/run/gloves/daemon.sock",
+    "GLOVES_MCP_BIN=/usr/local/bin/gloves-mcp",
     "--env",
     "GLOVES_AGENT_ID=devy",
     "--env",
@@ -315,6 +250,8 @@ function runSandboxContainer(imageTag: string, fixture: DockerFixture) {
     "GLOVES_INJECT_AS=ANTHROPIC_API_KEY",
     "--env",
     "GLOVES_ARTIFACTS_DIR=/artifacts",
+    "--volume",
+    `${fixture.root}:/data/root`,
     "--volume",
     `${fixture.runtimeDir}:/run/gloves`,
     "--volume",
@@ -349,7 +286,6 @@ function runSandboxContainer(imageTag: string, fixture: DockerFixture) {
 
 function assertNoSecretLeaks(fixture: DockerFixture) {
   const filesToScan = [
-    fixture.daemonLogPath,
     fixture.agentStdoutPath,
     fixture.agentStderrPath,
     join(fixture.artifactsDir, "conversation.json"),
@@ -452,7 +388,7 @@ function printSummary(fixture: DockerFixture) {
     fixture: fixture.tempDir,
     artifacts: fixture.artifactsDir,
     checks: [
-      "sandboxed plugin read succeeded",
+      "plugin stdio read succeeded",
       "cross-agent access denied",
       "tool responses remained redacted",
       "rotation preserved access",
@@ -462,15 +398,7 @@ function printSummary(fixture: DockerFixture) {
   process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
 }
 
-function cleanup(
-  fixture: DockerFixture,
-  daemonContainerName: string | null,
-  keepTemp: boolean,
-) {
-  if (daemonContainerName) {
-    captureDaemonLogs(daemonContainerName, fixture.daemonLogPath);
-    runChecked("docker", ["rm", "--force", daemonContainerName], { allowFailure: true });
-  }
+function cleanup(fixture: DockerFixture, keepTemp: boolean) {
   if (!keepTemp) {
     rmSync(fixture.tempDir, { recursive: true, force: true });
   }
@@ -478,29 +406,19 @@ function cleanup(
 
 try {
   const options = parseArgs(Bun.argv.slice(2));
-  const daemonImageTag = `${options.imageTag}-daemon`;
   const { glovesBin } = ensureGlovesBinaries();
   assertDockerDaemonAvailable();
-  buildDockerImage("docker/gloves-daemon.Dockerfile", daemonImageTag);
   buildDockerImage("docker/agent-sandbox.Dockerfile", options.imageTag);
 
   const fixture = createFixture(glovesBin);
-  let daemonContainerName: string | null = null;
   try {
-    daemonContainerName = startDaemonContainer(daemonImageTag, fixture);
-    waitForDaemon(fixture.tokenPath, fixture.socketPath);
     runSandboxContainer(options.imageTag, fixture);
-    if (daemonContainerName) {
-      captureDaemonLogs(daemonContainerName, fixture.daemonLogPath);
-      runChecked("docker", ["rm", "--force", daemonContainerName], { allowFailure: true });
-      daemonContainerName = null;
-    }
     assertContainerArtifacts(fixture);
     assertNoSecretLeaks(fixture);
     assertRevokedIdentityCannotDecrypt(glovesBin, fixture);
     printSummary(fixture);
   } finally {
-    cleanup(fixture, daemonContainerName, options.keepTemp);
+    cleanup(fixture, options.keepTemp);
   }
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);

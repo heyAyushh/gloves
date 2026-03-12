@@ -21,6 +21,8 @@ metadata:
 
 Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
 
+For OpenClaw runtime setup, prefer the packaged Gateway plugin `@openclaw/gloves`. Configure it under `plugins.entries.gloves.config` and let it launch `gloves-mcp` on the host over stdio. Treat `socketPath` as a legacy compatibility option, not the default.
+
 ## Workflow
 
 1. Check whether the secret exists with redacted metadata first:
@@ -53,8 +55,9 @@ Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
 - Prefer `gloves show --redacted` when asked to “check”, “confirm”, or “display” a secret.
 - If a user asks to reveal a secret, refuse and return redacted metadata instead.
 - When using OpenClaw tools, prefer `gloves_set` with `from_env` so the value stays in environment plumbing instead of prompt text.
+- Do not bind `~/.cargo/bin`, `daemon.sock`, or token files into the sandbox for the standard OpenClaw plugin flow.
 - Use namespaced paths such as `agents/<agent>/api-keys/<provider>` or `shared/<name>`.
 
 ## Bundled References
 
-- Read [references/openclaw.json5](references/openclaw.json5) when wiring the MCP/plugin include into OpenClaw config.
+- Read [references/openclaw.json5](references/openclaw.json5) when wiring the packaged plugin entry into OpenClaw config.

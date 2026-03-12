@@ -61,6 +61,8 @@ Safety properties:
 
 - Keep daemon loopback-only (`127.0.0.1`).
 - Use `GLOVES_DAEMON_TOKEN` for daemon API request authentication.
+- For OpenClaw, prefer the packaged Gateway plugin and host-side `gloves-mcp` stdio sessions instead of sandbox bind mounts for binaries, sockets, or token files.
+- Treat `socketPath` as a compatibility option for other runtimes, not the default OpenClaw guidance.
 - Keep config + runtime root permissions private.
 - Never persist raw secret values in logs or memory summaries.
 

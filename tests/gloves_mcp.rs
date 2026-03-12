@@ -511,10 +511,15 @@ impl McpSession {
     }
 
     fn recv(&mut self) -> Value {
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).unwrap();
-        assert!(!line.is_empty(), "expected JSON-RPC response");
-        serde_json::from_str(line.trim_end()).unwrap()
+        loop {
+            let mut line = String::new();
+            self.stdout.read_line(&mut line).unwrap();
+            assert!(!line.is_empty(), "expected JSON-RPC response");
+            let payload: Value = serde_json::from_str(line.trim_end()).unwrap();
+            if payload.get("method").is_none() {
+                return payload;
+            }
+        }
     }
 
     fn initialize(&mut self, token: &str, agent_id: &str) -> Value {

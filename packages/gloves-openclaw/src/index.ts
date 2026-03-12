@@ -38,7 +38,7 @@ export interface OpenClawPlugin {
 export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin {
   return {
     name: "gloves",
-    version: "0.1.0",
+    version: "0.1.1",
     async init(api: PluginAPI) {
       validatePluginConfig(config, api);
       const client = await GlovesClient.connect({

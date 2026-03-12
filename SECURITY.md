@@ -58,16 +58,18 @@ The main threats addressed today are:
 
 ## Operational Guidance
 
+- For OpenClaw, prefer the packaged Gateway plugin (`@openclaw/gloves`) over direct MCP server wiring in agent config.
+- Let the plugin launch `gloves-mcp` on the host over stdio; omit `socketPath` unless you are keeping a legacy unix-socket deployment.
 - Prefer `injectMode: "env"` or `injectMode: "both"` only when the sandbox lifecycle is tightly controlled.
 - Use tmpfs injection for file-based secrets, never the writable project tree.
-- Keep the store root, identities, and session token paths outside any sandbox bind mount except the explicit token file.
+- Keep the store root, identities, session token path, and `gloves-mcp` binary on the host side instead of bind-mounting them into the sandbox.
 - Rotate identities after operator turnover or suspected exposure.
+- Use the Docker harness as a regression check for redaction, cross-agent denial, and rotation safety in the stdio plugin flow.
 
 ## Current Gaps
 
 The following protections are not complete yet:
 
-- A native side channel that completely removes the local CLI fallback during plugin reads.
 - The production Docker end-to-end suite described in the implementation plan.
 
 Those gaps mean the project already enforces the brokered model at the tool-result boundary, but it is not yet at the final production architecture described in the long-form spec.

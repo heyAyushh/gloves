@@ -636,7 +636,7 @@ async fn run_stdio_server(
     session_token: String,
     fallback_agent: Option<String>,
 ) -> Result<()> {
-    let server = GlovesMcpServer::new(config, session_token, fallback_agent, false);
+    let server = GlovesMcpServer::new(config, session_token, fallback_agent, true);
     serve_rmcp_connection(server, stdio())
         .await
         .map_err(map_rmcp_error)

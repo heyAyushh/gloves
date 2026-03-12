@@ -24,6 +24,7 @@ This is the canonical documentation map for `gloves`.
   - [VM Multi-Agent Operations](vm-multi-agent-human-guide.md)
   - [Security Hardening](security-hardening.md)
   - [Release Binaries](release-binaries.md)
+  - [Architecture](../ARCHITECTURE.md)
 
 ## Core Guides
 

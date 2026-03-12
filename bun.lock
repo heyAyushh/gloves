@@ -7,15 +7,15 @@
     },
     "packages/gloves-adapter-core": {
       "name": "@gloves/adapter-core",
-      "version": "0.1.0",
+      "version": "0.1.1",
     },
     "packages/gloves-client": {
       "name": "@gloves/client",
-      "version": "0.1.0",
+      "version": "0.1.1",
     },
     "packages/gloves-openclaw": {
       "name": "@gloves/openclaw",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@gloves/adapter-core": "workspace:*",
         "@gloves/client": "workspace:*",
@@ -23,7 +23,7 @@
     },
     "packages/openclaw-gloves": {
       "name": "@openclaw/gloves",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@gloves/openclaw": "workspace:*",
       },

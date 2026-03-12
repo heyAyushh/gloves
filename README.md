@@ -89,11 +89,23 @@ The repository now includes:
 - `gloves-mcp` for redacted MCP tool access
 - `@gloves/client` as the Bun/TypeScript bridge
 - `@gloves/adapter-core` as the shared adapter helper package
-- `@gloves/openclaw` as the OpenClaw adapter package
-- `@openclaw/gloves` as a deprecated compatibility alias for existing consumers
+- `@gloves/openclaw` as the OpenClaw adapter implementation
+- `@openclaw/gloves` as the packaged OpenClaw Gateway plugin
 - `integrations/openclaw/gloves.json5` as the reference config snippet
 
-Current plugin reads keep secret values out of the MCP result body and inject them into the sandbox environment or tmpfs instead.
+Recommended runtime path:
+
+- install `@openclaw/gloves` on the Gateway host
+- let the plugin launch host-local `gloves-mcp` sessions over stdio
+- allow the plugin tool group per agent with `group:plugins:gloves`
+
+Current plugin reads keep secret values out of the MCP result body and inject them into the sandbox environment or tmpfs instead. No sandbox bind mount to `~/.cargo/bin`, a daemon socket, or the token path is required for the standard OpenClaw setup.
+
+Compatibility transports:
+
+- `socketPath` remains available for non-OpenClaw or legacy runtime integrations
+- `gloves daemon` remains available for direct host-side automation
+- neither transport is the preferred OpenClaw deployment path
 
 ## Install
 
@@ -151,6 +163,8 @@ When Docker is available, the OpenClaw sandbox harness can be exercised with:
 ```bash
 bun run docker:e2e
 ```
+
+That harness now models the recommended OpenClaw flow: a plugin running in the sandbox image launches bundled `gloves-mcp` over stdio and keeps tool responses redacted.
 
 ## License and Changelog
 
