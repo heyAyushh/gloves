@@ -1,17 +1,25 @@
-import {
-  defaultSecretEnvName,
-  injectSecretValue,
-  resolveSecretValueFromSources,
-  validateSecretInjectionConfig,
-  type SecretEnvironment,
-  type SecretInjectMode,
-} from "@gloves/adapter-core";
-import { GlovesClient, type GlovesClientConfig } from "@gloves/client";
+import { GlovesClient, type GlovesClientConfig } from "@gloves/mcp-client";
 
-export interface GlovesPluginConfig extends Omit<GlovesClientConfig, "agentId"> {
+export const id = "gloves";
+
+export type SecretInjectMode = "env" | "tmpfs" | "both";
+
+export interface SecretInjectionConfig {
   injectMode: SecretInjectMode;
   tmpfsPath?: string;
 }
+
+export interface SecretEnvironment {
+  set: (name: string, value: string) => void;
+  get?: (name: string) => string | undefined;
+}
+
+export interface SecretInjectionSink {
+  env: SecretEnvironment;
+  writeFile?: (path: string, contents: string, options?: { mode?: number }) => Promise<void> | void;
+}
+
+export interface GlovesPluginConfig extends Omit<GlovesClientConfig, "agentId">, SecretInjectionConfig {}
 
 export interface PluginToolDefinition {
   description: string;
@@ -21,10 +29,7 @@ export interface PluginToolDefinition {
 
 export interface PluginAPI {
   agent: { id: string };
-  sandbox: {
-    env: SecretEnvironment;
-    writeFile?: (path: string, contents: string, options?: { mode?: number }) => Promise<void> | void;
-  };
+  sandbox: SecretInjectionSink;
   registerTool: (name: string, definition: PluginToolDefinition) => void;
   onShutdown: (callback: () => void | Promise<void>) => void;
 }
@@ -38,7 +43,7 @@ export interface OpenClawPlugin {
 export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin {
   return {
     name: "gloves",
-    version: "0.1.1",
+    version: "0.1.2",
     async init(api: PluginAPI) {
       validatePluginConfig(config, api);
       const client = await GlovesClient.connect({
@@ -55,7 +60,7 @@ export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin
         handler: async ({ path, inject_as }) => {
           const secretPath = expectString(path, "path");
           const result = await client.get(secretPath);
-          const injection = await injectSecretValue(
+          const delivery = await deliverSecretValue(
             secretPath,
             result.value,
             typeof inject_as === "string" ? inject_as : undefined,
@@ -66,9 +71,9 @@ export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin
           return {
             success: true,
             injected: true,
-            inject_target: injection.injectTarget,
-            inject_method: injection.injectMethod,
-            message: `Secret '${secretPath}' (${result.metadata.length} chars) injected as ${injection.injectTarget}`,
+            inject_target: delivery.injectTarget,
+            inject_method: delivery.injectMethod,
+            message: `Secret '${secretPath}' (${result.metadata.length} chars) injected as ${delivery.injectTarget}`,
           };
         },
       });
@@ -182,6 +187,81 @@ export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin
   };
 }
 
+export function defaultSecretTargetName(secretPath: string): string {
+  return secretPath
+    .split("/")
+    .at(-1)!
+    .replace(/[^A-Za-z0-9]/g, "_")
+    .toUpperCase();
+}
+
+export function resolveSecretValueFromSources(
+  envName: string,
+  sources: {
+    readEnvironment?: (name: string) => string | undefined;
+    readProcessEnvironment?: (name: string) => string | undefined;
+  },
+): string {
+  const environmentValue = sources.readEnvironment?.(envName);
+  if (typeof environmentValue === "string") {
+    return environmentValue;
+  }
+
+  const processValue = sources.readProcessEnvironment?.(envName);
+  if (typeof processValue === "string") {
+    return processValue;
+  }
+
+  throw new Error(
+    `secret source '${envName}' is not available via environment or process sources`,
+  );
+}
+
+export function validateSecretDeliveryConfig(
+  config: SecretInjectionConfig,
+  sink: Pick<SecretInjectionSink, "writeFile">,
+): void {
+  if (config.injectMode === "tmpfs" || config.injectMode === "both") {
+    if (!config.tmpfsPath) {
+      throw new Error("tmpfs delivery requires tmpfsPath at plugin startup");
+    }
+    if (!sink.writeFile) {
+      throw new Error("tmpfs delivery requires api.sandbox.writeFile at plugin startup");
+    }
+  }
+}
+
+export async function deliverSecretValue(
+  secretPath: string,
+  secretValue: string,
+  requestedTargetName: string | undefined,
+  config: SecretInjectionConfig,
+  sink: SecretInjectionSink,
+): Promise<{ injectTarget: string; injectMethod: SecretInjectMode }> {
+  validateSecretDeliveryConfig(config, sink);
+
+  const targetName = requestedTargetName && requestedTargetName.length > 0
+    ? requestedTargetName
+    : defaultSecretTargetName(secretPath);
+
+  if (config.injectMode === "env" || config.injectMode === "both") {
+    sink.env.set(targetName, secretValue);
+  }
+
+  if (config.injectMode === "tmpfs" || config.injectMode === "both") {
+    await sink.writeFile!(
+      `${config.tmpfsPath}/${targetName}`,
+      secretValue,
+      { mode: 0o600 },
+    );
+  }
+
+  return {
+    injectTarget: targetName,
+    injectMethod: config.injectMode,
+  };
+}
+
 function expectString(value: unknown, fieldName: string): string {
   if (typeof value !== "string" || value.length === 0) {
     throw new Error(`tool argument '${fieldName}' must be a non-empty string`);
@@ -198,17 +278,5 @@ function expectDecision(value: unknown): "approve" | "deny" {
 }
 
 function validatePluginConfig(config: GlovesPluginConfig, api: PluginAPI): void {
-  try {
-    validateSecretInjectionConfig(config, api.sandbox);
-  } catch (error) {
-    if (error instanceof Error) {
-      if (error.message.includes("tmpfsPath")) {
-        throw new Error("tmpfs injection requires tmpfsPath at plugin startup");
-      }
-      if (error.message.includes("file writer")) {
-        throw new Error("tmpfs injection requires api.sandbox.writeFile at plugin startup");
-      }
-    }
-    throw error;
-  }
+  validateSecretDeliveryConfig(config, api.sandbox);
 }

@@ -610,7 +610,7 @@ fn initialize_request(config: &NativeClientConfig, session_token: String) -> Val
                 "tools": { "listChanged": true }
             },
             "clientInfo": {
-                "name": "@gloves/client-native",
+                "name": "@gloves/mcp-client-native",
                 "version": "0.1.0"
             },
             "_meta": {

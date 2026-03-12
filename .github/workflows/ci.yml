@@ -33,14 +33,25 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.8
+
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Install workspace dependencies
+        run: bun install --frozen-lockfile
 
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build Bun packages
+        run: bun run build
 
       - name: Build docs
         run: cargo doc --no-deps

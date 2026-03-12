@@ -307,8 +307,8 @@ class McpSession {
           },
         },
         clientInfo: {
-          name: "@gloves/client",
-          version: "0.1.1",
+          name: "@gloves/mcp-client",
+          version: "0.1.2",
         },
         _meta: {
           sessionToken: token,
@@ -365,8 +365,8 @@ class McpSession {
           },
         },
         clientInfo: {
-          name: "@gloves/client",
-          version: "0.1.1",
+          name: "@gloves/mcp-client",
+          version: "0.1.2",
         },
         _meta: {
           sessionToken: token,

@@ -132,7 +132,7 @@ gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
 
 ## 4) OpenClaw Gateway Deployment
 
-For OpenClaw, use the packaged `@openclaw/gloves` plugin and let it start `gloves-mcp` over stdio. Keep the `gloves` store, identities, and session token on the host side. Do not bind a daemon socket or host binary directories into the sandbox.
+For OpenClaw, use the packaged `@gloves/openclaw` plugin and let it start `gloves-mcp` over stdio. Keep the `gloves` store, identities, and session token on the host side. Do not bind a daemon socket or host binary directories into the sandbox.
 
 Example OpenClaw config shape:
 
@@ -165,7 +165,7 @@ Example OpenClaw config shape:
 
 Operational expectations:
 
-- install `@openclaw/gloves` on the Gateway host
+- install `@gloves/openclaw` on the Gateway host
 - keep `gloves-mcp` available on the host `PATH` or provide `glovesMcpBin`
 - allow the plugin tool group only for the agents that should read or write secrets
 - prefer env or tmpfs injection, not project-tree writes

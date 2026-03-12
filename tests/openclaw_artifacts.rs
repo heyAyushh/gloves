@@ -10,7 +10,7 @@ fn repo_path(relative: &str) -> std::path::PathBuf {
 fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     let contents = fs::read_to_string(repo_path("integrations/openclaw/gloves.json5")).unwrap();
 
-    assert!(contents.contains("openclaw plugins add @openclaw/gloves"));
+    assert!(contents.contains("openclaw plugins add @gloves/openclaw"));
     assert!(contents.contains("entries: {"));
     assert!(contents.contains("glovesMcpBin: \"gloves-mcp\""));
     assert!(contents.contains("group:plugins:gloves"));
@@ -18,7 +18,7 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
     assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
     assert!(contents.contains("socketPath: \"~/.openclaw/gloves/daemon.sock\""));
-    assert!(!contents.contains("package: \"@gloves/openclaw\""));
+    assert!(!contents.contains("package: \"@gloves/mcp-client\""));
     assert!(!contents.contains("/home/exedev"));
     assert!(!contents.contains("GLOVES_SOCKET"));
     assert!(!contents.contains("/gloves.sock"));
@@ -28,7 +28,7 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
 fn gloves_openclaw_skill_teaches_redacted_and_pipe_first_workflow() {
     let contents = fs::read_to_string(repo_path("skills/gloves-openclaw/SKILL.md")).unwrap();
 
-    assert!(contents.contains("@openclaw/gloves"));
+    assert!(contents.contains("@gloves/openclaw"));
     assert!(contents.contains("plugins.entries.gloves.config"));
     assert!(contents.contains("gloves show <path> --redacted"));
     assert!(contents.contains("gloves get <path> --format raw | <target-command>"));
@@ -118,22 +118,37 @@ fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
     let readme = fs::read_to_string(repo_path("README.md")).unwrap();
 
     assert!(security.contains("never appear in the LLM context"));
-    assert!(security.contains("@openclaw/gloves"));
+    assert!(security.contains("@gloves/openclaw"));
     assert!(architecture.contains("gloves-mcp"));
-    assert!(architecture.contains("@openclaw/gloves"));
+    assert!(architecture.contains("@gloves/openclaw"));
     assert!(readme.contains("group:plugins:gloves"));
 }
 
 #[test]
 fn openclaw_plugin_package_exposes_current_gateway_manifest() {
+    let root_package_json = fs::read_to_string(repo_path("package.json")).unwrap();
+    let client_package_json =
+        fs::read_to_string(repo_path("packages/gloves-client/package.json")).unwrap();
     let package_json =
-        fs::read_to_string(repo_path("packages/openclaw-gloves/package.json")).unwrap();
+        fs::read_to_string(repo_path("packages/gloves-openclaw/package.json")).unwrap();
     let manifest =
-        fs::read_to_string(repo_path("packages/openclaw-gloves/openclaw.plugin.json")).unwrap();
+        fs::read_to_string(repo_path("packages/gloves-openclaw/openclaw.plugin.json")).unwrap();
 
-    assert!(package_json.contains("\"@openclaw/gloves\""));
+    assert!(root_package_json.contains(
+        "bun run --cwd packages/gloves-client test && bun run --cwd packages/gloves-openclaw test"
+    ));
+    assert!(client_package_json.contains("\"@gloves/mcp-client\""));
+    assert!(client_package_json.contains("\"files\""));
+    assert!(client_package_json.contains("\"src/index.ts\""));
+    assert!(client_package_json.contains("\"publishConfig\""));
+    assert!(client_package_json.contains("\"access\": \"public\""));
+    assert!(package_json.contains("\"@gloves/openclaw\""));
+    assert!(package_json.contains("\"@gloves/mcp-client\""));
+    assert!(package_json.contains("\"@gloves/mcp-client\": \"0.1.2\""));
     assert!(package_json.contains("\"./dist/index.js\""));
     assert!(package_json.contains("\"extensions\""));
+    assert!(package_json.contains("\"publishConfig\""));
+    assert!(package_json.contains("\"access\": \"public\""));
     assert!(manifest.contains("\"id\": \"gloves\""));
     assert!(manifest.contains("\"tools\": true"));
     assert!(manifest.contains("\"socketPath\""));

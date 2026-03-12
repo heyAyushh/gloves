@@ -21,7 +21,7 @@ metadata:
 
 Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
 
-For OpenClaw runtime setup, prefer the packaged Gateway plugin `@openclaw/gloves`. Configure it under `plugins.entries.gloves.config` and let it launch `gloves-mcp` on the host over stdio. Treat `socketPath` as a legacy compatibility option, not the default.
+For OpenClaw runtime setup, prefer the packaged Gateway plugin `@gloves/openclaw`. Configure it under `plugins.entries.gloves.config` and let it launch `gloves-mcp` on the host over stdio. Treat `socketPath` as a legacy compatibility option, not the default.
 
 ## Workflow
 

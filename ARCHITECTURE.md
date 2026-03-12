@@ -12,26 +12,23 @@ This document describes the current `gloves` architecture in the repository.
   - authenticates MCP sessions with a session token
   - enforces approval tiers
   - exposes redacted MCP tools such as `gloves_get`, `gloves_set`, and `gloves_rotate`
-- `@gloves/client`
+- `@gloves/mcp-client`
   - Bun/TypeScript client that speaks to `gloves-mcp`
   - launches host-local `gloves-mcp` sessions over stdio by default and consumes the secret side-channel
-- `@gloves/adapter-core`
-  - shared runtime-agnostic adapter helpers for env/tmpfs injection and secret-source resolution
 - `@gloves/openclaw`
-  - OpenClaw-facing adapter that registers `gloves_get`, `gloves_list`, `gloves_show`, and `gloves_rotate`
-  - injects plaintext into environment variables or tmpfs instead of returning it in tool output
-- `@openclaw/gloves`
-  - packaged OpenClaw plugin that re-exports the adapter and carries plugin manifest metadata
+  - packaged OpenClaw plugin that registers `gloves_*` tools and carries plugin manifest metadata
+  - performs secret delivery into environment variables or tmpfs instead of returning plaintext in tool output
+
+For operators, `@gloves/openclaw` is the public install target. The only remaining internal JS
+package is `@gloves/mcp-client`, which keeps the broker transport separate from the plugin surface.
 
 ## Adapter Boundary
 
 `gloves-mcp` is the canonical machine-facing interface for runtime integrations.
-OpenClaw support lives in `@gloves/openclaw` as an adapter over that interface rather than a
-core product boundary. OpenClaw operators should install `@openclaw/gloves` on the Gateway host,
-then configure the plugin to launch `gloves-mcp` over stdio. The optional unix socket path exists
-only as a compatibility transport for legacy deployments.
-Additional runtimes should follow the same pattern with sibling adapters over
-`@gloves/adapter-core`.
+OpenClaw support lives directly in `@gloves/openclaw` over that interface rather than a core
+product boundary. OpenClaw operators should install `@gloves/openclaw` on the Gateway host, then
+configure the plugin to launch `gloves-mcp` over stdio. The optional unix socket path exists only
+as a compatibility transport for legacy deployments.
 
 ## Store Layout
 
@@ -58,9 +55,9 @@ The current OpenClaw-oriented store layout is:
 
 Current OpenClaw plugin reads work like this:
 
-1. `@openclaw/gloves` registers plugin tools in the OpenClaw Gateway process.
+1. `@gloves/openclaw` registers plugin tools in the OpenClaw Gateway process.
 2. `@gloves/openclaw` receives a `gloves_get` tool call.
-3. `@gloves/client` launches a host-local `gloves-mcp` session over stdio by default.
+3. `@gloves/mcp-client` launches a host-local `gloves-mcp` session over stdio by default.
 4. `gloves-mcp` validates the session token and agent id.
 5. `gloves-mcp` applies approval policy, returns redacted metadata, and delivers plaintext over the MCP secret side-channel.
 6. The plugin injects the plaintext into `api.sandbox.env` or tmpfs.

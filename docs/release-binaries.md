@@ -2,7 +2,8 @@
 
 Back to docs map: [Documentation Index](INDEX.md)
 
-`gloves` publishes binaries and crate artifacts through GitHub Actions (`.github/workflows/publish.yml`).
+`gloves` publishes binaries, crates, and npm packages through GitHub Actions
+(`.github/workflows/publish.yml`).
 
 ## 1) Prerequisites
 
@@ -14,12 +15,17 @@ Back to docs map: [Documentation Index](INDEX.md)
 - required workflows (`CI`, `Tests`, `Coverage`) must pass
 - `CARGO_REGISTRY_TOKEN` must be configured with crates.io publish rights for
   `gloves-core`, `gloves-config`, and `gloves`
+- `NPM_TOKEN` must be configured with publish rights for `@gloves/mcp-client`
+  and `@gloves/openclaw`
 
 ## 2) Local verification
 
 ```bash
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+bun install --frozen-lockfile
+bun run build
+bun run test
 cargo test --all-features --locked
 cargo doc --no-deps
 cargo publish --dry-run --locked
@@ -31,6 +37,8 @@ For a fresh version, also validate the publish chain directly:
 cargo publish -p gloves-core --dry-run --locked
 cargo package -p gloves-config --list
 cargo package -p gloves --list
+(cd packages/gloves-client && npm publish --dry-run --cache "$(mktemp -d)")
+(cd packages/gloves-openclaw && npm publish --dry-run --cache "$(mktemp -d)")
 ```
 
 ## 3) Tag and push
@@ -50,6 +58,9 @@ git push origin v0.5.0
   - `gloves-core`
   - `gloves-config`
   - `gloves`
+- npm publishes in dependency order:
+  - `@gloves/mcp-client`
+  - `@gloves/openclaw`
 - `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
 - `gloves-<version>-x86_64-apple-darwin.tar.gz`
 - `gloves-<version>-aarch64-apple-darwin.tar.gz`
@@ -72,6 +83,9 @@ crates, then rerun the release.
 
 If binary builds and the GitHub release succeed while crates.io publish fails, the
 release is only partially complete.
+
+If the npm publish job fails, confirm `NPM_TOKEN` is present and can publish both
+`@gloves/mcp-client` and `@gloves/openclaw`.
 
 ## Related Docs
 

@@ -18,7 +18,7 @@ afterEach(() => {
   fixture = null;
 });
 
-describe("@gloves/client", () => {
+describe("@gloves/mcp-client", () => {
   test("loads the native addon when it is available", async () => {
     fixture = createGlovesFixture();
     const client = await GlovesClient.connect({

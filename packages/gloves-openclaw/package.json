@@ -1,13 +1,24 @@
 {
   "name": "@gloves/openclaw",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
+  "files": [
+    "dist",
+    "openclaw.plugin.json"
+  ],
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "dependencies": {
-    "@gloves/adapter-core": "workspace:*",
-    "@gloves/client": "workspace:*"
+    "@gloves/mcp-client": "0.1.2"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node",

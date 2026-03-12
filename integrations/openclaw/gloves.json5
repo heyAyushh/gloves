@@ -1,6 +1,6 @@
 {
   // Install the packaged plugin on the Gateway host first:
-  //   openclaw plugins add @openclaw/gloves
+  //   openclaw plugins add @gloves/openclaw
   plugins: {
     entries: {
       gloves: {

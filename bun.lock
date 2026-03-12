@@ -5,37 +5,21 @@
     "": {
       "name": "gloves-workspace",
     },
-    "packages/gloves-adapter-core": {
-      "name": "@gloves/adapter-core",
-      "version": "0.1.1",
-    },
     "packages/gloves-client": {
-      "name": "@gloves/client",
+      "name": "@gloves/mcp-client",
       "version": "0.1.1",
     },
     "packages/gloves-openclaw": {
       "name": "@gloves/openclaw",
       "version": "0.1.1",
       "dependencies": {
-        "@gloves/adapter-core": "workspace:*",
-        "@gloves/client": "workspace:*",
-      },
-    },
-    "packages/openclaw-gloves": {
-      "name": "@openclaw/gloves",
-      "version": "0.1.1",
-      "dependencies": {
-        "@gloves/openclaw": "workspace:*",
+        "@gloves/mcp-client": "workspace:*",
       },
     },
   },
   "packages": {
-    "@gloves/adapter-core": ["@gloves/adapter-core@workspace:packages/gloves-adapter-core"],
-
-    "@gloves/client": ["@gloves/client@workspace:packages/gloves-client"],
+    "@gloves/mcp-client": ["@gloves/mcp-client@workspace:packages/gloves-client"],
 
     "@gloves/openclaw": ["@gloves/openclaw@workspace:packages/gloves-openclaw"],
-
-    "@openclaw/gloves": ["@openclaw/gloves@workspace:packages/openclaw-gloves"],
   }
 }

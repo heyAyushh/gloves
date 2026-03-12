@@ -58,7 +58,7 @@ The main threats addressed today are:
 
 ## Operational Guidance
 
-- For OpenClaw, prefer the packaged Gateway plugin (`@openclaw/gloves`) over direct MCP server wiring in agent config.
+- For OpenClaw, prefer the packaged Gateway plugin (`@gloves/openclaw`) over direct MCP server wiring in agent config.
 - Let the plugin launch `gloves-mcp` on the host over stdio; omit `socketPath` unless you are keeping a legacy unix-socket deployment.
 - Prefer `injectMode: "env"` or `injectMode: "both"` only when the sandbox lifecycle is tightly controlled.
 - Use tmpfs injection for file-based secrets, never the writable project tree.

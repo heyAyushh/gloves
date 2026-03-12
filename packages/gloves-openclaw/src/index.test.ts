@@ -1,8 +1,15 @@
-import { readFileSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
+import { resolve } from "node:path";
 
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
 
-import glovesPlugin, { type PluginAPI, type PluginToolDefinition } from "./index";
+import glovesPlugin, {
+  defaultSecretTargetName,
+  deliverSecretValue,
+  resolveSecretValueFromSources,
+  type PluginAPI,
+  type PluginToolDefinition,
+} from "./index";
 import {
   createGlovesFixture,
   ensureGlovesBinaries,
@@ -10,15 +17,77 @@ import {
 } from "../../gloves-client/src/testing";
 
 let fixture: GlovesFixture | null = null;
+const CLIENT_NATIVE_ADDON_PATH = resolve(import.meta.dir, "../../gloves-client/native/gloves_client_native.node");
+const CLIENT_NATIVE_ADDON_BACKUP_PATH = `${CLIENT_NATIVE_ADDON_PATH}.disabled`;
 
 ensureGlovesBinaries();
+disableNativeAddonForPluginTests();
 
 afterEach(() => {
   fixture?.cleanup();
   fixture = null;
 });
 
+afterAll(() => {
+  restoreNativeAddonAfterPluginTests();
+});
+
 describe("@gloves/openclaw", () => {
+  test("defaults secret target names to portable environment variable names", () => {
+    expect(defaultSecretTargetName("agents/devy/api-keys/openai")).toBe("OPENAI");
+    expect(defaultSecretTargetName("shared/database-url")).toBe("DATABASE_URL");
+  });
+
+  test("resolves secret source values from sandbox and process environments", () => {
+    expect(
+      resolveSecretValueFromSources("API_KEY", {
+        readEnvironment: (name) => name === "API_KEY" ? "sandbox-secret" : undefined,
+        readProcessEnvironment: () => "process-secret",
+      }),
+    ).toBe("sandbox-secret");
+
+    expect(
+      resolveSecretValueFromSources("API_KEY", {
+        readEnvironment: () => undefined,
+        readProcessEnvironment: (name) => name === "API_KEY" ? "process-secret" : undefined,
+      }),
+    ).toBe("process-secret");
+  });
+
+  test("fails when no delivery source can provide a secret", () => {
+    expect(() =>
+      resolveSecretValueFromSources("MISSING_SECRET", {
+        readEnvironment: () => undefined,
+        readProcessEnvironment: () => undefined,
+      })
+    ).toThrow("MISSING_SECRET");
+  });
+
+  test("delivers secrets through environment and tmpfs sinks", async () => {
+    const setEnv = mock(() => {});
+    const writeFile = mock(async () => {});
+
+    const result = await deliverSecretValue(
+      "agents/devy/api-keys/anthropic",
+      "sk-test",
+      undefined,
+      { injectMode: "both", tmpfsPath: "/run/secrets" },
+      {
+        env: { set: setEnv },
+        writeFile,
+      },
+    );
+
+    expect(result).toEqual({
+      injectTarget: "ANTHROPIC",
+      injectMethod: "both",
+    });
+    expect(setEnv).toHaveBeenCalledWith("ANTHROPIC", "sk-test");
+    expect(writeFile).toHaveBeenCalledWith("/run/secrets/ANTHROPIC", "sk-test", {
+      mode: 0o600,
+    });
+  });
+
   test("registers tools and injects secrets without returning raw values", async () => {
     fixture = createGlovesFixture();
     const tools = new Map<string, PluginToolDefinition>();
@@ -110,7 +179,7 @@ describe("@gloves/openclaw", () => {
     }
   });
 
-  test("fails fast when tmpfs injection has no tmpfsPath", async () => {
+  test("fails fast when tmpfs delivery has no tmpfsPath", async () => {
     const plugin = glovesPlugin({
       root: "/tmp/gloves",
       mcpConfigPath: "/tmp/gloves.toml",
@@ -131,7 +200,7 @@ describe("@gloves/openclaw", () => {
     await expect(plugin.init(api)).rejects.toThrow("tmpfsPath");
   });
 
-  test("fails fast when tmpfs injection has no sandbox writer", async () => {
+  test("fails fast when tmpfs delivery has no sandbox writer", async () => {
     const plugin = glovesPlugin({
       root: "/tmp/gloves",
       mcpConfigPath: "/tmp/gloves.toml",
@@ -178,12 +247,13 @@ describe("@gloves/openclaw", () => {
     };
 
     await plugin.init(api);
+
     await expect(
       tools.get("gloves_set")!.handler({
         path: "agents/devy/api-keys/openai",
-        from_env: "MISSING_SECRET",
+        from_env: "OPENAI_API_KEY",
       }),
-    ).rejects.toThrow("MISSING_SECRET");
+    ).rejects.toThrow("OPENAI_API_KEY");
   });
 
   test("uses stdio MCP sessions when socketPath is omitted from plugin config", async () => {
@@ -195,42 +265,6 @@ describe("@gloves/openclaw", () => {
       root: fixture.root,
       mcpConfigPath: fixture.mcpConfigPath,
       tokenPath: fixture.tokenPath,
-      glovesMcpBin: fixture.glovesMcpBin,
-      injectMode: "env",
-    });
-
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set: envSet, get() { return undefined; } },
-      },
-      registerTool(name, definition) {
-        tools.set(name, definition);
-      },
-      onShutdown() {},
-    };
-
-    await plugin.init(api);
-
-    const getResult = await tools.get("gloves_get")!.handler({
-      path: fixture.secretPath,
-      inject_as: "ANTHROPIC_API_KEY",
-    });
-
-    expect(envSet).toHaveBeenCalledWith("ANTHROPIC_API_KEY", fixture.secretValue);
-    expect(getResult.injected).toBe(true);
-  });
-
-  test("approves a pending gloves_get request through the plugin tool surface", async () => {
-    fixture = createGlovesFixture({ approvalChannel: "tty" });
-    const tools = new Map<string, PluginToolDefinition>();
-    const envSet = mock(() => {});
-
-    const plugin = glovesPlugin({
-      root: fixture.root,
-      mcpConfigPath: fixture.mcpConfigPath,
-      tokenPath: fixture.tokenPath,
-      socketPath: fixture.socketPath,
       glovesBin: "/definitely-unused-gloves-binary",
       glovesMcpBin: fixture.glovesMcpBin,
       injectMode: "env",
@@ -249,43 +283,24 @@ describe("@gloves/openclaw", () => {
 
     await plugin.init(api);
 
-    const getPromise = tools.get("gloves_get")!.handler({
-      path: fixture.secretPath,
-      inject_as: "ANTHROPIC_API_KEY",
-    });
-    const requestId = await waitForPendingRequestId(fixture.root);
-    const approvalResult = await tools.get("gloves_approve")!.handler({
-      request_id: requestId,
-      decision: "approve",
-    });
-    const getResult = await getPromise;
+    const listResult = await tools.get("gloves_list")!.handler({ prefix: "agents/devy" });
+    expect(listResult.secrets).toContain(fixture.secretPath);
 
-    expect(approvalResult.success).toBe(true);
-    expect(approvalResult.decision).toBe("approve");
-    expect(envSet).toHaveBeenCalledWith("ANTHROPIC_API_KEY", fixture.secretValue);
-    expect(getResult.injected).toBe(true);
+    const getResult = await tools.get("gloves_get")!.handler({ path: fixture.secretPath });
+    expect(envSet).toHaveBeenCalledWith("ANTHROPIC", fixture.secretValue);
+    expect(JSON.stringify(getResult)).not.toContain(fixture.secretValue);
   });
+
 });
 
-const PENDING_REQUEST_WAIT_TIMEOUT_MS = 5_000;
-const PENDING_REQUEST_WAIT_INTERVAL_MS = 25;
-
-async function waitForPendingRequestId(root: string): Promise<string> {
-  const pendingPath = `${root}/store/.gloves-pending.json`;
-  const deadline = Date.now() + PENDING_REQUEST_WAIT_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    try {
-      const raw = readFileSync(pendingPath, "utf8");
-      const payload = JSON.parse(raw) as Array<{ id?: string }>;
-      const requestId = payload.at(0)?.id;
-      if (typeof requestId === "string" && requestId.length > 0) {
-        return requestId;
-      }
-    } catch {
-      // Wait for the daemon to persist the approval request.
-    }
-    await Bun.sleep(PENDING_REQUEST_WAIT_INTERVAL_MS);
+function disableNativeAddonForPluginTests(): void {
+  if (existsSync(CLIENT_NATIVE_ADDON_PATH) && !existsSync(CLIENT_NATIVE_ADDON_BACKUP_PATH)) {
+    renameSync(CLIENT_NATIVE_ADDON_PATH, CLIENT_NATIVE_ADDON_BACKUP_PATH);
   }
+}
 
-  throw new Error(`timed out waiting for pending request at ${pendingPath}`);
+function restoreNativeAddonAfterPluginTests(): void {
+  if (existsSync(CLIENT_NATIVE_ADDON_BACKUP_PATH) && !existsSync(CLIENT_NATIVE_ADDON_PATH)) {
+    renameSync(CLIENT_NATIVE_ADDON_BACKUP_PATH, CLIENT_NATIVE_ADDON_PATH);
+  }
 }

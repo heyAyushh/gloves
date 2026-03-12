@@ -2,12 +2,26 @@
 
 ## Unreleased
 
+## 0.5.9
+
+### Patch Changes
+
+- Collapsed the OpenClaw JS surface to two packages:
+  - `@gloves/mcp-client`
+  - `@gloves/openclaw`
+- Moved the secret-delivery and OpenClaw plugin logic directly into `@gloves/openclaw` and removed the extra internal adapter packages.
+- Renamed the public OpenClaw package from `@openclaw/gloves` to `@gloves/openclaw` so the published package matches the `@gloves` scope you control.
+- Tightened release validation and publishing for the Bun packages:
+  - CI now installs Bun, builds the package workspace, and runs the package test suites.
+  - The publish workflow now releases `@gloves/mcp-client` before `@gloves/openclaw`.
+  - npm package metadata no longer ships workspace-only artifacts or unresolved `workspace:*` dependencies.
+
 ## 0.5.8
 
 ### Patch Changes
 
 - Aligned the recommended OpenClaw integration with current plugin runtime behavior:
-  - Added `@openclaw/gloves` plugin packaging metadata and generic reference config for host-side plugin tools.
+  - Added `@gloves/openclaw` plugin packaging metadata and generic reference config for host-side plugin tools.
   - Updated the documented OpenClaw path to launch `gloves-mcp` over stdio instead of bind-mounted sandbox sockets.
   - Kept Unix-socket transport available as a compatibility path for non-OpenClaw runtimes.
 - Fixed `gloves-mcp` stdio sessions so secret notifications are emitted correctly when `socketPath` is omitted.
@@ -24,7 +38,7 @@
   - `gloves set`, `get`, `show`, `updatekeys`, and `rotate` now support agent-scoped OpenClaw secret paths and redacted metadata output.
 - Added first-class OpenClaw integration artifacts:
   - Published `gloves.json5` bridge config and `SKILL.md` guidance for agent-safe secret handling.
-  - Added Bun-based `@gloves/client`, `@gloves/adapter-core`, and `@gloves/openclaw` packages, including native addon loading and environment/tmpfs injection flows.
+  - Added Bun-based `@gloves/mcp-client` and `@gloves/openclaw` packages, including native addon loading and environment/tmpfs injection flows.
 - Rebuilt `gloves-mcp` around `rmcp` with brokered secret delivery:
   - Supports stdio and Unix-socket sessions with session-token authentication.
   - Exposes typed `gloves_*` tools with redacted responses, approval gating, audit logging, webhook callbacks, and metrics output.
@@ -38,7 +52,7 @@
   - Non-expiring secrets survive `gloves verify`, and machine-readable `set` responses now expose `never_expires`.
 - Raised the built-in secret/request TTL default from 1 day to 30 days and surfaced secret expiry state in `gloves secrets set` output.
 - Hardened OpenClaw approval and transport behavior with HTTPS webhook delivery, tmpfs startup validation, and more explicit configuration/runtime errors.
-- Restored `@openclaw/gloves` as a deprecated compatibility shim that re-exports `@gloves/openclaw`.
+- Restored `@gloves/openclaw` as the packaged OpenClaw plugin surface.
 - Added architecture and security documentation for the brokered-credentials model and linked the new operator guidance from the README.
 - Expanded Rust and Bun regression coverage across the CLI, daemon, namespaced store, vault flows, and OpenClaw integration paths, lifting repo-wide Rust line coverage above 90%.
 

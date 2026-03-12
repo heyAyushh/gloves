@@ -87,15 +87,16 @@ For complete setup and human/agent workflows, use [Quickstart](docs/quickstart.m
 The repository now includes:
 
 - `gloves-mcp` for redacted MCP tool access
-- `@gloves/client` as the Bun/TypeScript bridge
-- `@gloves/adapter-core` as the shared adapter helper package
-- `@gloves/openclaw` as the OpenClaw adapter implementation
-- `@openclaw/gloves` as the packaged OpenClaw Gateway plugin
+- `@gloves/mcp-client` as the Bun/TypeScript bridge to `gloves-mcp`
+- `@gloves/openclaw` as the OpenClaw Gateway plugin, including the secret-delivery logic
 - `integrations/openclaw/gloves.json5` as the reference config snippet
+
+If you are setting up OpenClaw, the only package you should install is `@gloves/openclaw`.
+The only remaining internal JS package is `@gloves/mcp-client`.
 
 Recommended runtime path:
 
-- install `@openclaw/gloves` on the Gateway host
+- install `@gloves/openclaw` on the Gateway host
 - let the plugin launch host-local `gloves-mcp` sessions over stdio
 - allow the plugin tool group per agent with `group:plugins:gloves`
 

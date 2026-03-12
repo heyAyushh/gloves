@@ -3,7 +3,7 @@ members = ["crates/gloves-core", "crates/gloves-config", "crates/gloves-client-n
 resolver = "2"
 
 [workspace.package]
-version = "0.5.8"
+version = "0.5.9"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/heyAyushh/gloves"
@@ -27,8 +27,8 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm"]
 
 [dependencies]
-gloves-core = { path = "crates/gloves-core", version = "0.5.8" }
-gloves-config = { path = "crates/gloves-config", version = "0.5.8" }
+gloves-core = { path = "crates/gloves-core", version = "0.5.9" }
+gloves-config = { path = "crates/gloves-config", version = "0.5.9" }
 
 age = "0.11.2"
 atty = "0.2"
