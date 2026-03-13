@@ -77,6 +77,9 @@ crates, then rerun the release.
 If binary builds and the GitHub release succeed while crates.io publish fails, the
 release is only partially complete.
 
+The crates publish step skips versions that are already present on crates.io, so a
+manual publish followed by a rerun of the tagged workflow stays idempotent.
+
 ## Related Docs
 
 - [Release Playbook](../RELEASE.md)

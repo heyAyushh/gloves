@@ -345,8 +345,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          crate_exists() {
+            local crate_name="$1"
+            local crate_version="$2"
+
+            cargo search "$crate_name" --limit 20 | grep -q "^${crate_name} = \"${crate_version}\""
+          }
+
           publish_crate() {
             local crate_name="$1"
+            local crate_version="$2"
+
+            if crate_exists "$crate_name" "$crate_version"; then
+              echo "Skipping ${crate_name} ${crate_version}; version already published on crates.io"
+              return 0
+            fi
+
             if cargo publish -p "$crate_name" --locked; then
               return 0
             fi
@@ -374,10 +388,10 @@ jobs:
 
           version="${{ needs.validate-release.outputs.tag_version }}"
 
-          publish_crate "gloves-core"
+          publish_crate "gloves-core" "$version"
           wait_for_index "gloves-core" "$version"
 
-          publish_crate "gloves-config"
+          publish_crate "gloves-config" "$version"
           wait_for_index "gloves-config" "$version"
 
-          publish_crate "gloves"
+          publish_crate "gloves" "$version"

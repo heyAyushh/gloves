@@ -150,3 +150,6 @@ workflow.
 
 GitHub release assets can still succeed when crates.io publishing fails. Treat the
 release as incomplete until the crates.io publish job is green.
+
+The crates publish job skips versions that already exist on crates.io so a manual
+publish or a rerun against the same tag can complete cleanly.
