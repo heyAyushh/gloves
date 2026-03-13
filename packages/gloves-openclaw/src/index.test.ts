@@ -1,14 +1,15 @@
-import { existsSync, renameSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
-import { afterAll, afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import glovesPlugin, {
-  defaultSecretTargetName,
-  deliverSecretValue,
-  resolveSecretValueFromSources,
-  type PluginAPI,
-  type PluginToolDefinition,
+  createTools,
+  filterSecretNames,
+  normalizeConfig,
+  SAFE_TOOL_NAMES,
+  type GlovesOpenClawConfig,
+  type OpenClawPluginApi,
+  type OpenClawToolDefinition,
 } from "./index";
 import {
   createGlovesFixture,
@@ -17,290 +18,126 @@ import {
 } from "../../gloves-client/src/testing";
 
 let fixture: GlovesFixture | null = null;
-const CLIENT_NATIVE_ADDON_PATH = resolve(import.meta.dir, "../../gloves-client/native/gloves_client_native.node");
-const CLIENT_NATIVE_ADDON_BACKUP_PATH = `${CLIENT_NATIVE_ADDON_PATH}.disabled`;
 
 ensureGlovesBinaries();
-disableNativeAddonForPluginTests();
 
 afterEach(() => {
   fixture?.cleanup();
   fixture = null;
 });
 
-afterAll(() => {
-  restoreNativeAddonAfterPluginTests();
-});
-
 describe("@gloves/openclaw", () => {
-  test("defaults secret target names to portable environment variable names", () => {
-    expect(defaultSecretTargetName("agents/devy/api-keys/openai")).toBe("OPENAI");
-    expect(defaultSecretTargetName("shared/database-url")).toBe("DATABASE_URL");
+  test("normalizes plugin config for the native register(api) entry", () => {
+    const config = normalizeConfig({ root: "/tmp/gloves" });
+
+    expect(config.glovesBin).toBe("gloves");
+    expect(config.operatorAgentId).toBe("openclaw");
+    expect(config.timeoutMs).toBeGreaterThan(0);
   });
 
-  test("resolves secret source values from sandbox and process environments", () => {
-    expect(
-      resolveSecretValueFromSources("API_KEY", {
-        readEnvironment: (name) => name === "API_KEY" ? "sandbox-secret" : undefined,
-        readProcessEnvironment: () => "process-secret",
-      }),
-    ).toBe("sandbox-secret");
-
-    expect(
-      resolveSecretValueFromSources("API_KEY", {
-        readEnvironment: () => undefined,
-        readProcessEnvironment: (name) => name === "API_KEY" ? "process-secret" : undefined,
-      }),
-    ).toBe("process-secret");
-  });
-
-  test("fails when no delivery source can provide a secret", () => {
-    expect(() =>
-      resolveSecretValueFromSources("MISSING_SECRET", {
-        readEnvironment: () => undefined,
-        readProcessEnvironment: () => undefined,
-      })
-    ).toThrow("MISSING_SECRET");
-  });
-
-  test("delivers secrets through environment and tmpfs sinks", async () => {
-    const setEnv = mock(() => {});
-    const writeFile = mock(async () => {});
-
-    const result = await deliverSecretValue(
-      "agents/devy/api-keys/anthropic",
-      "sk-test",
-      undefined,
-      { injectMode: "both", tmpfsPath: "/run/secrets" },
-      {
-        env: { set: setEnv },
-        writeFile,
-      },
-    );
-
-    expect(result).toEqual({
-      injectTarget: "ANTHROPIC",
-      injectMethod: "both",
-    });
-    expect(setEnv).toHaveBeenCalledWith("ANTHROPIC", "sk-test");
-    expect(writeFile).toHaveBeenCalledWith("/run/secrets/ANTHROPIC", "sk-test", {
-      mode: 0o600,
-    });
-  });
-
-  test("registers tools and injects secrets without returning raw values", async () => {
+  test(
+    "registers only the guaranteed-safe OpenClaw tool subset as optional tools",
+    { timeout: 15_000 },
+    async () => {
     fixture = createGlovesFixture();
-    const tools = new Map<string, PluginToolDefinition>();
-    const envSet = mock(() => {});
-    const envGet = mock((name: string) => {
-      if (name === "OPENAI_API_KEY") {
-        return "sk-proj-written-from-plugin";
-      }
-      return undefined;
-    });
-    const writeFile = mock(async () => {});
-    const shutdownCallbacks: Array<() => void | Promise<void>> = [];
+    const tools: OpenClawToolDefinition[] = [];
+    const options: Array<{ optional?: boolean } | undefined> = [];
 
-    const plugin = glovesPlugin({
-      root: fixture.root,
-      mcpConfigPath: fixture.mcpConfigPath,
-      tokenPath: fixture.tokenPath,
-      socketPath: fixture.socketPath,
-      glovesBin: "/definitely-unused-gloves-binary",
-      glovesMcpBin: fixture.glovesMcpBin,
-      injectMode: "both",
-      tmpfsPath: "/run/secrets",
-    });
-
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set: envSet, get: envGet },
-        writeFile,
+    const api: OpenClawPluginApi = {
+      config: {
+        root: fixture.root,
+        glovesBin: fixture.glovesBin,
+        operatorAgentId: "openclaw",
       },
-      registerTool(name, definition) {
-        tools.set(name, definition);
-      },
-      onShutdown(callback) {
-        shutdownCallbacks.push(callback);
+      registerTool(tool, registrationOptions) {
+        tools.push(tool);
+        options.push(registrationOptions);
       },
     };
 
-    await plugin.init(api);
-    expect(tools.has("gloves_get")).toBe(true);
-    expect(tools.has("gloves_list")).toBe(true);
-    expect(tools.has("gloves_show")).toBe(true);
-    expect(tools.has("gloves_set")).toBe(true);
-    expect(tools.has("gloves_approve")).toBe(true);
-    expect(tools.has("gloves_delete")).toBe(true);
-    expect(tools.has("gloves_rotate")).toBe(true);
+    await glovesPlugin.register(api);
 
-    const getResult = await tools.get("gloves_get")!.handler({
-      path: fixture.secretPath,
-      inject_as: "ANTHROPIC_API_KEY",
-    });
+    expect(tools.map((tool) => tool.name)).toEqual([...SAFE_TOOL_NAMES]);
+    expect(options.every((entry) => entry?.optional === true)).toBe(true);
+    },
+  );
 
-    expect(envSet).toHaveBeenCalledWith("ANTHROPIC_API_KEY", fixture.secretValue);
-    expect(writeFile).toHaveBeenCalledWith("/run/secrets/ANTHROPIC_API_KEY", fixture.secretValue, {
-      mode: 0o600,
-    });
-    expect(JSON.stringify(getResult)).not.toContain(fixture.secretValue);
-    expect(getResult.injected).toBe(true);
-
-    const listResult = await tools.get("gloves_list")!.handler({ prefix: "agents/devy" });
-    expect(listResult.count).toBeGreaterThanOrEqual(1);
-
-    const showResult = await tools.get("gloves_show")!.handler({ path: fixture.secretPath });
-    expect(showResult.name).toBe(fixture.secretPath);
-
-    const setResult = await tools.get("gloves_set")!.handler({
-      path: "agents/devy/api-keys/openai",
-      from_env: "OPENAI_API_KEY",
-    });
-    expect(envGet).toHaveBeenCalledWith("OPENAI_API_KEY");
-    expect(JSON.stringify(setResult)).not.toContain("sk-proj-written-from-plugin");
-    expect(setResult.stored).toBe(true);
-
-    const showStoredResult = await tools.get("gloves_show")!.handler({
-      path: "agents/devy/api-keys/openai",
-    });
-    expect(showStoredResult.length).toBe("sk-proj-written-from-plugin".length);
-
-    await expect(
-      tools.get("gloves_delete")!.handler({ path: fixture.secretPath }),
-    ).rejects.toThrow("Operation denied");
-
-    const rotateResult = await tools.get("gloves_rotate")!.handler({});
-    expect(rotateResult.agent).toBe("devy");
-    expect(rotateResult.rotated).toBe(true);
-
-    for (const callback of shutdownCallbacks) {
-      await callback();
-    }
-  });
-
-  test("fails fast when tmpfs delivery has no tmpfsPath", async () => {
-    const plugin = glovesPlugin({
-      root: "/tmp/gloves",
-      mcpConfigPath: "/tmp/gloves.toml",
-      tokenPath: "/tmp/session-token",
-      injectMode: "tmpfs",
-    });
-
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set() {} },
-        writeFile: async () => {},
-      },
-      registerTool() {},
-      onShutdown() {},
-    };
-
-    await expect(plugin.init(api)).rejects.toThrow("tmpfsPath");
-  });
-
-  test("fails fast when tmpfs delivery has no sandbox writer", async () => {
-    const plugin = glovesPlugin({
-      root: "/tmp/gloves",
-      mcpConfigPath: "/tmp/gloves.toml",
-      tokenPath: "/tmp/session-token",
-      injectMode: "both",
-      tmpfsPath: "/run/secrets",
-    });
-
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set() {} },
-      },
-      registerTool() {},
-      onShutdown() {},
-    };
-
-    await expect(plugin.init(api)).rejects.toThrow("sandbox.writeFile");
-  });
-
-  test("fails clearly when gloves_set cannot resolve its source environment variable", async () => {
+  test("lists status and request review flows without leaking plaintext", async () => {
     fixture = createGlovesFixture();
-    const tools = new Map<string, PluginToolDefinition>();
-
-    const plugin = glovesPlugin({
+    createPendingRequest(fixture, fixture.secretPath);
+    const toolMap = new Map<string, OpenClawToolDefinition>();
+    const config = normalizeConfig({
       root: fixture.root,
-      mcpConfigPath: fixture.mcpConfigPath,
-      tokenPath: fixture.tokenPath,
-      socketPath: fixture.socketPath,
       glovesBin: fixture.glovesBin,
-      glovesMcpBin: fixture.glovesMcpBin,
-      injectMode: "env",
+      operatorAgentId: "openclaw",
     });
 
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set() {}, get() { return undefined; } },
-      },
-      registerTool(name, definition) {
-        tools.set(name, definition);
-      },
-      onShutdown() {},
-    };
+    for (const tool of createTools(config)) {
+      toolMap.set(tool.name, tool);
+    }
 
-    await plugin.init(api);
+    const listed = await toolMap.get("gloves_list")!.execute("call-1", { prefix: "agents/devy" });
+    expect(listed.secrets).toEqual([fixture.secretPath]);
 
-    await expect(
-      tools.get("gloves_set")!.handler({
-        path: "agents/devy/api-keys/openai",
-        from_env: "OPENAI_API_KEY",
-      }),
-    ).rejects.toThrow("OPENAI_API_KEY");
-  });
+    const status = await toolMap.get("gloves_status")!.execute("call-2", { path: fixture.secretPath });
+    expect(status.secret).toBe(fixture.secretPath);
+    expect(status.status).toBe("pending");
 
-  test("uses stdio MCP sessions when socketPath is omitted from plugin config", async () => {
-    fixture = createGlovesFixture({ transport: "stdio" });
-    const tools = new Map<string, PluginToolDefinition>();
-    const envSet = mock(() => {});
+    const requests = await toolMap.get("gloves_requests_list")!.execute("call-3", {});
+    expect(requests.count).toBe(1);
+    const requestId = String((requests.requests as Array<Record<string, unknown>>)[0].id);
 
-    const plugin = glovesPlugin({
-      root: fixture.root,
-      mcpConfigPath: fixture.mcpConfigPath,
-      tokenPath: fixture.tokenPath,
-      glovesBin: "/definitely-unused-gloves-binary",
-      glovesMcpBin: fixture.glovesMcpBin,
-      injectMode: "env",
+    const approved = await toolMap.get("gloves_request_approve")!.execute("call-4", {
+      request_id: requestId,
     });
+    expect(approved.action).toBe("approved");
+    expect(approved.status).toBe("fulfilled");
 
-    const api: PluginAPI = {
-      agent: { id: "devy" },
-      sandbox: {
-        env: { set: envSet, get() { return undefined; } },
-      },
-      registerTool(name, definition) {
-        tools.set(name, definition);
-      },
-      onShutdown() {},
-    };
+    createPendingRequest(fixture, "agents/devy/api-keys/openai");
+    const denyRequests = await toolMap.get("gloves_requests_list")!.execute("call-5", {});
+    const denyRequestId = String((denyRequests.requests as Array<Record<string, unknown>>)[0].id);
+    const denied = await toolMap.get("gloves_request_deny")!.execute("call-6", {
+      request_id: denyRequestId,
+    });
+    expect(denied.action).toBe("denied");
+    expect(denied.status).toBe("denied");
 
-    await plugin.init(api);
-
-    const listResult = await tools.get("gloves_list")!.handler({ prefix: "agents/devy" });
-    expect(listResult.secrets).toContain(fixture.secretPath);
-
-    const getResult = await tools.get("gloves_get")!.handler({ path: fixture.secretPath });
-    expect(envSet).toHaveBeenCalledWith("ANTHROPIC", fixture.secretValue);
-    expect(JSON.stringify(getResult)).not.toContain(fixture.secretValue);
+    const rendered = JSON.stringify({ listed, status, requests, approved, denied });
+    expect(rendered).not.toContain(fixture.secretValue);
   });
 
+  test("fails clearly when required plugin config is missing", async () => {
+    const api: OpenClawPluginApi = {
+      config: {} as GlovesOpenClawConfig,
+      registerTool() {},
+    };
+
+    await expect(glovesPlugin.register(api)).rejects.toThrow("config.root");
+  });
+
+  test("filters secret list payloads down to secret ids only", () => {
+    const secrets = filterSecretNames({
+      status: "ok",
+      result: [
+        { kind: "secret", id: "agents/devy/api-keys/openai" },
+        { kind: "pending", id: "ignored" },
+        { kind: "secret", id: "shared/database-url" },
+      ],
+    }, "agents/devy");
+
+    expect(secrets).toEqual(["agents/devy/api-keys/openai"]);
+  });
 });
 
-function disableNativeAddonForPluginTests(): void {
-  if (existsSync(CLIENT_NATIVE_ADDON_PATH) && !existsSync(CLIENT_NATIVE_ADDON_BACKUP_PATH)) {
-    renameSync(CLIENT_NATIVE_ADDON_PATH, CLIENT_NATIVE_ADDON_BACKUP_PATH);
-  }
-}
-
-function restoreNativeAddonAfterPluginTests(): void {
-  if (existsSync(CLIENT_NATIVE_ADDON_BACKUP_PATH) && !existsSync(CLIENT_NATIVE_ADDON_PATH)) {
-    renameSync(CLIENT_NATIVE_ADDON_BACKUP_PATH, CLIENT_NATIVE_ADDON_PATH);
+function createPendingRequest(fixtureValue: GlovesFixture, secretPath: string): void {
+  const result = spawnSync(
+    fixtureValue.glovesBin,
+    ["--json", "--root", fixtureValue.root, "request", secretPath, "--reason", "plugin test"],
+    {
+      encoding: "utf8",
+    },
+  );
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || "failed to create pending request");
   }
 }

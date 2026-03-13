@@ -12,23 +12,22 @@ This document describes the current `gloves` architecture in the repository.
   - authenticates MCP sessions with a session token
   - enforces approval tiers
   - exposes redacted MCP tools such as `gloves_get`, `gloves_set`, and `gloves_rotate`
-- `@gloves/mcp-client`
-  - Bun/TypeScript client that speaks to `gloves-mcp`
-  - launches host-local `gloves-mcp` sessions over stdio by default and consumes the secret side-channel
 - `@gloves/openclaw`
-  - packaged OpenClaw plugin that registers `gloves_*` tools and carries plugin manifest metadata
-  - performs secret delivery into environment variables or tmpfs instead of returning plaintext in tool output
-
-For operators, `@gloves/openclaw` is the public install target. The only remaining internal JS
-package is `@gloves/mcp-client`, which keeps the broker transport separate from the plugin surface.
+  - packaged OpenClaw-native plugin that registers only safe `gloves_*` tools
+  - shells out to host-local `gloves` commands for metadata and approval flows
+- `gloves-docker-bridge`
+  - private operator-controlled Docker wrapper
+  - resolves `gloves://...` refs on the host and injects tmpfs files under `/run/secrets/...`
 
 ## Adapter Boundary
 
-`gloves-mcp` is the canonical machine-facing interface for runtime integrations.
-OpenClaw support lives directly in `@gloves/openclaw` over that interface rather than a core
-product boundary. OpenClaw operators should install `@gloves/openclaw` on the Gateway host, then
-configure the plugin to launch `gloves-mcp` over stdio. The optional unix socket path exists only
-as a compatibility transport for legacy deployments.
+`gloves` now separates three layers:
+
+1. official OpenClaw support: `@gloves/openclaw` safe tools only
+2. preferred future runtime transport: `gloves-mcp` over stdio
+3. private last-mile delivery: `gloves-docker-bridge`
+
+The Docker bridge is intentionally outside the official plugin contract. It exists for operators who control OpenClaw process start and need Docker sandbox file delivery today without patching the OpenClaw binary.
 
 ## Store Layout
 
@@ -51,36 +50,76 @@ The current OpenClaw-oriented store layout is:
 - `.gloves-meta/` stores redacted metadata used by `show`, `list`, and access bookkeeping.
 - `audit/` stores JSONL audit trails.
 
-## Secret Read Flow
+## Safe OpenClaw Flow
 
-Current OpenClaw plugin reads work like this:
+Current official OpenClaw plugin work looks like this:
 
 1. `@gloves/openclaw` registers plugin tools in the OpenClaw Gateway process.
-2. `@gloves/openclaw` receives a `gloves_get` tool call.
-3. `@gloves/mcp-client` launches a host-local `gloves-mcp` session over stdio by default.
-4. `gloves-mcp` validates the session token and agent id.
-5. `gloves-mcp` applies approval policy, returns redacted metadata, and delivers plaintext over the MCP secret side-channel.
-6. The plugin injects the plaintext into `api.sandbox.env` or tmpfs.
-7. The tool return value sent back to the model stays redacted.
+2. OpenClaw calls one of the safe metadata or request-review tools.
+3. The plugin runs a host-local `gloves --json ...` command.
+4. The CLI returns redacted metadata or request state.
+5. The tool result stays plaintext-free.
 
-This keeps the brokered tool-response model without requiring sandbox bind mounts for host binaries or unix sockets.
+This path does not depend on undocumented sandbox APIs or plaintext delivery.
+
+## Private Docker Bridge Flow
+
+The private bridge path works like this:
+
+1. the operator starts OpenClaw through a launcher that prepends a `docker` shim to `PATH`
+2. OpenClaw issues normal Docker CLI commands without being modified
+3. `gloves-docker-bridge` matches target containers by labels, env, image, or name prefix
+4. the bridge resolves configured `gloves://...` refs on the host
+5. the bridge writes secret bytes into `/run/secrets/...` inside the sandbox tmpfs
+6. the bridge records audit events and bridge state on the host
+
+This keeps the last-mile injection private and operator-controlled. It is version-sensitive to Docker/OpenClaw runtime behavior and is not described as official OpenClaw support.
 
 ## Transport Choices
 
-- OpenClaw default: plugin tools plus stdio child-process sessions to `gloves-mcp`
+- OpenClaw official support today: `@gloves/openclaw` safe tools
+- Preferred future OpenClaw transport: stdio child-process sessions to `gloves-mcp`
 - Compatibility transport: optional unix socket mode when another runtime needs a long-lived local broker
 - Direct host automation: loopback TCP `gloves daemon`
 
-The transports serve different runtimes. OpenClaw should prefer stdio because it avoids exposing a reusable endpoint into the sandbox.
+The transports serve different runtimes. OpenClaw should prefer stdio once a first-class runtime contract exists because it avoids exposing a reusable endpoint into the sandbox.
 
-## Docker Verification
+## Generic Process Execution
 
-The repository Docker harness exercises the OpenClaw-style stdio flow:
+`gloves` now separates generic process execution into two public layers:
 
-1. the sandbox image includes `gloves` and `gloves-mcp`
-2. the plugin starts `gloves-mcp` over stdio inside the container
-3. decrypted values are injected into env/tmpfs and kept out of tool result bodies
-4. cross-agent access and post-rotation access rules are verified end to end
+- `gloves run`: high-level user-facing intent surface
+- `gloves exec`: lower-level delivery-mechanic surface
+
+In the current release:
+
+- `gloves run --env NAME=gloves://... -- <command...>` is the recommended generic UX
+- `gloves exec env --env NAME=gloves://... -- <command...>` is the explicit env-delivery primitive
+- `gloves vault exec` remains a separate vault-specific mount / execute / unmount workflow
+
+Both generic command paths compile into the same execution request shape:
+
+- command argv
+- secret-ref bindings
+- delivery strategy
+- runtime hygiene rules
+
+That shared execution layer is what leaves room for future file, profile, and broker/session delivery without another top-level command rewrite.
+
+## Secret Ref Contract
+
+Portable secret refs use the form `gloves://<secret-path>`.
+
+Examples:
+
+- `gloves://agents/devy/api-keys/openai`
+- `gloves://shared/database-url`
+
+The ref format is runtime-neutral and is used between:
+
+- `gloves`
+- runtime/plugin layers
+- host-side last-mile injectors
 
 ## Rotation Flow
 

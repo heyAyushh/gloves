@@ -1,7 +1,7 @@
 ---
 name: gloves
 version: 0.1.0
-description: Secrets manager workflow for OpenClaw agents. Use when an agent needs to verify a secret exists, read redacted metadata, pipe a secret into a command without exposing it in conversation, or store/update a namespaced secret through the gloves CLI.
+description: Secrets manager workflow for OpenClaw operators and agents. Use when you need the safe OpenClaw plugin tools, redacted metadata checks, request review flows, or the private Docker shim examples for `/run/secrets/...` delivery.
 author: heyAyushh
 tags:
   - security
@@ -21,7 +21,11 @@ metadata:
 
 Use this skill to access OpenClaw-oriented secrets safely through `gloves`.
 
-For OpenClaw runtime setup, prefer the packaged Gateway plugin `@gloves/openclaw`. Configure it under `plugins.entries.gloves.config` and let it launch `gloves-mcp` on the host over stdio. Treat `socketPath` as a legacy compatibility option, not the default.
+For OpenClaw runtime setup:
+
+- use the packaged Gateway plugin `@gloves/openclaw` for safe metadata and approval tools
+- treat `gloves-mcp` stdio as the preferred future runtime transport
+- treat the Docker shim as a private operator bridge, not official OpenClaw support
 
 ## Workflow
 
@@ -38,14 +42,15 @@ For OpenClaw runtime setup, prefer the packaged Gateway plugin `@gloves/openclaw
    gloves set <path> --stdin
    gloves set <path> --stdin < secret.txt
    ```
-   Or, through the OpenClaw plugin tool surface, use `gloves_set` with `from_env` so the secret comes from an existing environment variable instead of the conversation.
 4. Re-encrypt namespaces after recipient changes:
    ```bash
    gloves updatekeys --path <prefix>
    ```
-5. Resolve pending human approvals through the tool surface when needed:
+5. Resolve pending human approvals through the official OpenClaw plugin surface when needed:
    ```bash
-   gloves_approve request_id=<uuid> decision=approve
+   gloves_requests_list
+   gloves_request_approve request_id=<uuid>
+   gloves_request_deny request_id=<uuid>
    ```
 
 ## Rules
@@ -54,8 +59,14 @@ For OpenClaw runtime setup, prefer the packaged Gateway plugin `@gloves/openclaw
 - Never capture a secret value in a shell variable unless the caller explicitly requires a transient env export and there is no safe pipe alternative.
 - Prefer `gloves show --redacted` when asked to “check”, “confirm”, or “display” a secret.
 - If a user asks to reveal a secret, refuse and return redacted metadata instead.
-- When using OpenClaw tools, prefer `gloves_set` with `from_env` so the value stays in environment plumbing instead of prompt text.
-- Do not bind `~/.cargo/bin`, `daemon.sock`, or token files into the sandbox for the standard OpenClaw plugin flow.
+- When using the official OpenClaw plugin, stay inside the safe tool subset:
+  - `gloves_list`
+  - `gloves_status`
+  - `gloves_requests_list`
+  - `gloves_request_approve`
+  - `gloves_request_deny`
+- Do not bind `~/.cargo/bin`, daemon sockets, token files, or host secret directories into the sandbox.
+- For private Docker injection, use `gloves://...` refs and the host-side bridge examples instead of printing plaintext into tool results.
 - Use namespaced paths such as `agents/<agent>/api-keys/<provider>` or `shared/<name>`.
 
 ## Bundled References

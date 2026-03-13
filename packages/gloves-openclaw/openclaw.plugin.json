@@ -1,7 +1,7 @@
 {
   "id": "gloves",
   "name": "Gloves",
-  "description": "Brokered secret access for OpenClaw agents via host-side gloves-mcp sessions.",
+  "description": "Safe OpenClaw-native metadata and approval tools for a host-local gloves runtime.",
   "capabilities": {
     "tools": true
   },
@@ -9,57 +9,29 @@
     "type": "object",
     "additionalProperties": false,
     "required": [
-      "root",
-      "mcpConfigPath",
-      "tokenPath",
-      "injectMode"
+      "root"
     ],
     "properties": {
       "root": {
         "type": "string",
         "description": "Host path to the gloves runtime root."
       },
-      "mcpConfigPath": {
-        "type": "string",
-        "description": "Host path to the gloves-mcp TOML config file."
-      },
-      "tokenPath": {
-        "type": "string",
-        "description": "Host path where gloves-mcp writes the session token."
-      },
-      "glovesMcpBin": {
-        "type": "string",
-        "description": "Optional absolute host path to the gloves-mcp binary when it is not already on the Gateway PATH."
-      },
       "glovesBin": {
         "type": "string",
-        "description": "Optional gloves CLI path retained for compatibility."
+        "description": "Optional absolute host path to the gloves CLI when it is not already on the Gateway PATH."
       },
-      "socketPath": {
+      "operatorAgentId": {
         "type": "string",
-        "description": "Optional legacy Unix socket path. Omit to use the recommended stdio launch path."
+        "description": "Optional operator identity used for audit attribution when the plugin approves or denies requests."
       },
       "cwd": {
         "type": "string",
-        "description": "Optional working directory for spawned gloves-mcp sessions."
+        "description": "Optional working directory for spawned gloves CLI commands."
       },
       "timeoutMs": {
         "type": "number",
         "minimum": 1,
-        "description": "Per-request timeout in milliseconds."
-      },
-      "injectMode": {
-        "type": "string",
-        "enum": [
-          "env",
-          "tmpfs",
-          "both"
-        ],
-        "description": "How decrypted values are injected into the sandbox."
-      },
-      "tmpfsPath": {
-        "type": "string",
-        "description": "Required when injectMode includes tmpfs."
+        "description": "Per-command timeout in milliseconds."
       }
     }
   }

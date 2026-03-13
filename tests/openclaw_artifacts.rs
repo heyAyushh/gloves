@@ -12,13 +12,13 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
 
     assert!(contents.contains("openclaw plugins add @gloves/openclaw"));
     assert!(contents.contains("entries: {"));
-    assert!(contents.contains("glovesMcpBin: \"gloves-mcp\""));
+    assert!(contents.contains("glovesBin: \"gloves\""));
+    assert!(contents.contains("operatorAgentId: \"openclaw\""));
     assert!(contents.contains("group:plugins:gloves"));
-    assert!(contents.contains("root: \"~/.openclaw/secrets\""));
-    assert!(contents.contains("mcpConfigPath: \"~/.config/gloves/gloves.toml\""));
-    assert!(contents.contains("tokenPath: \"~/.openclaw/gloves/session-token\""));
-    assert!(contents.contains("socketPath: \"~/.openclaw/gloves/daemon.sock\""));
-    assert!(!contents.contains("package: \"@gloves/mcp-client\""));
+    assert!(contents.contains("root: \"/var/lib/openclaw/gloves\""));
+    assert!(!contents.contains("mcpConfigPath"));
+    assert!(!contents.contains("tokenPath"));
+    assert!(!contents.contains("socketPath"));
     assert!(!contents.contains("/home/exedev"));
     assert!(!contents.contains("GLOVES_SOCKET"));
     assert!(!contents.contains("/gloves.sock"));
@@ -29,13 +29,16 @@ fn gloves_openclaw_skill_teaches_redacted_and_pipe_first_workflow() {
     let contents = fs::read_to_string(repo_path("skills/gloves-openclaw/SKILL.md")).unwrap();
 
     assert!(contents.contains("@gloves/openclaw"));
-    assert!(contents.contains("plugins.entries.gloves.config"));
+    assert!(contents.contains("safe metadata and approval tools"));
     assert!(contents.contains("gloves show <path> --redacted"));
     assert!(contents.contains("gloves get <path> --format raw | <target-command>"));
     assert!(contents.contains("gloves set <path> --stdin"));
-    assert!(contents.contains("gloves_set"));
-    assert!(contents.contains("gloves_approve"));
-    assert!(contents.contains("Do not bind `~/.cargo/bin`, `daemon.sock`, or token files"));
+    assert!(contents.contains("gloves_requests_list"));
+    assert!(contents.contains("gloves_request_approve"));
+    assert!(contents.contains("gloves://"));
+    assert!(contents.contains(
+        "Do not bind `~/.cargo/bin`, daemon sockets, token files, or host secret directories"
+    ));
     assert!(contents.contains("Never print, echo, or restate a secret value"));
 }
 
@@ -119,7 +122,9 @@ fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
 
     assert!(security.contains("never appear in the LLM context"));
     assert!(security.contains("@gloves/openclaw"));
+    assert!(security.contains("gloves-docker-bridge"));
     assert!(architecture.contains("gloves-mcp"));
+    assert!(architecture.contains("gloves://"));
     assert!(architecture.contains("@gloves/openclaw"));
     assert!(readme.contains("group:plugins:gloves"));
 }
@@ -141,41 +146,32 @@ fn openclaw_plugin_package_exposes_current_gateway_manifest() {
     assert!(client_package_json.contains("\"files\""));
     assert!(client_package_json.contains("\"src/index.ts\""));
     assert!(package_json.contains("\"@gloves/openclaw\""));
-    assert!(package_json.contains("\"@gloves/mcp-client\""));
-    assert!(package_json.contains("\"@gloves/mcp-client\": \"0.1.2\""));
     assert!(package_json.contains("\"./dist/index.js\""));
     assert!(package_json.contains("\"extensions\""));
     assert!(manifest.contains("\"id\": \"gloves\""));
     assert!(manifest.contains("\"tools\": true"));
-    assert!(manifest.contains("\"socketPath\""));
-    assert!(manifest.contains("recommended stdio launch path"));
+    assert!(manifest.contains("\"operatorAgentId\""));
+    assert!(manifest.contains("Host path to the gloves runtime root"));
 }
 
 #[test]
-fn docker_harness_locks_down_the_sandboxed_openclaw_flow() {
-    let package_json = fs::read_to_string(repo_path("package.json")).unwrap();
-    let runner = fs::read_to_string(repo_path("scripts/docker-e2e.ts")).unwrap();
-    let sandbox = fs::read_to_string(repo_path("docker/agent-sandbox.ts")).unwrap();
-    let dockerfile = fs::read_to_string(repo_path("docker/agent-sandbox.Dockerfile")).unwrap();
+fn docker_bridge_examples_cover_private_runtime_launch_flow() {
+    let bridge_config =
+        fs::read_to_string(repo_path("integrations/openclaw/docker-bridge.toml")).unwrap();
+    let launcher = fs::read_to_string(repo_path(
+        "integrations/openclaw/launch-openclaw-with-gloves.sh",
+    ))
+    .unwrap();
+    let bridge_doc = fs::read_to_string(repo_path("docs/openclaw-runtime-bridge.md")).unwrap();
 
-    assert!(package_json.contains("\"docker:e2e\""));
-    assert!(runner.contains("--network=none"));
-    assert!(runner.contains("--read-only"));
-    assert!(runner.contains("--cap-drop=ALL"));
-    assert!(runner.contains("/run/gloves/session-token"));
-    assert!(runner.contains("GLOVES_MCP_BIN=/usr/local/bin/gloves-mcp"));
-    assert!(runner.contains("/data/root"));
-    assert!(runner.contains("cross-agent access denied"));
-    assert!(runner.contains("secret plaintext leaked"));
-    assert!(sandbox.contains("gloves_get"));
-    assert!(sandbox.contains("gloves_rotate"));
-    assert!(sandbox.contains("GLOVES_MCP_BIN"));
-    assert!(sandbox.contains("conversation.json"));
-    assert!(dockerfile.contains("FROM rust:1.88-bookworm AS build"));
-    assert!(dockerfile
-        .contains("COPY --from=build /workspace/target/release/gloves /usr/local/bin/gloves"));
-    assert!(dockerfile.contains(
-        "COPY --from=build /workspace/target/release/gloves-mcp /usr/local/bin/gloves-mcp"
-    ));
-    assert!(dockerfile.contains("ENTRYPOINT [\"bun\", \"/workspace/docker/agent-sandbox.ts\"]"));
+    assert!(bridge_config.contains("secret_ref = \"gloves://agents/devy/api-keys/openai\""));
+    assert!(bridge_config.contains("container_path = \"/run/secrets/openai\""));
+    assert!(bridge_config.contains("\"openclaw.agent\" = \"devy\""));
+    assert!(bridge_config.contains("tmpfs_spec"));
+    assert!(launcher.contains("gloves-docker-bridge"));
+    assert!(launcher.contains("GLOVES_DOCKER_BRIDGE_CONFIG"));
+    assert!(launcher.contains("GLOVES_DOCKER_REAL_BIN"));
+    assert!(bridge_doc.contains("private, operator-controlled"));
+    assert!(bridge_doc.contains("/run/secrets/..."));
+    assert!(bridge_doc.contains("gloves://"));
 }

@@ -31,7 +31,18 @@ gloves --root .openclaw/secrets list
 
 If you omit `--ttl`, `gloves` uses `defaults.secret_ttl_days`; the built-in default is 30 days. Use `--ttl never` for a non-expiring secret. The create command prints the expiry timestamp for expiring secrets and says `never expires` for long-lived ones.
 
-## 4) Create a human-owned secret and request access
+## 4) Run one command with an explicit secret ref
+
+```bash
+gloves --root .openclaw/secrets run --env API_KEY=gloves://service/token -- env
+gloves --root .openclaw/secrets exec env --env API_KEY=gloves://service/token -- env
+```
+
+Use `gloves run` as the default top-level UX.
+
+Use `gloves exec env` when you want to choose the env-delivery mechanic directly.
+
+## 5) Create a human-owned secret and request access
 
 Store secret in `pass` (human side):
 
@@ -65,21 +76,21 @@ Check status:
 gloves --root .openclaw/secrets secrets status prod/db/root-password
 ```
 
-## 5) Initialize per-agent GPG identity (human workflows)
+## 6) Initialize per-agent GPG identity (human workflows)
 
 ```bash
 gloves --root .openclaw/secrets --agent human-ops gpg create
 gloves --root .openclaw/secrets --agent human-ops gpg fingerprint
 ```
 
-## 6) Verify runtime health
+## 7) Verify runtime health
 
 ```bash
 gloves --root .openclaw/secrets verify
 gloves --root .openclaw/secrets audit --limit 25
 ```
 
-## 7) Use recursive help for command discovery
+## 8) Use recursive help for command discovery
 
 ```bash
 gloves help

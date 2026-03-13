@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.5.10
+
+### Patch Changes
+
+- Rebuilt `@gloves/openclaw` as a real OpenClaw-native plugin package that registers only the guaranteed-safe tool subset:
+  - `gloves_list`
+  - `gloves_status`
+  - `gloves_requests_list`
+  - `gloves_request_approve`
+  - `gloves_request_deny`
+- Redesigned process execution around explicit secret refs:
+  - `gloves run --env NAME=gloves://... -- <command...>` is now the top-level user-facing execution UX
+  - `gloves exec env --env NAME=gloves://... -- <command...>` exposes the lower-level env-delivery mechanic directly
+  - `gloves vault exec` remains the separate vault mount / execute / unmount workflow
+- Added runtime-neutral `gloves://...` secret refs and documented them as the contract between `gloves`, runtime layers, and last-mile injectors.
+- Added `gloves-docker-bridge`, a private operator-controlled Docker wrapper that injects resolved secret refs into sandbox tmpfs files under `/run/secrets/...` without patching the OpenClaw binary.
+- Split the docs and examples into:
+  - official safe OpenClaw plugin support
+  - preferred future `gloves-mcp` stdio transport
+  - private Docker bridge support
+
 ## 0.5.9
 
 ### Patch Changes

@@ -44,27 +44,40 @@ The main threats addressed today are:
 
 - `gloves show` returns metadata only.
 - `gloves-mcp` returns redacted metadata for `gloves_get`; it does not place the plaintext in the MCP result body.
-- The Bun plugin injects the plaintext into sandbox environment variables or tmpfs files and returns only a redacted confirmation.
+- `@gloves/openclaw` exposes only safe metadata and request-review tools, so its tool results never contain plaintext secret values.
+- The private `gloves-docker-bridge` writes resolved bytes only into `/run/secrets/...` inside matched containers; those bytes never appear in tool results.
 
 ### Session Authentication and Approval
 
 - `gloves-mcp` writes a per-process session token and rejects unauthenticated MCP initialization.
 - Read/write tools go through approval-tier checks.
 - The current server supports auto approval and operator-mediated approval through pending requests plus `gloves_approve`.
+- The OpenClaw plugin surfaces request review through `gloves_requests_list`, `gloves_request_approve`, and `gloves_request_deny`.
 
 ### Auditability
 
 - `gloves-mcp` appends JSONL audit records for startup, auth failures, reads, writes, approvals, and rotation.
+- `gloves-docker-bridge` appends host-side audit records for matched containers and secret-ref injections without logging plaintext values.
+
+### Process Execution Surfaces
+
+- `gloves run` is the default user-facing process-execution command.
+- `gloves exec env` is the lower-level explicit env-delivery primitive.
+- Both require explicit `NAME=gloves://...` bindings in the current release.
+- `gloves vault exec` is a different security domain: vault mount / execute / unmount, not the generic secret-ref execution surface.
+- Plaintext values are injected into the child environment only after ACL checks and are not echoed back through wrapper output.
 
 ## Operational Guidance
 
 - For OpenClaw, prefer the packaged Gateway plugin (`@gloves/openclaw`) over direct MCP server wiring in agent config.
-- Let the plugin launch `gloves-mcp` on the host over stdio; omit `socketPath` unless you are keeping a legacy unix-socket deployment.
-- Prefer `injectMode: "env"` or `injectMode: "both"` only when the sandbox lifecycle is tightly controlled.
+- Treat `gloves-mcp` stdio as the preferred future OpenClaw-facing transport when a first-class runtime contract is available.
+- Use the private Docker bridge only when you control OpenClaw process start and need `/run/secrets/...` delivery today.
+- Prefer explicit ref bindings over whole-scope environment injection.
+- Treat env delivery as the baseline compatibility path; move higher-risk secrets toward file or brokered delivery as those strategies land.
 - Use tmpfs injection for file-based secrets, never the writable project tree.
-- Keep the store root, identities, session token path, and `gloves-mcp` binary on the host side instead of bind-mounting them into the sandbox.
+- Keep the store root, identities, bridge state, and runtime binaries on the host side instead of bind-mounting them into the sandbox.
 - Rotate identities after operator turnover or suspected exposure.
-- Use the Docker harness as a regression check for redaction, cross-agent denial, and rotation safety in the stdio plugin flow.
+- Use the bridge tests as a regression check for `/run/secrets/...` injection, cleanup, and plaintext-free outputs.
 
 ## Current Gaps
 

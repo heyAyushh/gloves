@@ -24,6 +24,7 @@ use crate::{
     reaper::TtlReaper,
     types::{AgentId, Owner, SecretId, SecretValue},
     vault::gocryptfs::{GocryptfsDriver, EXTPASS_AGENT_ENV_VAR, EXTPASS_ROOT_ENV_VAR},
+    SecretRef,
 };
 
 #[cfg(feature = "tui")]
@@ -33,11 +34,11 @@ use super::{
     output::{self, OutputStatus},
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
-    AccessCommand, Cli, Command, ConfigCommand, ErrorFormatArg, GpgCommand, RequestsCommand,
-    SecretReadFormatArg, SecretShowFormatArg, SecretsCommand, VaultModeArg, DEFAULT_AGENT_ID,
-    DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS, DEFAULT_DAEMON_REQUEST_LIMIT_BYTES,
-    DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS, DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES,
-    DEFAULT_VAULT_SECRET_TTL_DAYS,
+    AccessCommand, Cli, Command, ConfigCommand, ErrorFormatArg, ExecCommand, GpgCommand,
+    RequestsCommand, SecretReadFormatArg, SecretShowFormatArg, SecretsCommand, VaultModeArg,
+    DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS,
+    DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS,
+    DEFAULT_VAULT_MOUNT_TTL, DEFAULT_VAULT_SECRET_LENGTH_BYTES, DEFAULT_VAULT_SECRET_TTL_DAYS,
 };
 
 const REQUIRED_VAULT_BINARIES: [&str; 3] = ["gocryptfs", "fusermount", "mountpoint"];
@@ -181,6 +182,38 @@ impl GpgHomedir {
     }
 }
 
+#[derive(Debug, Clone)]
+struct ExecutionEnvBinding {
+    variable_name: String,
+    secret_ref: SecretRef,
+}
+
+#[derive(Debug, Clone)]
+enum ExecutionDeliveryStrategy {
+    Env,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionRequest {
+    strategy: ExecutionDeliveryStrategy,
+    env_bindings: Vec<ExecutionEnvBinding>,
+    command: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedExecutionRequest {
+    command: Vec<String>,
+    environment: Vec<(String, String)>,
+    injected_variables: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionResult {
+    executable: String,
+    exit_code: i32,
+    injected_variables: Vec<String>,
+}
+
 pub(crate) fn run(mut cli: Cli) -> Result<i32> {
     if let Command::ExtpassGet { name } = &cli.command {
         return run_extpass_get(name);
@@ -279,6 +312,47 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                     }
                 }
             }
+        }
+        Command::Run { env, command } => {
+            let result = execute_generic_command(
+                &state,
+                ExecutionRequest {
+                    strategy: ExecutionDeliveryStrategy::Env,
+                    env_bindings: parse_execution_env_bindings(&env)?,
+                    command,
+                },
+                "run",
+            )?;
+            let target = Some(format!(
+                "{} ({} env bindings)",
+                result.executable,
+                result.injected_variables.len()
+            ));
+            log_command_executed(&state.paths, &state.default_agent_id, "run", target);
+            return Ok(result.exit_code);
+        }
+        Command::Exec { command } => {
+            let (action_name, result) = match command {
+                ExecCommand::Env { env, command } => (
+                    "exec-env",
+                    execute_generic_command(
+                        &state,
+                        ExecutionRequest {
+                            strategy: ExecutionDeliveryStrategy::Env,
+                            env_bindings: parse_execution_env_bindings(&env)?,
+                            command,
+                        },
+                        "exec env",
+                    )?,
+                ),
+            };
+            let target = Some(format!(
+                "{} ({} env bindings)",
+                result.executable,
+                result.injected_variables.len()
+            ));
+            log_command_executed(&state.paths, &state.default_agent_id, action_name, target);
+            return Ok(result.exit_code);
         }
         Command::Show {
             path,
@@ -1644,6 +1718,149 @@ fn sanitize_for_gpg_user_id(value: &str) -> String {
         .collect()
 }
 
+fn execute_generic_command(
+    state: &EffectiveCliState,
+    request: ExecutionRequest,
+    action_name: &str,
+) -> Result<ExecutionResult> {
+    let executable = request.command.first().cloned().ok_or_else(|| {
+        GlovesError::InvalidInput(format!("{action_name} requires a command after '--'"))
+    })?;
+    let mut resolved_request = resolve_execution_request(state, request)?;
+    let command_result = vault_cmd::run_child_command(
+        &resolved_request.command,
+        &resolved_request.environment,
+        &[EXTPASS_ROOT_ENV_VAR, EXTPASS_AGENT_ENV_VAR],
+        action_name,
+    );
+    resolved_request
+        .environment
+        .iter_mut()
+        .for_each(|(_, value)| value.zeroize());
+    let exit_code = command_result?;
+    Ok(ExecutionResult {
+        executable,
+        exit_code,
+        injected_variables: resolved_request.injected_variables,
+    })
+}
+
+fn parse_execution_env_bindings(bindings: &[String]) -> Result<Vec<ExecutionEnvBinding>> {
+    if bindings.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "process execution requires at least one --env binding".to_owned(),
+        ));
+    }
+
+    let mut parsed_bindings = Vec::with_capacity(bindings.len());
+    let mut seen_variables = HashSet::new();
+    for literal in bindings {
+        let binding = parse_execution_env_binding(literal)?;
+        if !seen_variables.insert(binding.variable_name.clone()) {
+            return Err(GlovesError::InvalidInput(format!(
+                "duplicate environment variable in --env: {}",
+                binding.variable_name
+            )));
+        }
+        parsed_bindings.push(binding);
+    }
+    Ok(parsed_bindings)
+}
+
+fn parse_execution_env_binding(literal: &str) -> Result<ExecutionEnvBinding> {
+    let trimmed_literal = literal.trim();
+    if trimmed_literal.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "--env bindings must not be empty".to_owned(),
+        ));
+    }
+    let (variable_name, secret_ref) = trimmed_literal.split_once('=').ok_or_else(|| {
+        GlovesError::InvalidInput(
+            "--env bindings must use NAME=gloves://namespace/secret-path".to_owned(),
+        )
+    })?;
+    let variable_name = validate_execution_env_variable_name(variable_name.trim())?;
+    let secret_ref = secret_ref.trim().parse::<SecretRef>().map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "invalid secret ref `{}` in --env binding: {}",
+            secret_ref.trim(),
+            error
+        ))
+    })?;
+    Ok(ExecutionEnvBinding {
+        variable_name,
+        secret_ref,
+    })
+}
+
+fn resolve_execution_request(
+    state: &EffectiveCliState,
+    request: ExecutionRequest,
+) -> Result<ResolvedExecutionRequest> {
+    match request.strategy {
+        ExecutionDeliveryStrategy::Env => {
+            resolve_execution_env_request(state, request.command, request.env_bindings)
+        }
+    }
+}
+
+fn resolve_execution_env_request(
+    state: &EffectiveCliState,
+    command: Vec<String>,
+    env_bindings: Vec<ExecutionEnvBinding>,
+) -> Result<ResolvedExecutionRequest> {
+    let store = NamespacedStore::new(state.paths.root());
+    let agent = state.default_agent_id.clone();
+    let mut environment = Vec::with_capacity(env_bindings.len());
+    let mut injected_variables = Vec::with_capacity(env_bindings.len());
+    for binding in env_bindings {
+        let secret_id = binding.secret_ref.secret_id().clone();
+        ensure_secret_acl_allowed(state, SecretAclOperation::Read, Some(&secret_id))?;
+        let result = match store.get_secret(&secret_id, &agent) {
+            Ok(result) => result,
+            Err(GlovesError::NotFound) => {
+                return Err(run_secret_not_found_error(
+                    binding.secret_ref.secret_id().as_str(),
+                ))
+            }
+            Err(error) => return Err(error),
+        };
+        injected_variables.push(binding.variable_name.clone());
+        environment.push((binding.variable_name, result.value));
+    }
+    Ok(ResolvedExecutionRequest {
+        command,
+        environment,
+        injected_variables,
+    })
+}
+
+fn validate_execution_env_variable_name(variable_name: &str) -> Result<String> {
+    let trimmed_name = variable_name.trim();
+    if trimmed_name.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "--env variable name must not be empty".to_owned(),
+        ));
+    }
+    let mut characters = trimmed_name.chars();
+    let Some(first_character) = characters.next() else {
+        return Err(GlovesError::InvalidInput(
+            "--env variable name must not be empty".to_owned(),
+        ));
+    };
+    if !matches!(first_character, 'A'..='Z' | 'a'..='z' | '_') {
+        return Err(GlovesError::InvalidInput(format!(
+            "invalid environment variable name `{trimmed_name}` in --env"
+        )));
+    }
+    if !characters.all(|character| matches!(character, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_')) {
+        return Err(GlovesError::InvalidInput(format!(
+            "invalid environment variable name `{trimmed_name}` in --env"
+        )));
+    }
+    Ok(trimmed_name.to_owned())
+}
+
 fn compact_process_error(stderr: &str) -> String {
     let compacted = stderr.trim();
     if compacted.is_empty() {
@@ -1716,6 +1933,12 @@ fn pending_request_for_id(
 fn secret_not_found_error(secret_name: &str, action: &str) -> GlovesError {
     GlovesError::InvalidInput(format!(
         "secret `{secret_name}` was not found\nRun `{SECRET_LOOKUP_COMMAND}` to inspect available secrets, then retry `gloves secrets {action} <secret-name>`"
+    ))
+}
+
+fn run_secret_not_found_error(secret_name: &str) -> GlovesError {
+    GlovesError::InvalidInput(format!(
+        "secret `{secret_name}` was not found\nRun `{SECRET_LOOKUP_COMMAND}` to inspect available secrets, then retry `gloves run --env NAME=gloves://... -- <command...>`"
     ))
 }
 
@@ -3075,10 +3298,10 @@ mod tests {
     use super::{
         audit_event_name, audit_event_summary, bytes_to_hex, format_audit_record_line,
         is_binary_available, is_executable_file, latest_audit_records, load_audit_records,
-        parse_policy_url_argument, parse_policy_url_prefix, parse_tui_bootstrap_args,
-        path_operation_label, policy_url_matches_prefix, secret_bytes_json_value,
-        validate_pipe_url_prefix, AuditRecord, ErrorFormatArg, PathOperation, VaultModeArg,
-        SECRET_PIPE_URL_POLICY_ENV_VAR,
+        parse_execution_env_binding, parse_policy_url_argument, parse_policy_url_prefix,
+        parse_tui_bootstrap_args, path_operation_label, policy_url_matches_prefix,
+        secret_bytes_json_value, validate_execution_env_variable_name, validate_pipe_url_prefix,
+        AuditRecord, ErrorFormatArg, PathOperation, VaultModeArg, SECRET_PIPE_URL_POLICY_ENV_VAR,
     };
     #[cfg(unix)]
     use super::{
@@ -3102,6 +3325,35 @@ mod tests {
 
     #[cfg(unix)]
     static PATH_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn parse_execution_env_binding_requires_explicit_secret_ref_binding() {
+        let explicit = parse_execution_env_binding("API_KEY=gloves://shared/github-token").unwrap();
+        assert_eq!(explicit.variable_name, "API_KEY");
+        assert_eq!(
+            explicit.secret_ref.secret_id().as_str(),
+            "shared/github-token"
+        );
+
+        let missing_equals = parse_execution_env_binding("gloves://shared/db-url").unwrap_err();
+        assert!(missing_equals
+            .to_string()
+            .contains("must use NAME=gloves://namespace/secret-path"));
+    }
+
+    #[test]
+    fn parse_execution_env_binding_rejects_invalid_secret_refs() {
+        let error = parse_execution_env_binding("API_KEY=shared/github-token").unwrap_err();
+        assert!(error.to_string().contains("invalid secret ref"));
+    }
+
+    #[test]
+    fn validate_execution_env_variable_name_rejects_invalid_values() {
+        let error = validate_execution_env_variable_name("1INVALID").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid environment variable name"));
+    }
 
     #[test]
     fn parse_policy_url_prefix_rejects_query_and_fragment() {

@@ -22,6 +22,7 @@ This is the canonical documentation map for `gloves`.
 - Platform/SRE:
   - [Configuration Guide](configuration.md)
   - [VM Multi-Agent Operations](vm-multi-agent-human-guide.md)
+  - [OpenClaw Runtime Bridge](openclaw-runtime-bridge.md)
   - [Security Hardening](security-hardening.md)
   - [Release Binaries](release-binaries.md)
   - [Architecture](../ARCHITECTURE.md)
@@ -47,6 +48,8 @@ This is the canonical documentation map for `gloves`.
 
 Primary groups:
 
+- `gloves run ...`
+- `gloves exec ...`
 - `gloves secrets ...`
 - `gloves request ...`
 - `gloves requests ...`
@@ -61,5 +64,6 @@ Primary groups:
 - [Security](../SECURITY.md)
 - [Security Hardening](security-hardening.md)
 - [VM Multi-Agent Operations](vm-multi-agent-human-guide.md)
+- [OpenClaw Runtime Bridge](openclaw-runtime-bridge.md)
 - [Release Binaries](release-binaries.md)
 - [Release Playbook](../RELEASE.md)

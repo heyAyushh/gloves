@@ -10,6 +10,8 @@ This guide covers daily command usage for secret lifecycle and human approval wo
 | Read secret | `gloves secrets get <name>` |
 | Share secret with agent | `gloves secrets grant <name> --to <agent>` |
 | Remove secret | `gloves secrets revoke <name>` |
+| Run one command with secret refs | `gloves run --env NAME=gloves://... -- <command...>` |
+| Select env delivery explicitly | `gloves exec env --env NAME=gloves://... -- <command...>` |
 | Create request for human-owned secret | `gloves request <name> --reason <text>` |
 | List pending requests | `gloves requests list` |
 | Approve pending request | `gloves requests approve <request-id>` |
@@ -48,6 +50,19 @@ Revoke:
 
 ```bash
 gloves secrets revoke svc/github/token
+```
+
+Run one child process with explicit secret refs:
+
+```bash
+gloves run --env API_KEY=gloves://shared/github-token -- env
+gloves run --env DB_URL=gloves://shared/database-url -- ./migrate.sh
+```
+
+Use `gloves exec env` when you need the lower-level env-delivery primitive directly:
+
+```bash
+gloves exec env --env API_KEY=gloves://shared/github-token -- env
 ```
 
 ## Human Request Lifecycle
