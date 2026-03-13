@@ -1,282 +1,322 @@
-import { GlovesClient, type GlovesClientConfig } from "@gloves/mcp-client";
+import { spawn } from "node:child_process";
+import { readdir, readFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 
 export const id = "gloves";
+export const name = "Gloves";
+export const SAFE_TOOL_NAMES = [
+  "gloves_list",
+  "gloves_status",
+  "gloves_requests_list",
+  "gloves_request_approve",
+  "gloves_request_deny",
+] as const;
 
-export type SecretInjectMode = "env" | "tmpfs" | "both";
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_OPERATOR_AGENT_ID = "openclaw";
 
-export interface SecretInjectionConfig {
-  injectMode: SecretInjectMode;
-  tmpfsPath?: string;
+type SafeToolName = typeof SAFE_TOOL_NAMES[number];
+
+export interface GlovesOpenClawConfig {
+  root: string;
+  glovesBin?: string;
+  operatorAgentId?: string;
+  cwd?: string;
+  timeoutMs?: number;
 }
 
-export interface SecretEnvironment {
-  set: (name: string, value: string) => void;
-  get?: (name: string) => string | undefined;
-}
-
-export interface SecretInjectionSink {
-  env: SecretEnvironment;
-  writeFile?: (path: string, contents: string, options?: { mode?: number }) => Promise<void> | void;
-}
-
-export interface GlovesPluginConfig extends Omit<GlovesClientConfig, "agentId">, SecretInjectionConfig {}
-
-export interface PluginToolDefinition {
+export interface OpenClawToolDefinition {
+  name: SafeToolName;
   description: string;
-  parameters: Record<string, unknown>;
-  handler: (argumentsValue: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  parameters: {
+    type: "object";
+    properties: Record<string, unknown>;
+    required?: string[];
+  };
+  execute: (_toolCallId: string, parameters: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
-export interface PluginAPI {
-  agent: { id: string };
-  sandbox: SecretInjectionSink;
-  registerTool: (name: string, definition: PluginToolDefinition) => void;
-  onShutdown: (callback: () => void | Promise<void>) => void;
+export interface OpenClawPluginApi {
+  config: GlovesOpenClawConfig;
+  registerTool: (tool: OpenClawToolDefinition, options?: { optional?: boolean }) => void;
 }
 
 export interface OpenClawPlugin {
+  id: string;
   name: string;
-  version: string;
-  init: (api: PluginAPI) => Promise<void>;
+  register: (api: OpenClawPluginApi) => Promise<void>;
 }
 
-export default function glovesPlugin(config: GlovesPluginConfig): OpenClawPlugin {
+export default {
+  id,
+  name,
+  async register(api: OpenClawPluginApi) {
+    const config = normalizeConfig(api.config);
+    for (const tool of createTools(config)) {
+      api.registerTool(tool, { optional: true });
+    }
+  },
+} satisfies OpenClawPlugin;
+
+export function normalizeConfig(config: GlovesOpenClawConfig): Required<GlovesOpenClawConfig> {
+  if (!config.root || config.root.trim().length === 0) {
+    throw new Error("plugins.entries.gloves.config.root is required");
+  }
   return {
-    name: "gloves",
-    version: "0.1.2",
-    async init(api: PluginAPI) {
-      validatePluginConfig(config, api);
-      const client = await GlovesClient.connect({
-        ...config,
-        agentId: api.agent.id,
-      });
-
-      api.registerTool("gloves_get", {
-        description: "Retrieve a secret for the current agent and inject it without exposing the value.",
-        parameters: {
-          path: { type: "string", required: true },
-          inject_as: { type: "string", required: false },
-        },
-        handler: async ({ path, inject_as }) => {
-          const secretPath = expectString(path, "path");
-          const result = await client.get(secretPath);
-          const delivery = await deliverSecretValue(
-            secretPath,
-            result.value,
-            typeof inject_as === "string" ? inject_as : undefined,
-            config,
-            api.sandbox,
-          );
-
-          return {
-            success: true,
-            injected: true,
-            inject_target: delivery.injectTarget,
-            inject_method: delivery.injectMethod,
-            message: `Secret '${secretPath}' (${result.metadata.length} chars) injected as ${delivery.injectTarget}`,
-          };
-        },
-      });
-
-      api.registerTool("gloves_list", {
-        description: "List available secret names for the current agent.",
-        parameters: {
-          prefix: { type: "string", required: false },
-        },
-        handler: async ({ prefix }) => {
-          const names = await client.list(typeof prefix === "string" ? prefix : undefined);
-          return { secrets: names, count: names.length };
-        },
-      });
-
-      api.registerTool("gloves_show", {
-        description: "Show secret metadata without exposing the value.",
-        parameters: {
-          path: { type: "string", required: true },
-        },
-        handler: async ({ path }) => {
-          return await client.show(expectString(path, "path"));
-        },
-      });
-
-      api.registerTool("gloves_set", {
-        description: "Store a secret from an existing environment variable without exposing the value.",
-        parameters: {
-          path: { type: "string", required: true },
-          from_env: { type: "string", required: true },
-        },
-        handler: async ({ path, from_env }) => {
-          const secretPath = expectString(path, "path");
-          const envName = expectString(from_env, "from_env");
-          const secretValue = resolveSecretValueFromSources(envName, {
-            readEnvironment: api.sandbox.env.get,
-            readProcessEnvironment: (name) => process.env[name],
-          });
-          await client.set(secretPath, secretValue);
-          return {
-            success: true,
-            stored: true,
-            path: secretPath,
-            from_env: envName,
-            length: secretValue.length,
-            message: `Secret '${secretPath}' stored from ${envName}`,
-          };
-        },
-      });
-
-      api.registerTool("gloves_approve", {
-        description: "Approve or deny a pending secret-access request.",
-        parameters: {
-          request_id: { type: "string", required: true },
-          decision: { type: "string", required: true },
-          reason: { type: "string", required: false },
-        },
-        handler: async ({ request_id, decision, reason }) => {
-          const requestId = expectString(request_id, "request_id");
-          const parsedDecision = expectDecision(decision);
-          const parsedReason = typeof reason === "string" && reason.length > 0 ? reason : undefined;
-          await client.approve(requestId, parsedDecision, parsedReason);
-          return {
-            success: true,
-            request_id: requestId,
-            decision: parsedDecision,
-          };
-        },
-      });
-
-      api.registerTool("gloves_delete", {
-        description: "Attempt to delete a secret. The daemon denies destructive operations by policy.",
-        parameters: {
-          path: { type: "string", required: true },
-        },
-        handler: async ({ path }) => {
-          const secretPath = expectString(path, "path");
-          await client.delete(secretPath);
-          return {
-            success: true,
-            deleted: true,
-            path: secretPath,
-          };
-        },
-      });
-
-      api.registerTool("gloves_rotate", {
-        description: "Rotate the current agent identity and re-encrypt affected secrets.",
-        parameters: {
-          agent_id: { type: "string", required: false },
-        },
-        handler: async ({ agent_id }) => {
-          const requestedAgent = typeof agent_id === "string" && agent_id.length > 0
-            ? agent_id
-            : api.agent.id;
-          if (requestedAgent !== api.agent.id) {
-            throw new Error("gloves_rotate may only rotate the current agent");
-          }
-
-          await client.rotate(requestedAgent);
-          return {
-            success: true,
-            agent: requestedAgent,
-            rotated: true,
-          };
-        },
-      });
-
-      api.onShutdown(() => client.disconnect());
-    },
+    root: config.root,
+    glovesBin: config.glovesBin ?? "gloves",
+    operatorAgentId: config.operatorAgentId ?? DEFAULT_OPERATOR_AGENT_ID,
+    cwd: config.cwd ?? process.cwd(),
+    timeoutMs: config.timeoutMs ?? DEFAULT_TIMEOUT_MS,
   };
 }
 
-export function defaultSecretTargetName(secretPath: string): string {
-  return secretPath
-    .split("/")
-    .at(-1)!
-    .replace(/[^A-Za-z0-9]/g, "_")
-    .toUpperCase();
+export function createTools(config: Required<GlovesOpenClawConfig>): OpenClawToolDefinition[] {
+  return [
+    {
+      name: "gloves_list",
+      description: "List secret names without decrypting or returning plaintext values.",
+      parameters: {
+        type: "object",
+        properties: {
+          prefix: {
+            type: "string",
+            description: "Optional prefix used to filter secret names.",
+          },
+        },
+      },
+      execute: async (_toolCallId, parameters) => {
+        const prefix = optionalString(parameters.prefix, "prefix");
+        const secrets = await listSecretNamesFromMetadata(config.root, prefix);
+        return {
+          secrets,
+          count: secrets.length,
+        };
+      },
+    },
+    {
+      name: "gloves_status",
+      description: "Show request status metadata for one secret path.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Secret path to inspect.",
+          },
+        },
+        required: ["path"],
+      },
+      execute: async (_toolCallId, parameters) => {
+        const path = requiredString(parameters.path, "path");
+        const payload = await runGlovesJsonCommand(config, ["secrets", "status", path]);
+        return objectResult(payload);
+      },
+    },
+    {
+      name: "gloves_requests_list",
+      description: "List pending secret-access requests without returning secret plaintext.",
+      parameters: {
+        type: "object",
+        properties: {},
+      },
+      execute: async () => {
+        const payload = await runGlovesJsonCommand(config, ["requests", "list"]);
+        const requests = Array.isArray(unwrapPayloadResult(payload))
+          ? (unwrapPayloadResult(payload) as Array<Record<string, unknown>>)
+          : [];
+        return {
+          requests,
+          count: requests.length,
+        };
+      },
+    },
+    {
+      name: "gloves_request_approve",
+      description: "Approve a pending secret-access request by id.",
+      parameters: {
+        type: "object",
+        properties: {
+          request_id: {
+            type: "string",
+            description: "Pending request id to approve.",
+          },
+        },
+        required: ["request_id"],
+      },
+      execute: async (_toolCallId, parameters) => {
+        const requestId = requiredString(parameters.request_id, "request_id");
+        const payload = await runGlovesJsonCommand(config, ["requests", "approve", requestId]);
+        return objectResult(payload);
+      },
+    },
+    {
+      name: "gloves_request_deny",
+      description: "Deny a pending secret-access request by id.",
+      parameters: {
+        type: "object",
+        properties: {
+          request_id: {
+            type: "string",
+            description: "Pending request id to deny.",
+          },
+        },
+        required: ["request_id"],
+      },
+      execute: async (_toolCallId, parameters) => {
+        const requestId = requiredString(parameters.request_id, "request_id");
+        const payload = await runGlovesJsonCommand(config, ["requests", "deny", requestId]);
+        return objectResult(payload);
+      },
+    },
+  ];
 }
 
-export function resolveSecretValueFromSources(
-  envName: string,
-  sources: {
-    readEnvironment?: (name: string) => string | undefined;
-    readProcessEnvironment?: (name: string) => string | undefined;
-  },
-): string {
-  const environmentValue = sources.readEnvironment?.(envName);
-  if (typeof environmentValue === "string") {
-    return environmentValue;
+export async function runGlovesJsonCommand(
+  config: Required<GlovesOpenClawConfig>,
+  commandArguments: string[],
+): Promise<unknown> {
+  const child = spawn(
+    config.glovesBin,
+    ["--json", "--root", config.root, "--agent", config.operatorAgentId, ...commandArguments],
+    {
+      cwd: config.cwd,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+
+  const exitCode = await waitForExitCode(child, config.timeoutMs);
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8").trim();
+  const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+  if (exitCode !== 0) {
+    throw new Error(stderr || stdout || `gloves exited with code ${exitCode}`);
+  }
+  if (stdout.length === 0) {
+    throw new Error("gloves returned no JSON payload");
   }
 
-  const processValue = sources.readProcessEnvironment?.(envName);
-  if (typeof processValue === "string") {
-    return processValue;
+  const payload = JSON.parse(stdout) as unknown;
+  if (isEnvelope(payload) && payload.status !== "ok") {
+    throw new Error(`unexpected gloves response status: ${String(payload.status)}`);
   }
+  return payload;
+}
 
-  throw new Error(
-    `secret source '${envName}' is not available via environment or process sources`,
+export function filterSecretNames(payload: unknown, prefix?: string): string[] {
+  const result = unwrapPayloadResult(payload);
+  const entries = Array.isArray(result) ? result : [];
+  const secretPrefix = prefix?.trim();
+  return entries
+    .filter((entry): entry is { kind?: unknown; id?: unknown } =>
+      typeof entry === "object" && entry !== null,
+    )
+    .filter((entry) => entry.kind === "secret" && typeof entry.id === "string")
+    .map((entry) => entry.id as string)
+    .filter((entry) => !secretPrefix || entry.startsWith(secretPrefix));
+}
+
+function objectResult(payload: unknown): Record<string, unknown> {
+  const result = unwrapPayloadResult(payload);
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("gloves command did not return an object result");
+  }
+  return result as Record<string, unknown>;
+}
+
+function unwrapPayloadResult(payload: unknown): unknown {
+  if (typeof payload === "object" && payload !== null && "result" in payload) {
+    return (payload as { result?: unknown }).result;
+  }
+  return payload;
+}
+
+function isEnvelope(payload: unknown): payload is { status?: unknown; result?: unknown } {
+  return (
+    typeof payload === "object"
+    && payload !== null
+    && "status" in payload
+    && "command" in payload
+    && "result" in payload
   );
 }
 
-export function validateSecretDeliveryConfig(
-  config: SecretInjectionConfig,
-  sink: Pick<SecretInjectionSink, "writeFile">,
-): void {
-  if (config.injectMode === "tmpfs" || config.injectMode === "both") {
-    if (!config.tmpfsPath) {
-      throw new Error("tmpfs delivery requires tmpfsPath at plugin startup");
-    }
-    if (!sink.writeFile) {
-      throw new Error("tmpfs delivery requires api.sandbox.writeFile at plugin startup");
-    }
-  }
+async function listSecretNamesFromMetadata(root: string, prefix?: string): Promise<string[]> {
+  const metadataRoot = join(root, "store", ".gloves-meta");
+  const entries = await collectMetadataEntries(metadataRoot);
+  const normalizedPrefix = prefix?.trim();
+  return entries.filter((entry) => !normalizedPrefix || entry.startsWith(normalizedPrefix)).sort();
 }
 
-export async function deliverSecretValue(
-  secretPath: string,
-  secretValue: string,
-  requestedTargetName: string | undefined,
-  config: SecretInjectionConfig,
-  sink: SecretInjectionSink,
-): Promise<{ injectTarget: string; injectMethod: SecretInjectMode }> {
-  validateSecretDeliveryConfig(config, sink);
-
-  const targetName = requestedTargetName && requestedTargetName.length > 0
-    ? requestedTargetName
-    : defaultSecretTargetName(secretPath);
-
-  if (config.injectMode === "env" || config.injectMode === "both") {
-    sink.env.set(targetName, secretValue);
+async function collectMetadataEntries(directory: string): Promise<string[]> {
+  let names: string[] = [];
+  let directoryEntries: Awaited<ReturnType<typeof readdir>>;
+  try {
+    directoryEntries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("no such file or directory")) {
+      return [];
+    }
+    throw error;
   }
 
-  if (config.injectMode === "tmpfs" || config.injectMode === "both") {
-    await sink.writeFile!(
-      `${config.tmpfsPath}/${targetName}`,
-      secretValue,
-      { mode: 0o600 },
-    );
+  for (const entry of directoryEntries) {
+    const entryPath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      names = names.concat(await collectMetadataEntries(entryPath));
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      continue;
+    }
+    const parsed = JSON.parse(await readFile(entryPath, "utf8")) as { name?: unknown };
+    if (typeof parsed.name === "string") {
+      names.push(parsed.name);
+      continue;
+    }
+    names.push(relative(directory, entryPath).replace(/\.json$/u, ""));
   }
-
-  return {
-    injectTarget: targetName,
-    injectMethod: config.injectMode,
-  };
+  return names;
 }
 
-function expectString(value: unknown, fieldName: string): string {
-  if (typeof value !== "string" || value.length === 0) {
+function requiredString(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`tool argument '${fieldName}' must be a non-empty string`);
   }
   return value;
 }
 
-function expectDecision(value: unknown): "approve" | "deny" {
-  const decision = expectString(value, "decision");
-  if (decision === "approve" || decision === "deny") {
-    return decision;
+function optionalString(value: unknown, fieldName: string): string | undefined {
+  if (typeof value === "undefined") {
+    return undefined;
   }
-  throw new Error("tool argument 'decision' must be 'approve' or 'deny'");
+  return requiredString(value, fieldName);
 }
 
-function validatePluginConfig(config: GlovesPluginConfig, api: PluginAPI): void {
-  validateSecretDeliveryConfig(config, api.sandbox);
+function waitForExitCode(
+  child: ReturnType<typeof spawn>,
+  timeoutMs: number,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`gloves command timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      resolve(code ?? 1);
+    });
+  });
 }

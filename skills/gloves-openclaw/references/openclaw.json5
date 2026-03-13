@@ -7,13 +7,9 @@
         enabled: true,
         config: {
           root: "~/.openclaw/secrets",
-          mcpConfigPath: "~/.config/gloves/gloves.toml",
-          tokenPath: "~/.openclaw/gloves/session-token",
-          glovesMcpBin: "gloves-mcp",
-          injectMode: "env",
+          glovesBin: "gloves",
+          operatorAgentId: "openclaw",
           timeoutMs: 10000
-          // Legacy fallback only. Omit unless you intentionally keep a unix-socket deployment.
-          // socketPath: "~/.openclaw/gloves/daemon.sock"
         }
       }
     }

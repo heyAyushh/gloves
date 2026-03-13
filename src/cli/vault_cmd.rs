@@ -225,33 +225,51 @@ fn finalize_vault_exec(
     }
 }
 
-fn run_vault_exec_command(command: &[String]) -> Result<i32> {
+pub(crate) fn run_child_command(
+    command: &[String],
+    extra_env: &[(String, String)],
+    removed_env_keys: &[&str],
+    action_name: &str,
+) -> Result<i32> {
     if command.is_empty() {
-        return Err(GlovesError::InvalidInput(
-            "vault exec requires a command after '--'".to_owned(),
-        ));
+        return Err(GlovesError::InvalidInput(format!(
+            "{action_name} requires a command after '--'"
+        )));
     }
 
     let executable = &command[0];
-    let status = ProcessCommand::new(executable)
+    let mut process = ProcessCommand::new(executable);
+    process
         .args(&command[1..])
-        .env_remove(EXTPASS_ROOT_ENV_VAR)
-        .env_remove(EXTPASS_AGENT_ENV_VAR)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|error| {
-            GlovesError::InvalidInput(format!(
-                "failed to start vault exec command '{executable}': {error}"
-            ))
-        })?;
+        .stderr(Stdio::inherit());
+    for env_key in removed_env_keys {
+        process.env_remove(env_key);
+    }
+    for (key, value) in extra_env {
+        process.env(key, value);
+    }
+    let status = process.status().map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "failed to start {action_name} command '{executable}': {error}"
+        ))
+    })?;
     match status.code() {
         Some(code) => Ok(code),
         None => Err(GlovesError::InvalidInput(format!(
-            "vault exec command '{executable}' terminated by signal"
+            "{action_name} command '{executable}' terminated by signal"
         ))),
     }
+}
+
+fn run_vault_exec_command(command: &[String]) -> Result<i32> {
+    run_child_command(
+        command,
+        &[],
+        &[EXTPASS_ROOT_ENV_VAR, EXTPASS_AGENT_ENV_VAR],
+        "vault exec",
+    )
 }
 
 #[cfg(test)]

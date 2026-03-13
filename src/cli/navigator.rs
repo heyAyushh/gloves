@@ -468,6 +468,33 @@ const NAMESPACED_GET_FIELDS: &[FieldSpec] = &[
     },
 ];
 
+const RUN_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        id: "env_bindings",
+        label: "Env Bindings",
+        help: "--env bindings as shell words (e.g. API_KEY=gloves://shared/github-token)",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::None,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+    FieldSpec {
+        id: "command_line",
+        label: "Command Line",
+        help: "Command after -- (shell words)",
+        required: true,
+        kind: FieldKind::Text,
+        arg: FieldArg::None,
+        default_text: "",
+        default_bool: false,
+        default_choice: 0,
+    },
+];
+
+const EXEC_ENV_FIELDS: &[FieldSpec] = RUN_FIELDS;
+
 const SHOW_FIELDS: &[FieldSpec] = &[
     FieldSpec {
         id: "path",
@@ -1020,6 +1047,20 @@ const COMMAND_SPECS: &[CommandSpec] = &[
         summary: "Read a namespaced secret",
         path: &["get"],
         fields: NAMESPACED_GET_FIELDS,
+    },
+    CommandSpec {
+        id: "run",
+        title: "run",
+        summary: "Run a command with secret-ref env bindings",
+        path: &["run"],
+        fields: RUN_FIELDS,
+    },
+    CommandSpec {
+        id: "exec_env",
+        title: "exec env",
+        summary: "Run a command with explicit env delivery",
+        path: &["exec", "env"],
+        fields: EXEC_ENV_FIELDS,
     },
     CommandSpec {
         id: "show",
@@ -1703,6 +1744,7 @@ impl TuiApp {
     ) -> std::result::Result<(), String> {
         match self.selected_command_spec().id {
             "set" => self.populate_set_fields_from_args(args),
+            "run" | "exec_env" => self.populate_run_fields_from_args(args),
             "vault_exec" => self.populate_vault_exec_fields_from_args(args),
             _ => self.populate_generic_fields_from_args(args),
         }
@@ -1819,6 +1861,56 @@ impl TuiApp {
             index += 1;
         }
 
+        if let Some(command_index) = command_start_index {
+            let tail = &args[command_index..];
+            if !tail.is_empty() {
+                self.set_command_text("command_line", format_invocation_args(tail));
+            }
+        }
+        Ok(())
+    }
+
+    fn populate_run_fields_from_args(
+        &mut self,
+        args: &[String],
+    ) -> std::result::Result<(), String> {
+        let mut index = 0usize;
+        let mut env_bindings = Vec::new();
+        let mut command_start_index = None;
+
+        while index < args.len() {
+            let token = &args[index];
+            if token == "--" {
+                command_start_index = Some(index + 1);
+                break;
+            }
+            if !token.starts_with("--") {
+                return Err(format!(
+                    "unexpected argument `{token}` (expected `--env` or `--` before command)"
+                ));
+            }
+            let (flag, inline_value) = split_long_option_token(token);
+            match flag {
+                "--env" => {
+                    let value = if let Some(value) = inline_value {
+                        value.to_owned()
+                    } else {
+                        let Some(next_value) = args.get(index + 1) else {
+                            return Err("`--env` requires a value".to_owned());
+                        };
+                        index += 1;
+                        next_value.to_owned()
+                    };
+                    env_bindings.push(value);
+                }
+                _ => return Err(format!("unknown option `{flag}`")),
+            }
+            index += 1;
+        }
+
+        if !env_bindings.is_empty() {
+            self.set_command_text("env_bindings", format_invocation_args(&env_bindings));
+        }
         if let Some(command_index) = command_start_index {
             let tail = &args[command_index..];
             if !tail.is_empty() {
@@ -3702,6 +3794,11 @@ fn build_invocation_args(
         append_namespaced_set_args(&mut args, command_fields)?;
         return Ok(args);
     }
+    if command_spec.id == "run" || command_spec.id == "exec_env" {
+        append_run_env_binding_args(&mut args, command_fields)?;
+        append_run_command_line(&mut args, command_fields)?;
+        return Ok(args);
+    }
     if command_spec.id == "vault_exec" {
         append_generic_fields(&mut args, command_fields)?;
         append_vault_exec_command_line(&mut args, command_fields)?;
@@ -3903,6 +4000,38 @@ fn append_vault_exec_command_line(
         .ok_or_else(|| "Vault exec command line must be valid shell words".to_owned())?;
     if split.is_empty() {
         return Err("Vault exec command line must not be empty".to_owned());
+    }
+    args.push("--".to_owned());
+    args.extend(split);
+    Ok(())
+}
+
+fn append_run_env_binding_args(
+    args: &mut Vec<String>,
+    fields: &[FieldState],
+) -> std::result::Result<(), String> {
+    let env_bindings = required_text_field(fields, "env_bindings")?;
+    let bindings = shlex::split(env_bindings)
+        .ok_or_else(|| "Env Bindings must be valid shell words".to_owned())?;
+    if bindings.is_empty() {
+        return Err("Env Bindings must include at least one binding".to_owned());
+    }
+    for binding in bindings {
+        args.push("--env".to_owned());
+        args.push(binding);
+    }
+    Ok(())
+}
+
+fn append_run_command_line(
+    args: &mut Vec<String>,
+    fields: &[FieldState],
+) -> std::result::Result<(), String> {
+    let command_line = required_text_field(fields, "command_line")?;
+    let split = shlex::split(command_line)
+        .ok_or_else(|| "Run command line must be valid shell words".to_owned())?;
+    if split.is_empty() {
+        return Err("Run command line must not be empty".to_owned());
     }
     args.push("--".to_owned());
     args.extend(split);
@@ -4195,6 +4324,8 @@ mod unit_tests {
     fn command_catalog_covers_core_workflows() {
         assert!(COMMAND_SPECS.len() >= 25);
         assert!(COMMAND_SPECS.iter().any(|command| command.id == "set"));
+        assert!(COMMAND_SPECS.iter().any(|command| command.id == "run"));
+        assert!(COMMAND_SPECS.iter().any(|command| command.id == "exec_env"));
         assert!(COMMAND_SPECS
             .iter()
             .any(|command| command.id == "vault_exec"));
@@ -4697,6 +4828,61 @@ mod unit_tests {
     }
 
     #[test]
+    fn build_args_for_run_includes_env_secret_flags_and_command() {
+        let command = command_by_id("run");
+        let globals = default_global_fields();
+        let mut fields = field_states_for_spec(command);
+        fields[0].value = FieldValue::Text(
+            "API_KEY=gloves://shared/github-token DB_URL=gloves://shared/db-url".to_owned(),
+        );
+        fields[1].value = FieldValue::Text("sh -c 'echo hi'".to_owned());
+
+        let args = build_invocation_args(command, &globals, &fields).expect("build args");
+        assert_eq!(
+            args,
+            vec![
+                "--error-format".to_owned(),
+                "text".to_owned(),
+                "run".to_owned(),
+                "--env".to_owned(),
+                "API_KEY=gloves://shared/github-token".to_owned(),
+                "--env".to_owned(),
+                "DB_URL=gloves://shared/db-url".to_owned(),
+                "--".to_owned(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "echo hi".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_args_for_exec_env_includes_env_flags_and_command() {
+        let command = command_by_id("exec_env");
+        let globals = default_global_fields();
+        let mut fields = field_states_for_spec(command);
+        fields[0].value = FieldValue::Text("API_KEY=gloves://shared/github-token".to_owned());
+        fields[1].value = FieldValue::Text("sh -c 'echo hi'".to_owned());
+
+        let args = build_invocation_args(command, &globals, &fields).expect("build args");
+        assert_eq!(
+            args,
+            vec![
+                "--error-format".to_owned(),
+                "text".to_owned(),
+                "exec".to_owned(),
+                "env".to_owned(),
+                "--env".to_owned(),
+                "API_KEY=gloves://shared/github-token".to_owned(),
+                "--".to_owned(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                "echo hi".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
     fn launch_command_normalization_handles_empty_shortcuts_and_passthrough() {
         assert!(normalize_launch_command_args(&[]).is_empty());
         assert_eq!(
@@ -4939,6 +5125,65 @@ mod unit_tests {
         assert_eq!(
             misplaced_argument,
             "unexpected argument `echo` (expected `--` before command)"
+        );
+    }
+
+    #[test]
+    fn run_startup_parser_populates_env_bindings_and_command_tail() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let command_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "run")
+            .expect("run command exists");
+        app.select_command_by_index(command_index);
+
+        app.populate_run_fields_from_args(&[
+            "--env".to_owned(),
+            "API_KEY=gloves://shared/github-token".to_owned(),
+            "--env".to_owned(),
+            "DB_URL=gloves://shared/db-url".to_owned(),
+            "--".to_owned(),
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo hi".to_owned(),
+        ])
+        .expect("run args should parse");
+
+        assert_eq!(
+            text_field_value(&app.command_fields, "env_bindings"),
+            "'API_KEY=gloves://shared/github-token' 'DB_URL=gloves://shared/db-url'"
+        );
+        assert_eq!(
+            text_field_value(&app.command_fields, "command_line"),
+            "sh -c 'echo hi'"
+        );
+    }
+
+    #[test]
+    fn run_startup_parser_rejects_unknown_or_misplaced_arguments() {
+        let mut app = TuiApp::new(NavigatorLaunchOptions::default());
+        let command_index = COMMAND_SPECS
+            .iter()
+            .position(|spec| spec.id == "run")
+            .expect("run command exists");
+        app.select_command_by_index(command_index);
+
+        let missing_value = app
+            .populate_run_fields_from_args(&["--env".to_owned()])
+            .expect_err("missing option value must fail");
+        assert_eq!(missing_value, "`--env` requires a value");
+
+        let unknown_option = app
+            .populate_run_fields_from_args(&["--unknown=1".to_owned()])
+            .expect_err("unknown option must fail");
+        assert_eq!(unknown_option, "unknown option `--unknown`");
+
+        let misplaced_argument = app
+            .populate_run_fields_from_args(&["echo".to_owned()])
+            .expect_err("non-option argument before -- must fail");
+        assert_eq!(
+            misplaced_argument,
+            "unexpected argument `echo` (expected `--env` or `--` before command)"
         );
     }
 

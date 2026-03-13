@@ -37,6 +37,8 @@ const CLI_AFTER_HELP: &str = r#"Examples:
   gloves --root .openclaw/secrets init
   gloves --root .openclaw/secrets secrets set service/token --generate
   gloves --root .openclaw/secrets secrets get service/token --pipe-to cat
+  gloves --root .openclaw/secrets run --env API_KEY=gloves://shared/github-token -- env
+  gloves --root .openclaw/secrets exec env --env API_KEY=gloves://shared/github-token -- env
   gloves --root .openclaw/secrets request prod/db --reason "run migration"
   gloves --root .openclaw/secrets requests list
   gloves --root .openclaw/secrets secrets grant service/token --to agent-b
@@ -212,6 +214,30 @@ const TOP_LEVEL_GET_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent devy get agents/devy/api-keys/anthropic --format raw
   gloves --agent devy get agents/devy/api-keys/anthropic --format json
 "#;
+const RUN_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves run --env API_KEY=gloves://shared/github-token -- curl -H "Authorization: Bearer $API_KEY" https://api.example.com
+  gloves run --env DB_URL=gloves://shared/db-url -- ./migrate.sh
+
+Comparable tools:
+  - `op run`
+  - `doppler run`
+  - `aws-vault exec`
+
+Use `gloves run` for the generic secret-aware execution UX.
+Use `gloves exec env` when you want the lower-level env-delivery mechanic directly.
+Use `gloves vault exec` when you specifically need the mount / execute / unmount workflow.
+"#;
+const EXEC_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves exec env --env API_KEY=gloves://shared/github-token -- env
+
+Use `gloves exec` when you want to select a specific delivery mechanism directly.
+"#;
+const EXEC_ENV_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves exec env --env API_KEY=gloves://shared/github-token -- env
+  gloves exec env --env DB_URL=gloves://shared/db-url -- ./migrate.sh
+
+This command is the explicit env-delivery primitive behind `gloves run`.
+"#;
 const SHOW_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves show agents/devy/api-keys/anthropic --redacted
   gloves show agents/devy/api-keys/anthropic --format json
@@ -323,6 +349,24 @@ pub enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value_t = SecretReadFormatArg::Raw)]
         format: SecretReadFormatArg,
+    },
+    /// Runs one command with secrets injected into its environment.
+    #[command(after_help = RUN_COMMAND_AFTER_HELP)]
+    Run {
+        /// Secret ref bindings for environment injection.
+        /// Format: `NAME=gloves://namespace/secret-path`. Repeat `--env` for each binding.
+        #[arg(long = "env", value_name = "BINDING", action = clap::ArgAction::Append)]
+        env: Vec<String>,
+        /// Command and arguments to execute.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Runs one command with an explicit delivery mechanic.
+    #[command(after_help = EXEC_COMMAND_AFTER_HELP)]
+    Exec {
+        /// Delivery mechanic.
+        #[command(subcommand)]
+        command: ExecCommand,
     },
     /// Shows namespaced secret metadata without revealing the value.
     #[command(after_help = SHOW_COMMAND_AFTER_HELP)]
@@ -622,6 +666,23 @@ pub enum VaultCommand {
     },
 }
 
+/// Supported generic execution subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+pub enum ExecCommand {
+    /// Runs a command with environment-variable delivery.
+    #[command(after_help = EXEC_ENV_COMMAND_AFTER_HELP)]
+    Env {
+        /// Secret ref bindings for environment injection.
+        /// Format: `NAME=gloves://namespace/secret-path`. Repeat `--env` for each binding.
+        #[arg(long = "env", value_name = "BINDING", action = clap::ArgAction::Append)]
+        env: Vec<String>,
+        /// Command and arguments to execute.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+}
+
 /// Supported config subcommands.
 #[derive(Debug, Subcommand)]
 #[command(disable_help_subcommand = true)]
@@ -821,8 +882,8 @@ mod unit_tests {
             parse_secret_ttl_argument, validate_ttl_days, SecretTtl,
         },
         secret_input::{parse_duration_value, resolve_secret_input},
-        ttl_seconds, Cli, Command, ErrorFormatArg, RequestsCommand, SecretReadFormatArg,
-        SecretShowFormatArg, SecretsCommand,
+        ttl_seconds, Cli, Command, ErrorFormatArg, ExecCommand, RequestsCommand,
+        SecretReadFormatArg, SecretShowFormatArg, SecretsCommand,
     };
     use crate::error::GlovesError;
     use crate::paths::SecretsPaths;
@@ -1057,6 +1118,61 @@ mod unit_tests {
             Command::Get { path, format }
                 if path == "agents/devy/api-keys/anthropic"
                     && format == SecretReadFormatArg::Json
+        ));
+    }
+
+    #[test]
+    fn cli_run_accepts_repeated_env_secret_ref_bindings() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/github-token",
+            "--env",
+            "DB_URL=gloves://shared/db-url",
+            "--",
+            "sh",
+            "-c",
+            "env",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Run {
+                env,
+                command,
+            } if env
+                == vec![
+                    "API_KEY=gloves://shared/github-token".to_owned(),
+                    "DB_URL=gloves://shared/db-url".to_owned()
+                ] && command == vec![
+                    "sh".to_owned(),
+                    "-c".to_owned(),
+                    "env".to_owned()
+                ]
+        ));
+    }
+
+    #[test]
+    fn cli_exec_env_accepts_repeated_env_secret_ref_bindings() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "exec",
+            "env",
+            "--env",
+            "API_KEY=gloves://shared/github-token",
+            "--",
+            "sh",
+            "-c",
+            "env",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Exec {
+                command: ExecCommand::Env { env, command }
+            } if env == vec!["API_KEY=gloves://shared/github-token".to_owned()]
+                && command == vec!["sh".to_owned(), "-c".to_owned(), "env".to_owned()]
         ));
     }
 

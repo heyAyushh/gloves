@@ -15,7 +15,7 @@ It provides:
 - access/audit controls
 - vault and daemon operations
 - an interactive TUI navigator
-- a Bun OpenClaw client/plugin bridge for brokered secret injection
+- OpenClaw-safe plugin tooling plus a private Docker bridge for sandbox file delivery
 
 ## Documentation
 
@@ -45,6 +45,8 @@ API and crate docs: [docs.rs/gloves](https://docs.rs/gloves)
 
 Primary command groups:
 
+- `gloves run ...`: run a process with explicit secret-ref bindings
+- `gloves exec ...`: run a process with an explicit delivery mechanic
 - `gloves secrets ...`: set/get/grant/revoke/status
 - `gloves request ...`: create one pending human request
 - `gloves requests ...`: list/approve/deny pending requests
@@ -68,11 +70,14 @@ gloves requests help approve
 # initialize runtime layout
 gloves --root .openclaw/secrets init
 
-# create one secret
-gloves --root .openclaw/secrets secrets set service/token --generate
+# create one namespaced secret
+gloves --root .openclaw/secrets set shared/github-token --value ghp_example_token
+
+# run one command with an explicit secret ref
+gloves --root .openclaw/secrets run --env API_KEY=gloves://shared/github-token -- env
 
 # read secret
-gloves --root .openclaw/secrets secrets get service/token
+gloves --root .openclaw/secrets get shared/github-token
 
 # list entries
 gloves --root .openclaw/secrets list
@@ -80,31 +85,79 @@ gloves --root .openclaw/secrets list
 
 If you omit `--ttl`, `gloves` uses `defaults.secret_ttl_days` from config; the built-in default is 30 days. Use `--ttl never` for a non-expiring secret. `gloves secrets set` prints the expiry timestamp for expiring secrets and says `never expires` otherwise.
 
+## Process Execution
+
+`gloves run` is the top-level process execution UX. It is the closest `gloves` equivalent to `op run`, `doppler run`, and `aws-vault exec`.
+
+Examples:
+
+```bash
+gloves run --env API_KEY=gloves://shared/github-token -- curl -H "Authorization: Bearer $API_KEY" https://api.example.com
+gloves run --env DB_URL=gloves://shared/db-url -- ./migrate.sh
+gloves run --env API_KEY=gloves://shared/github-token --env DB_URL=gloves://shared/db-url -- env
+gloves exec env --env API_KEY=gloves://shared/github-token -- env
+```
+
+`gloves run` accepts only explicit `NAME=gloves://namespace/secret-path` bindings in v1. It does not accept bare secret paths, comma-separated lists, or implicit "load this whole scope" behavior.
+
+Use `gloves run` when you want the generic "run this command with secrets" flow.
+
+Use `gloves exec env` when you want the lower-level env-delivery primitive directly.
+
+Use `gloves vault exec` when you specifically need the lower-level vault workflow that mounts a vault, executes a command, and unmounts it afterward.
+
+Current delivery model:
+
+- `run` is the high-level UX
+- `exec env` is the shipped explicit delivery mechanic
+- explicit secret refs are the stable contract between CLI intent and runtime delivery
+
+Planned follow-on strategies:
+
+- `exec file` for tmpfs-style file delivery
+- `run --profile ...` for reviewed bundles of refs and delivery policy
+- brokered or session-based delivery for backends that can avoid raw env injection entirely
+
 For complete setup and human/agent workflows, use [Quickstart](docs/quickstart.md).
 
 ## OpenClaw Integration
 
 The repository now includes:
 
-- `gloves-mcp` for redacted MCP tool access
-- `@gloves/mcp-client` as the Bun/TypeScript bridge to `gloves-mcp`
-- `@gloves/openclaw` as the OpenClaw Gateway plugin, including the secret-delivery logic
-- `integrations/openclaw/gloves.json5` as the reference config snippet
+- `@gloves/openclaw` as the real OpenClaw-native plugin package for safe metadata and approval tools
+- `gloves-mcp` as the preferred future stdio transport for first-class runtime integrations
+- `gloves-docker-bridge` as a private operator-controlled Docker wrapper for `/run/secrets/...` delivery
+- `integrations/openclaw/gloves.json5` as the official safe plugin config snippet
+- `integrations/openclaw/docker-bridge.toml` and `integrations/openclaw/launch-openclaw-with-gloves.sh` as the private bridge examples
 
-If you are setting up OpenClaw, the only package you should install is `@gloves/openclaw`.
-The only remaining internal JS package is `@gloves/mcp-client`.
+If you are setting up OpenClaw today, install `@gloves/openclaw` for safe list/status/request tools. Treat the Docker bridge as a private last-mile hack that you operate at process start.
 
-Recommended runtime path:
+Guaranteed-safe official support:
 
 - install `@gloves/openclaw` on the Gateway host
-- let the plugin launch host-local `gloves-mcp` sessions over stdio
+- point the plugin at a host-local `gloves` binary and runtime root
 - allow the plugin tool group per agent with `group:plugins:gloves`
+- use only:
+  - `gloves_list`
+  - `gloves_status`
+  - `gloves_requests_list`
+  - `gloves_request_approve`
+  - `gloves_request_deny`
 
-Current plugin reads keep secret values out of the MCP result body and inject them into the sandbox environment or tmpfs instead. No sandbox bind mount to `~/.cargo/bin`, a daemon socket, or the token path is required for the standard OpenClaw setup.
+Preferred future transport:
+
+- `gloves-mcp` over stdio for OpenClaw-facing integrations that can safely consume a runtime secret side-channel
+
+Private operator bridge:
+
+- `gloves-docker-bridge` resolves `gloves://...` refs on the host
+- it injects tmpfs files under `/run/secrets/...`
+- it does not require bind mounts of host secret dirs, `~/.cargo/bin`, token files, or daemon sockets
+- it is not an official OpenClaw API integration
 
 Compatibility transports:
 
-- `socketPath` remains available for non-OpenClaw or legacy runtime integrations
+- Unix sockets remain available for non-OpenClaw or legacy runtime integrations
 - `gloves daemon` remains available for direct host-side automation
 - neither transport is the preferred OpenClaw deployment path
 
@@ -165,7 +218,7 @@ When Docker is available, the OpenClaw sandbox harness can be exercised with:
 bun run docker:e2e
 ```
 
-That harness now models the recommended OpenClaw flow: a plugin running in the sandbox image launches bundled `gloves-mcp` over stdio and keeps tool responses redacted.
+The bridge regression coverage in `cargo test` covers the private Docker wrapper flow with `/run/secrets/...` injection and cleanup. The example Docker harness remains an operator-oriented validation path rather than an official OpenClaw support contract.
 
 ## License and Changelog
 

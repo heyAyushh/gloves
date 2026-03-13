@@ -1,0 +1,21 @@
+version = 1
+gloves_root = "~/.openclaw/secrets"
+runtime_root = "~/.openclaw/gloves-runtime"
+docker_bin = "/usr/bin/docker"
+audit_agent = "openclaw"
+secret_mount_root = "/run/secrets"
+tmpfs_spec = "/run/secrets:size=10M,mode=0700,noexec,nosuid,nodev"
+
+[[targets]]
+secret_ref = "gloves://agents/devy/api-keys/openai"
+container_path = "/run/secrets/openai"
+
+[targets.selector.labels]
+"openclaw.agent" = "devy"
+
+[[targets]]
+secret_ref = "gloves://agents/devy/api-keys/anthropic"
+container_path = "/run/secrets/anthropic"
+
+[targets.selector.labels]
+"openclaw.agent" = "devy"

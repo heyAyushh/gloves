@@ -21,6 +21,8 @@ pub mod manager;
 pub mod reaper;
 /// Agent registry.
 pub mod registry;
+/// Runtime bridge helpers for private operator integrations.
+pub mod runtime_bridge;
 /// Encrypted volume management.
 pub mod vault;
 

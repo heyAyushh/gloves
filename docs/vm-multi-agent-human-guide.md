@@ -98,6 +98,23 @@ gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
   secrets get svc/github/token
 ```
 
+Generic process execution with secret refs:
+
+```bash
+gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
+  run --env GITHUB_TOKEN=gloves://shared/github-token -- env
+
+gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
+  exec env --env DATABASE_URL=gloves://shared/database-url -- ./migrate.sh
+```
+
+Operational guidance:
+
+- use `run` as the default top-level UX
+- use `exec env` when you want to choose env delivery explicitly
+- keep `vault exec` reserved for vault-backed filesystem workflows
+- keep env bindings explicit and least-privilege; do not load broad scopes implicitly
+
 Human approval flow:
 
 ```bash
@@ -132,7 +149,13 @@ gloves --config /etc/gloves/prod.gloves.toml --agent agent-main \
 
 ## 4) OpenClaw Gateway Deployment
 
-For OpenClaw, use the packaged `@gloves/openclaw` plugin and let it start `gloves-mcp` over stdio. Keep the `gloves` store, identities, and session token on the host side. Do not bind a daemon socket or host binary directories into the sandbox.
+For OpenClaw, separate the official safe plugin path from the private injector path:
+
+- official: `@gloves/openclaw` for safe list/status/request tools
+- preferred future transport: `gloves-mcp` over stdio
+- private last-mile injector: `gloves-docker-bridge` for `/run/secrets/...`
+
+Keep the `gloves` store and identities on the host side. Do not bind a daemon socket, host secret roots, or host binary directories into the sandbox.
 
 Example OpenClaw config shape:
 
@@ -144,10 +167,8 @@ Example OpenClaw config shape:
         enabled: true,
         config: {
           root: "~/.openclaw/secrets",
-          mcpConfigPath: "~/.config/gloves/gloves.toml",
-          tokenPath: "~/.openclaw/gloves/session-token",
-          glovesMcpBin: "gloves-mcp",
-          injectMode: "env",
+          glovesBin: "gloves",
+          operatorAgentId: "openclaw",
           timeoutMs: 10000
         }
       }
@@ -166,9 +187,10 @@ Example OpenClaw config shape:
 Operational expectations:
 
 - install `@gloves/openclaw` on the Gateway host
-- keep `gloves-mcp` available on the host `PATH` or provide `glovesMcpBin`
-- allow the plugin tool group only for the agents that should read or write secrets
-- prefer env or tmpfs injection, not project-tree writes
+- keep `gloves` available on the host `PATH` or provide `glovesBin`
+- allow the plugin tool group only for the agents that should see the safe metadata/review tools
+- keep `gloves-mcp` stdio for future richer runtime integrations
+- keep Docker tmpfs injection in a private operator wrapper, not in the official plugin contract
 
 ## 5) Host Automation Daemon
 

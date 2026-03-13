@@ -47,14 +47,35 @@ Pattern formats:
 - `namespace/*`
 - exact secret id (`namespace/name`)
 
-## 3) Vault execution controls
+## 3) Process execution controls
 
-`gloves vault exec <name> -- <command...>` mounts, executes, and unmounts.
+`gloves run --env NAME=gloves://namespace/secret-path -- <command...>` injects explicitly selected secrets as environment variables into one child process.
 
 Safety properties:
 
+- secret values stay out of wrapper JSON/text output
+- the wrapped command exit code is preserved
+- command execution is audited without logging plaintext values
+- secret ACL read policy applies before injection
+
+Use `gloves run` for the generic top-level UX, similar to `op run` or `doppler run`.
+
+`gloves exec env --env NAME=gloves://namespace/secret-path -- <command...>` is the lower-level explicit env-delivery primitive behind `gloves run`.
+
+`gloves vault exec <name> -- <command...>` remains the vault-specific path that mounts, executes, and unmounts.
+
+Current guidance:
+
+- use `run` for the default user-facing flow
+- use `exec env` when you need to select env delivery explicitly
+- prefer explicit refs over broad scope injection
+- treat env delivery as the baseline convenience path, not the final security ceiling
+
+Stronger future delivery strategies are planned around file-based and brokered execution paths so high-risk secrets do not need to ride through process environments.
+
+Additional vault safety properties:
+
 - unmount attempted on success and failure paths
-- wrapped command exit code is preserved
 - extpass env vars are removed from wrapped command env
 
 ## 4) Runtime hygiene

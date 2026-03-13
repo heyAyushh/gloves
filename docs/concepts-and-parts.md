@@ -41,12 +41,18 @@ Default root is `.openclaw/secrets` unless overridden with `--root` or config.
 
 ## Command Families
 
+- Generic process execution: `gloves run ...`
+- Explicit delivery mechanics: `gloves exec ...`
 - Secret operations: `gloves secrets ...`
 - Human request creation: `gloves request ...`
 - Human request review: `gloves requests ...`
 - Vault operations: `gloves vault ...`
 - GPG operations: `gloves gpg ...`
 - Interactive operation: `gloves tui`
+
+`gloves run` is the default user-facing "run this command with secrets" surface.
+
+`gloves exec` is the lower-level mechanic-facing surface. In the current release, `gloves exec env` is the only shipped generic delivery mode and accepts explicit `NAME=gloves://...` bindings.
 
 ## Lifecycle Overview
 

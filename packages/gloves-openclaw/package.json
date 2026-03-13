@@ -1,6 +1,6 @@
 {
   "name": "@gloves/openclaw",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "type": "module",
   "files": [
     "dist",
@@ -13,9 +13,6 @@
     "extensions": [
       "./dist/index.js"
     ]
-  },
-  "dependencies": {
-    "@gloves/mcp-client": "0.1.2"
   },
   "scripts": {
     "build": "bun build src/index.ts --outdir dist --target node",

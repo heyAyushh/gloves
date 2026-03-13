@@ -196,6 +196,46 @@ fn write_executable(path: &Path, body: &str) {
 }
 
 #[cfg(unix)]
+fn create_namespaced_identity(root: &Path, agent: &str) -> String {
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root.to_str().unwrap(),
+            "--no-config",
+            "set-identity",
+            "--agent",
+            agent,
+        ])
+        .assert()
+        .success();
+    fs::read_to_string(
+        root.join("store")
+            .join("agents")
+            .join(agent)
+            .join(".age-recipients"),
+    )
+    .unwrap()
+    .lines()
+    .next()
+    .unwrap()
+    .to_owned()
+}
+
+#[cfg(unix)]
+fn write_namespaced_creation_rules(root: &Path, body: &str) {
+    write_config(&root.join("store/.gloves.yaml"), body);
+}
+
+#[cfg(unix)]
+fn write_namespace_recipients(root: &Path, namespace: &str, recipients: &[&str]) {
+    let contents = format!("{}\n", recipients.join("\n"));
+    write_config(
+        &root.join("store").join(namespace).join(".age-recipients"),
+        &contents,
+    );
+}
+
+#[cfg(unix)]
 fn install_fake_vault_binaries(bin_dir: &Path) {
     fs::create_dir_all(bin_dir).unwrap();
 
@@ -1853,6 +1893,414 @@ fn cli_secret_acl_allows_deny_with_matching_path_and_operation() {
         ])
         .assert()
         .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_and_exec_env_inject_identical_secret_ref_bindings() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n  - path_regex: ^agents/agent-main/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/github-token",
+            "--value",
+            "ghp_test_secret",
+        ])
+        .assert()
+        .success();
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/db-url",
+            "--value",
+            "postgres://localhost/app",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/github-token",
+            "--env",
+            "DB_URL=gloves://shared/db-url",
+            "--",
+            "sh",
+            "-c",
+            "[ \"$API_KEY\" = \"ghp_test_secret\" ] && [ \"$DB_URL\" = \"postgres://localhost/app\" ]",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "exec",
+            "env",
+            "--env",
+            "API_KEY=gloves://shared/github-token",
+            "--env",
+            "DB_URL=gloves://shared/db-url",
+            "--",
+            "sh",
+            "-c",
+            "[ \"$API_KEY\" = \"ghp_test_secret\" ] && [ \"$DB_URL\" = \"postgres://localhost/app\" ]",
+        ])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_rejects_invalid_secret_ref_bindings() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=shared/missing",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("invalid secret ref"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_rejects_duplicate_env_bindings() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/one",
+            "--env",
+            "API_KEY=gloves://shared/two",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("duplicate environment variable in --env"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_rejects_invalid_env_variable_names() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "1INVALID=gloves://shared/one",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("invalid environment variable name"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_reports_missing_secret_ref_without_leaking_values() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    let assert = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/missing",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("secret `shared/missing` was not found"));
+    assert!(!stderr.contains("ghp_test_secret"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_respects_secret_acl_read_policy() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let config_path = temp_dir.path().join(".gloves.toml");
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/db-url",
+            "--value",
+            "postgres://localhost/app",
+        ])
+        .assert()
+        .success();
+
+    write_secret_acl_config(&config_path, &root, "agent-main", &["github/*"], &["read"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "DB_URL=gloves://shared/db-url",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("forbidden"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_rejects_unauthorized_secret_ref_access() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    let _other_public_key = create_namespaced_identity(&root, "agent-other");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/api-key",
+            "--value",
+            "ghp_test_secret",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-other",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/api-key",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("unauthorized"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_propagates_child_exit_code() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/api-key",
+            "--value",
+            "ghp_test_secret",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/api-key",
+            "--",
+            "sh",
+            "-c",
+            "exit 7",
+        ])
+        .assert()
+        .code(7);
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_run_keeps_plaintext_out_of_wrapper_output_and_audit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("secrets");
+    let root_str = root.to_str().unwrap();
+    let main_public_key = create_namespaced_identity(&root, "agent-main");
+    write_namespaced_creation_rules(
+        &root,
+        "version: 1\ncreation_rules:\n  - path_regex: ^shared/.*$\n",
+    );
+    write_namespace_recipients(&root, "shared", &[&main_public_key]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "set",
+            "shared/api-key",
+            "--value",
+            "ghp_hidden_secret",
+        ])
+        .assert()
+        .success();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--root",
+            root_str,
+            "--json",
+            "--no-config",
+            "--agent",
+            "agent-main",
+            "run",
+            "--env",
+            "API_KEY=gloves://shared/api-key",
+            "--",
+            "sh",
+            "-c",
+            "exit 0",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    assert!(String::from_utf8(output.stdout).unwrap().trim().is_empty());
+    assert!(String::from_utf8(output.stderr).unwrap().trim().is_empty());
+
+    let audit = fs::read_to_string(root.join("audit.jsonl")).unwrap();
+    assert!(audit.contains("\"command\":\"run\""));
+    assert!(!audit.contains("ghp_hidden_secret"));
 }
 
 #[test]
