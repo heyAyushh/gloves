@@ -140,15 +140,11 @@ fn openclaw_plugin_package_exposes_current_gateway_manifest() {
     assert!(client_package_json.contains("\"@gloves/mcp-client\""));
     assert!(client_package_json.contains("\"files\""));
     assert!(client_package_json.contains("\"src/index.ts\""));
-    assert!(client_package_json.contains("\"publishConfig\""));
-    assert!(client_package_json.contains("\"access\": \"public\""));
     assert!(package_json.contains("\"@gloves/openclaw\""));
     assert!(package_json.contains("\"@gloves/mcp-client\""));
     assert!(package_json.contains("\"@gloves/mcp-client\": \"0.1.2\""));
     assert!(package_json.contains("\"./dist/index.js\""));
     assert!(package_json.contains("\"extensions\""));
-    assert!(package_json.contains("\"publishConfig\""));
-    assert!(package_json.contains("\"access\": \"public\""));
     assert!(manifest.contains("\"id\": \"gloves\""));
     assert!(manifest.contains("\"tools\": true"));
     assert!(manifest.contains("\"socketPath\""));

@@ -9,9 +9,6 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "publishConfig": {
-    "access": "public"
-  },
   "openclaw": {
     "extensions": [
       "./dist/index.js"

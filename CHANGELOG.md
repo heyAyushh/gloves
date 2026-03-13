@@ -13,7 +13,6 @@
 - Renamed the public OpenClaw package from `@openclaw/gloves` to `@gloves/openclaw` so the published package matches the `@gloves` scope you control.
 - Tightened release validation and publishing for the Bun packages:
   - CI now installs Bun, builds the package workspace, and runs the package test suites.
-  - The publish workflow now releases `@gloves/mcp-client` before `@gloves/openclaw`.
   - npm package metadata no longer ships workspace-only artifacts or unresolved `workspace:*` dependencies.
 
 ## 0.5.8

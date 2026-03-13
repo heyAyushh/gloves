@@ -18,19 +18,14 @@ The publish workflow also enforces:
 - tag version equals `Cargo.toml` version
 - tag commit belongs to an allowed branch for that channel
 - crates publish in dependency order: `gloves-core`, `gloves-config`, then `gloves`
-- npm packages publish in dependency order: `@gloves/mcp-client`, then `@gloves/openclaw`
 - `CARGO_REGISTRY_TOKEN` must be a crates.io API token with publish rights for
   `gloves-core`, `gloves-config`, and `gloves`
-- `NPM_TOKEN` must have publish rights for `@gloves/mcp-client` and `@gloves/openclaw`
 
 ## Release Outputs
 
 For each tag, GitHub Actions `Publish` workflow now produces:
 
 - crates.io publish (`gloves` crate)
-- npm publish:
-  - `@gloves/mcp-client`
-  - `@gloves/openclaw`
 - GitHub Release assets:
   - `gloves-<version>-x86_64-unknown-linux-gnu.tar.gz`
   - `gloves-<version>-x86_64-apple-darwin.tar.gz`
@@ -59,7 +54,6 @@ bun run test
 cargo test --all-features --locked
 cargo doc --no-deps
 cargo publish --dry-run --locked
-npm publish --dry-run --cache "$(mktemp -d)"
 ```
 
 `cargo publish --dry-run --locked` validates the root crate once its dependency
@@ -70,8 +64,6 @@ in publish order:
 cargo publish -p gloves-core --dry-run --locked
 cargo package -p gloves-config --list
 cargo package -p gloves --list
-(cd packages/gloves-client && npm publish --dry-run --cache "$(mktemp -d)")
-(cd packages/gloves-openclaw && npm publish --dry-run --cache "$(mktemp -d)")
 ```
 
 Update release files before tagging:
@@ -158,7 +150,3 @@ workflow.
 
 GitHub release assets can still succeed when crates.io publishing fails. Treat the
 release as incomplete until the crates.io publish job is green.
-
-If the `Publish npm packages` job fails, verify `NPM_TOKEN` can publish both scoped
-packages and that `packages/gloves-openclaw/package.json` depends on the exact
-published `@gloves/mcp-client` version for that tag.
