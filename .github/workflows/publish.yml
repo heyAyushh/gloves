@@ -345,13 +345,29 @@ jobs:
         run: |
           set -euo pipefail
 
+          readonly CRATES_IO_API_BASE_URL="https://crates.io/api/v1/crates"
+          readonly INDEX_WAIT_ATTEMPTS=30
+          readonly INDEX_WAIT_SECONDS=10
+
+          crate_api_url() {
+            local crate_name="$1"
+            printf '%s/%s' "${CRATES_IO_API_BASE_URL}" "${crate_name}"
+          }
+
+          fetch_max_version() {
+            local crate_name="$1"
+
+            curl --fail --silent --show-error "$(crate_api_url "${crate_name}")" \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["crate"]["max_version"])'
+          }
+
           crate_exists() {
             local crate_name="$1"
             local crate_version="$2"
 
-            local search_output
-            search_output="$(cargo search "$crate_name" --limit 20)"
-            [[ "${search_output}" == *"${crate_name} = \"${crate_version}\""* ]]
+            local published_version
+            published_version="$(fetch_max_version "${crate_name}")"
+            [[ "${published_version}" == "${crate_version}" ]]
           }
 
           publish_crate() {
@@ -375,13 +391,13 @@ jobs:
             local crate_name="$1"
             local crate_version="$2"
 
-            for attempt in $(seq 1 30); do
-              if cargo search "$crate_name" --limit 20 | grep -q "^${crate_name} = \"${crate_version}\""; then
+            for attempt in $(seq 1 "${INDEX_WAIT_ATTEMPTS}"); do
+              if crate_exists "${crate_name}" "${crate_version}"; then
                 echo "Confirmed ${crate_name} ${crate_version} on crates.io"
                 return 0
               fi
-              echo "Waiting for crates.io index to expose ${crate_name} ${crate_version} (attempt ${attempt}/30)"
-              sleep 10
+              echo "Waiting for crates.io API to expose ${crate_name} ${crate_version} (attempt ${attempt}/${INDEX_WAIT_ATTEMPTS})"
+              sleep "${INDEX_WAIT_SECONDS}"
             done
 
             echo "Timed out waiting for ${crate_name} ${crate_version} to appear on crates.io"
