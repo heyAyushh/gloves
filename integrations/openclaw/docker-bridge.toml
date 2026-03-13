@@ -1,7 +1,8 @@
 version = 1
-gloves_root = "~/.openclaw/secrets"
-runtime_root = "~/.openclaw/gloves-runtime"
-docker_bin = "/usr/bin/docker"
+gloves_root = "/var/lib/openclaw/gloves"
+runtime_root = "/var/lib/openclaw/gloves-runtime"
+# Optional: set docker_bin only when the launcher cannot provide GLOVES_DOCKER_REAL_BIN.
+# docker_bin = "/path/to/docker"
 audit_agent = "openclaw"
 secret_mount_root = "/run/secrets"
 tmpfs_spec = "/run/secrets:size=10M,mode=0700,noexec,nosuid,nodev"

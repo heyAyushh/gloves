@@ -15,7 +15,7 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     assert!(contents.contains("glovesBin: \"gloves\""));
     assert!(contents.contains("operatorAgentId: \"openclaw\""));
     assert!(contents.contains("group:plugins:gloves"));
-    assert!(contents.contains("root: \"~/.openclaw/secrets\""));
+    assert!(contents.contains("root: \"/var/lib/openclaw/gloves\""));
     assert!(!contents.contains("mcpConfigPath"));
     assert!(!contents.contains("tokenPath"));
     assert!(!contents.contains("socketPath"));

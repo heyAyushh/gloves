@@ -33,9 +33,9 @@ Example: [integrations/openclaw/docker-bridge.toml](../integrations/openclaw/doc
 
 Key fields:
 
-- `gloves_root`: host runtime root
-- `runtime_root`: host state directory for bridge metadata
-- `docker_bin`: real Docker binary path
+- `gloves_root`: host runtime root using an absolute host path
+- `runtime_root`: host state directory for bridge metadata using an absolute host path
+- `docker_bin`: optional real Docker binary path when the launcher cannot provide `GLOVES_DOCKER_REAL_BIN`
 - `secret_mount_root`: container tmpfs root
 - `tmpfs_spec`: Docker `--tmpfs` spec added to matched containers
 - `targets[*].secret_ref`: secret ref to resolve
@@ -53,7 +53,8 @@ The launcher:
 2. creates a private shim directory
 3. symlinks `docker` to `gloves-docker-bridge`
 4. exports `GLOVES_DOCKER_BRIDGE_CONFIG`
-5. starts OpenClaw with the shimmed `PATH`
+5. exports `GLOVES_DOCKER_REAL_BIN` so the bridge uses the same Docker binary the launcher discovered
+6. starts OpenClaw with the shimmed `PATH`
 
 This keeps:
 
@@ -73,6 +74,8 @@ For matched containers, the bridge:
 5. sets restrictive file permissions
 6. marks state so later `docker exec` calls do not re-inject unnecessarily
 7. resets or removes state on `docker stop` and `docker rm`
+
+Matched foreground `docker run` invocations are rejected up front. Use detached containers or a `create` then `start` flow so the bridge can inject before later `exec` calls.
 
 ## When To Use What
 

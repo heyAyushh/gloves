@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
@@ -178,6 +178,12 @@ impl DockerBridgeConfig {
                 .forward(&invocation.original_arguments)
                 .map(|output| emit_output(&output));
         }
+        if is_run && !initial_create_spec.detach {
+            return Err(GlovesError::InvalidInput(
+                "matched docker run must use --detach so the bridge can inject before later execs"
+                    .to_owned(),
+            ));
+        }
 
         ensure_private_dir(&self.runtime_root)?;
         self.audit_match(&initial_create_spec, matched_targets.len())?;
@@ -270,11 +276,12 @@ impl DockerBridgeConfig {
             if !target.selector.matches(create_spec) {
                 continue;
             }
+            let container_path = target.normalized_container_path(&self.secret_mount_root)?;
             let agent_id = target.resolve_agent_id()?;
             matched.push(ResolvedDockerSecretTarget {
                 secret_ref: target.secret_ref.clone(),
                 agent_id,
-                container_path: target.container_path.clone(),
+                container_path,
             });
         }
         Ok(matched)
@@ -399,10 +406,9 @@ impl DockerBridgeConfig {
     }
 
     fn real_docker_command(&self, arguments: &[impl AsRef<str>]) -> Result<Command> {
-        let docker_bin = self
-            .docker_bin
-            .clone()
-            .or_else(|| std::env::var_os(DOCKER_REAL_BIN_ENV_VAR).map(PathBuf::from))
+        let docker_bin = std::env::var_os(DOCKER_REAL_BIN_ENV_VAR)
+            .map(PathBuf::from)
+            .or_else(|| self.docker_bin.clone())
             .ok_or_else(|| {
                 GlovesError::InvalidInput(format!(
                     "set docker_bin in the bridge config or export {DOCKER_REAL_BIN_ENV_VAR}"
@@ -470,12 +476,7 @@ pub struct DockerSecretTarget {
 
 impl DockerSecretTarget {
     fn validate(&self, secret_mount_root: &str) -> Result<()> {
-        if !self.container_path.starts_with(secret_mount_root) {
-            return Err(GlovesError::InvalidInput(format!(
-                "container_path `{}` must stay under `{secret_mount_root}`",
-                self.container_path
-            )));
-        }
+        self.normalized_container_path(secret_mount_root)?;
         if self.selector.is_empty() {
             return Err(GlovesError::InvalidInput(
                 "docker bridge target selectors must match at least one container property"
@@ -483,6 +484,22 @@ impl DockerSecretTarget {
             ));
         }
         self.resolve_agent_id().map(|_| ())
+    }
+
+    fn normalized_container_path(&self, secret_mount_root: &str) -> Result<String> {
+        let normalized_mount_root =
+            normalize_container_path(secret_mount_root, "secret_mount_root")?;
+        let normalized_container_path =
+            normalize_container_path(&self.container_path, "container_path")?;
+        if normalized_container_path == normalized_mount_root
+            || !normalized_container_path.starts_with(&normalized_mount_root)
+        {
+            return Err(GlovesError::InvalidInput(format!(
+                "container_path `{}` must stay under `{secret_mount_root}`",
+                self.container_path
+            )));
+        }
+        Ok(normalized_container_path.to_string_lossy().into_owned())
     }
 
     fn resolve_agent_id(&self) -> Result<AgentId> {
@@ -931,15 +948,46 @@ fn option_takes_value(token: &str) -> bool {
 }
 
 fn split_key_value(label: &str, value: &str) -> Result<(String, String)> {
-    let (key, value) = value.split_once('=').ok_or_else(|| {
-        GlovesError::InvalidInput(format!("docker {label} `{value}` must be KEY=VALUE"))
-    })?;
-    if key.is_empty() {
+    if value.is_empty() {
         return Err(GlovesError::InvalidInput(format!(
             "docker {label} key must not be empty"
         )));
     }
-    Ok((key.to_owned(), value.to_owned()))
+    match value.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_owned(), value.to_owned())),
+        Some(_) => Err(GlovesError::InvalidInput(format!(
+            "docker {label} key must not be empty"
+        ))),
+        None => Ok((value.to_owned(), String::new())),
+    }
+}
+
+fn normalize_container_path(path: &str, label: &str) -> Result<PathBuf> {
+    let original_path = Path::new(path);
+    if !original_path.is_absolute() {
+        return Err(GlovesError::InvalidInput(format!(
+            "{label} must be an absolute container path"
+        )));
+    }
+
+    let mut normalized_path = PathBuf::from(Path::new("/"));
+    for component in original_path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(segment) => normalized_path.push(segment),
+            Component::CurDir | Component::ParentDir => {
+                return Err(GlovesError::InvalidInput(format!(
+                    "{label} must not contain path traversal segments"
+                )))
+            }
+            Component::Prefix(_) => {
+                return Err(GlovesError::InvalidInput(format!(
+                    "{label} must be a Unix-style absolute container path"
+                )))
+            }
+        }
+    }
+    Ok(normalized_path)
 }
 
 #[cfg(test)]
@@ -950,6 +998,7 @@ mod tests {
     };
     use crate::secret_ref::SecretRef;
     use std::{collections::BTreeMap, path::PathBuf};
+    use tempfile::tempdir;
 
     #[test]
     fn docker_create_parser_extracts_name_labels_env_and_image() {
@@ -981,6 +1030,26 @@ mod tests {
             Some("session-1")
         );
         assert!(spec.has_tmpfs_root("/run/secrets"));
+    }
+
+    #[test]
+    fn docker_create_parser_accepts_key_only_env_and_label_flags() {
+        let arguments = vec![
+            "create".to_owned(),
+            "--label".to_owned(),
+            "sandbox".to_owned(),
+            "--env".to_owned(),
+            "OPENCLAW_SESSION_ID".to_owned(),
+            "ghcr.io/openclaw/agent:latest".to_owned(),
+        ];
+
+        let spec = DockerCreateSpec::parse(&arguments).unwrap();
+
+        assert_eq!(spec.labels.get("sandbox").map(String::as_str), Some(""));
+        assert_eq!(
+            spec.env.get("OPENCLAW_SESSION_ID").map(String::as_str),
+            Some("")
+        );
     }
 
     #[test]
@@ -1017,6 +1086,83 @@ mod tests {
 
         let error = target.validate("/run/secrets").unwrap_err();
         assert!(error.to_string().contains("agent_id"));
+    }
+
+    #[test]
+    fn bridge_config_rejects_container_path_traversal() {
+        let target = DockerSecretTarget {
+            secret_ref: "gloves://agents/devy/api-keys/openai"
+                .parse::<SecretRef>()
+                .unwrap(),
+            container_path: "/run/secrets/../etc/passwd".to_owned(),
+            agent_id: None,
+            selector: DockerContainerSelector {
+                name_prefix: Some("openclaw-".to_owned()),
+                ..Default::default()
+            },
+        };
+
+        let error = target.validate("/run/secrets").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("must not contain path traversal segments"));
+    }
+
+    #[test]
+    fn bridge_config_rejects_paths_outside_secret_mount_root() {
+        let target = DockerSecretTarget {
+            secret_ref: "gloves://agents/devy/api-keys/openai"
+                .parse::<SecretRef>()
+                .unwrap(),
+            container_path: "/run/secretsx/openai".to_owned(),
+            agent_id: None,
+            selector: DockerContainerSelector {
+                name_prefix: Some("openclaw-".to_owned()),
+                ..Default::default()
+            },
+        };
+
+        let error = target.validate("/run/secrets").unwrap_err();
+        assert!(error.to_string().contains("must stay under"));
+    }
+
+    #[test]
+    fn matched_foreground_run_is_rejected_before_forwarding() {
+        let temp_dir = tempdir().unwrap();
+        let config = DockerBridgeConfig {
+            version: 1,
+            gloves_root: temp_dir.path().join("gloves"),
+            runtime_root: temp_dir.path().join("runtime"),
+            gloves_bin: None,
+            docker_bin: Some(PathBuf::from("/definitely-not-used")),
+            audit_agent: Some("openclaw".to_owned()),
+            secret_mount_root: "/run/secrets".to_owned(),
+            tmpfs_spec: "/run/secrets:size=1M,mode=0700".to_owned(),
+            targets: vec![DockerSecretTarget {
+                secret_ref: "gloves://agents/devy/api-keys/openai".parse().unwrap(),
+                container_path: "/run/secrets/openai".to_owned(),
+                agent_id: None,
+                selector: DockerContainerSelector {
+                    labels: BTreeMap::from([("openclaw.agent".to_owned(), "devy".to_owned())]),
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let error = config
+            .execute(&[
+                "run".to_owned(),
+                "--name".to_owned(),
+                "openclaw-agent-devy".to_owned(),
+                "--label".to_owned(),
+                "openclaw.agent=devy".to_owned(),
+                "ghcr.io/openclaw/agent:latest".to_owned(),
+                "sleep".to_owned(),
+                "1".to_owned(),
+            ])
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must use --detach"));
     }
 
     #[test]

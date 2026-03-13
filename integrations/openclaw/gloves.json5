@@ -6,7 +6,7 @@
       gloves: {
         enabled: true,
         config: {
-          root: "~/.openclaw/secrets",
+          root: "/var/lib/openclaw/gloves",
           glovesBin: "gloves",
           operatorAgentId: "openclaw",
           timeoutMs: 10000

@@ -166,7 +166,7 @@ Example OpenClaw config shape:
       gloves: {
         enabled: true,
         config: {
-          root: "~/.openclaw/secrets",
+          root: "/var/lib/openclaw/gloves",
           glovesBin: "gloves",
           operatorAgentId: "openclaw",
           timeoutMs: 10000
@@ -188,6 +188,7 @@ Operational expectations:
 
 - install `@gloves/openclaw` on the Gateway host
 - keep `gloves` available on the host `PATH` or provide `glovesBin`
+- use absolute host paths in OpenClaw and bridge configs; do not rely on `~` expansion
 - allow the plugin tool group only for the agents that should see the safe metadata/review tools
 - keep `gloves-mcp` stdio for future richer runtime integrations
 - keep Docker tmpfs injection in a private operator wrapper, not in the official plugin contract
