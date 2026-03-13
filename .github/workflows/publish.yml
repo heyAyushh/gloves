@@ -346,40 +346,42 @@ jobs:
           set -euo pipefail
 
           readonly CRATES_IO_API_BASE_URL="https://crates.io/api/v1/crates"
+          readonly CRATES_IO_USER_AGENT="gloves-release-workflow"
           readonly INDEX_WAIT_ATTEMPTS=30
           readonly INDEX_WAIT_SECONDS=10
 
-          crate_api_url() {
-            local crate_name="$1"
-            printf '%s/%s' "${CRATES_IO_API_BASE_URL}" "${crate_name}"
-          }
-
-          fetch_max_version() {
-            local crate_name="$1"
-
-            curl --fail --silent --show-error "$(crate_api_url "${crate_name}")" \
-              | python3 -c 'import json, sys; print(json.load(sys.stdin)["crate"]["max_version"])'
-          }
-
-          crate_exists() {
+          crate_version_api_url() {
             local crate_name="$1"
             local crate_version="$2"
 
-            local published_version
-            published_version="$(fetch_max_version "${crate_name}")"
-            [[ "${published_version}" == "${crate_version}" ]]
+            printf '%s/%s/%s' "${CRATES_IO_API_BASE_URL}" "${crate_name}" "${crate_version}"
+          }
+
+          crate_version_exists() {
+            local crate_name="$1"
+            local crate_version="$2"
+
+            curl --fail --silent --show-error \
+              --header "User-Agent: ${CRATES_IO_USER_AGENT}" \
+              --output /dev/null \
+              "$(crate_version_api_url "${crate_name}" "${crate_version}")"
           }
 
           publish_crate() {
             local crate_name="$1"
             local crate_version="$2"
 
-            if crate_exists "$crate_name" "$crate_version"; then
+            if crate_version_exists "$crate_name" "$crate_version"; then
               echo "Skipping ${crate_name} ${crate_version}; version already published on crates.io"
               return 0
             fi
 
             if cargo publish -p "$crate_name" --locked; then
+              return 0
+            fi
+
+            if wait_for_index "$crate_name" "$crate_version"; then
+              echo "Skipping ${crate_name} ${crate_version}; version became visible on crates.io after publish attempt"
               return 0
             fi
 
@@ -392,7 +394,7 @@ jobs:
             local crate_version="$2"
 
             for attempt in $(seq 1 "${INDEX_WAIT_ATTEMPTS}"); do
-              if crate_exists "${crate_name}" "${crate_version}"; then
+              if crate_version_exists "${crate_name}" "${crate_version}"; then
                 echo "Confirmed ${crate_name} ${crate_version} on crates.io"
                 return 0
               fi
