@@ -349,7 +349,9 @@ jobs:
             local crate_name="$1"
             local crate_version="$2"
 
-            cargo search "$crate_name" --limit 20 | grep -q "^${crate_name} = \"${crate_version}\""
+            local search_output
+            search_output="$(cargo search "$crate_name" --limit 20)"
+            [[ "${search_output}" == *"${crate_name} = \"${crate_version}\""* ]]
           }
 
           publish_crate() {
