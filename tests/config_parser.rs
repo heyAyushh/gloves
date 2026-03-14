@@ -28,6 +28,8 @@ fn config_roundtrip_v1() {
         AgentAccessFile {
             paths: vec!["runtime_root".to_owned()],
             operations: vec![gloves::config::PathOperation::Read],
+            secrets: None,
+            vault: None,
         },
     );
 
@@ -47,6 +49,7 @@ fn config_roundtrip_v1() {
         },
         vault: VaultConfigFile {
             mode: Some(VaultMode::Auto),
+            mounts: std::collections::BTreeMap::new(),
         },
         defaults: DefaultsConfigFile {
             agent_id: Some("default-agent".to_owned()),
@@ -55,6 +58,7 @@ fn config_roundtrip_v1() {
             vault_secret_ttl_days: Some(365),
             vault_secret_length_bytes: Some(64),
         },
+        integrations: std::collections::BTreeMap::new(),
         agents,
         secrets: gloves::config::SecretsConfigFile::default(),
     };
@@ -376,10 +380,68 @@ secret_ttl_days = 0
 fn config_validate_rejects_unsupported_version() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join(".gloves.toml");
-    let raw = "version = 2\n";
+    let raw = "version = 3\n";
 
     let error = GlovesConfig::parse_from_str(raw, &source).unwrap_err();
     assert!(matches!(error, GlovesError::InvalidInput(_)));
+}
+
+#[test]
+fn config_v2_parses_mounts_integrations_and_agent_scoped_access() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join(".gloves.toml");
+    let raw = r#"
+version = 2
+
+[paths]
+root = "./runtime"
+
+[vault]
+mode = "required"
+
+[vault.mounts]
+contacts = "./vault/contacts"
+
+[integrations.github]
+agent = "coder"
+profiles = ["work", "personal"]
+slots = ["token"]
+
+[agents.coder.secrets]
+refs = ["github/*", "shared/*"]
+operations = ["read", "list"]
+
+[agents.coder.vault]
+mounts = ["contacts"]
+operations = ["read", "mount"]
+"#;
+
+    let config = GlovesConfig::parse_from_str(raw, &source).unwrap();
+    let agent = AgentId::new("coder").unwrap();
+
+    assert_eq!(config.vault.mode, VaultMode::Required);
+    assert!(config
+        .vault_mount_path("contacts")
+        .unwrap()
+        .ends_with("vault/contacts"));
+    assert_eq!(
+        config.inferred_integration_refs("github").unwrap(),
+        vec![
+            "github/work/token".to_owned(),
+            "github/personal/token".to_owned()
+        ]
+    );
+    assert!(config
+        .secret_access_policy(&agent)
+        .unwrap()
+        .allows_secret("github/work/token"));
+    assert_eq!(
+        config
+            .agent_vault_access_policy(&agent)
+            .unwrap()
+            .mount_names,
+        vec!["contacts".to_owned()]
+    );
 }
 
 #[test]

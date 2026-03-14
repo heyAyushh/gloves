@@ -73,12 +73,17 @@ paths = ["*"]
 operations = ["read", "write", "list", "revoke", "request", "status", "approve", "deny"]
 ```
 
-Validate and initialize:
+Bootstrap the runtime and validate it:
 
 ```bash
-gloves --config /etc/gloves/prod.gloves.toml config validate
-gloves --config /etc/gloves/prod.gloves.toml init
+gloves bootstrap --profile openclaw \
+  --root /var/lib/openclaw/gloves \
+  --config /etc/gloves/prod.gloves.toml \
+  --agents main,relationships,coder \
+  --default-agent main
 ```
+
+This writes the initial `.gloves.toml`, `store/.gloves.yaml`, agent identities, and runtime layout, then runs config validation and verify. It is a fresh-setup helper, not a migration command.
 
 Create reviewer GPG identity:
 
@@ -168,7 +173,7 @@ Example OpenClaw config shape:
         config: {
           root: "/var/lib/openclaw/gloves",
           glovesBin: "gloves",
-          operatorAgentId: "openclaw",
+          operatorAgentId: "main",
           timeoutMs: 10000
         }
       }
@@ -177,7 +182,7 @@ Example OpenClaw config shape:
   agents: {
     relationships: {
       tools: {
-        alsoAllow: ["group:plugins:gloves"]
+        alsoAllow: ["gloves"]
       }
     }
   }
@@ -189,7 +194,7 @@ Operational expectations:
 - install `@gloves/openclaw` on the Gateway host
 - keep `gloves` available on the host `PATH` or provide `glovesBin`
 - use absolute host paths in OpenClaw and bridge configs; do not rely on `~` expansion
-- allow the plugin tool group only for the agents that should see the safe metadata/review tools
+- allow plugin id `gloves` only for the agents that should see the safe metadata/review tools
 - keep `gloves-mcp` stdio for future richer runtime integrations
 - keep Docker tmpfs injection in a private operator wrapper, not in the official plugin contract
 

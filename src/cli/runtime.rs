@@ -51,10 +51,10 @@ impl SecretTtl {
 
 pub(crate) fn init_layout(paths: &SecretsPaths) -> Result<()> {
     ensure_private_dir(paths.root())?;
+    ensure_private_dir(&paths.agents_dir())?;
     ensure_private_dir(&paths.store_dir())?;
     ensure_private_dir(&paths.metadata_dir())?;
     ensure_private_dir(&paths.vaults_dir())?;
-    ensure_private_dir(&paths.gpg_homes_dir())?;
     ensure_private_dir(&paths.encrypted_dir())?;
     ensure_private_dir(&paths.mounts_dir())?;
     create_private_file_if_missing(&paths.pending_file(), b"[]")?;
@@ -80,6 +80,9 @@ pub(crate) fn manager_for_paths(paths: &SecretsPaths) -> Result<SecretsManager> 
 }
 
 fn load_or_create_identity_file(identity_file: &Path) -> Result<PathBuf> {
+    if let Some(parent_dir) = identity_file.parent() {
+        ensure_private_dir(parent_dir)?;
+    }
     if identity_file.exists() {
         age_crypto::validate_identity_file(identity_file)?;
         return Ok(identity_file.to_path_buf());
@@ -90,6 +93,9 @@ fn load_or_create_identity_file(identity_file: &Path) -> Result<PathBuf> {
 }
 
 fn load_or_create_signing_key_file(signing_key_file: &Path) -> Result<SigningKey> {
+    if let Some(parent_dir) = signing_key_file.parent() {
+        ensure_private_dir(parent_dir)?;
+    }
     if signing_key_file.exists() {
         let bytes = fs::read(signing_key_file)?;
         let key_bytes: [u8; 32] = bytes
@@ -110,6 +116,16 @@ pub(crate) fn load_or_create_identity_for_agent(
     paths: &SecretsPaths,
     agent_id: &AgentId,
 ) -> Result<PathBuf> {
+    let legacy_namespaced_identity = paths.namespaced_identity_file_for_agent(agent_id.as_str());
+    if legacy_namespaced_identity.exists() {
+        age_crypto::validate_identity_file(&legacy_namespaced_identity)?;
+        return Ok(legacy_namespaced_identity);
+    }
+    let legacy_root_identity = paths.legacy_identity_file_for_agent(agent_id.as_str());
+    if legacy_root_identity.exists() {
+        age_crypto::validate_identity_file(&legacy_root_identity)?;
+        return Ok(legacy_root_identity);
+    }
     load_or_create_identity_file(&paths.identity_file_for_agent(agent_id.as_str()))
 }
 
@@ -129,6 +145,10 @@ pub(crate) fn load_or_create_signing_key_for_agent(
     paths: &SecretsPaths,
     agent_id: &AgentId,
 ) -> Result<SigningKey> {
+    let legacy_signing_key = paths.legacy_signing_key_file_for_agent(agent_id.as_str());
+    if legacy_signing_key.exists() {
+        return load_or_create_signing_key_file(&legacy_signing_key);
+    }
     load_or_create_signing_key_file(&paths.signing_key_file_for_agent(agent_id.as_str()))
 }
 

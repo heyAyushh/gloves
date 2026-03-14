@@ -1,6 +1,6 @@
 [package]
 name = "gloves-config"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 description = "Configuration parsing and validation for gloves"
 license = "MIT"
@@ -9,7 +9,7 @@ homepage = "https://github.com/heyAyushh/gloves"
 documentation = "https://docs.rs/gloves-config"
 
 [dependencies]
-gloves-core = { path = "../gloves-core", version = "0.5.10" }
+gloves-core = { path = "../gloves-core", version = "0.5.11" }
 
 serde = { version = "1.0.228", features = ["derive"] }
 toml = "1.0.1"

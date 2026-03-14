@@ -1307,7 +1307,7 @@ fn cli_gpg_create_with_relative_root_writes_to_workspace_home() {
         .success();
 
     assert!(workspace
-        .join(".openclaw/secrets/gpg/agent-main/fingerprint.txt")
+        .join(".openclaw/secrets/agents/agent-main/gpg/fingerprint.txt")
         .exists());
 }
 
@@ -3015,10 +3015,13 @@ fn cli_grant_matrix_is_stable_across_ten_fresh_passes() {
             .success()
             .stdout(predicates::str::contains(&secret_value));
 
-        assert!(temp_dir.path().join("agent-main.agekey").exists());
-        assert!(temp_dir.path().join("agent-b.agekey").exists());
-        assert!(temp_dir.path().join("agent-c.agekey").exists());
-        assert!(!temp_dir.path().join("default-agent.agekey").exists());
+        assert!(temp_dir.path().join("agents/agent-main/age.key").exists());
+        assert!(temp_dir.path().join("agents/agent-b/age.key").exists());
+        assert!(temp_dir.path().join("agents/agent-c/age.key").exists());
+        assert!(!temp_dir
+            .path()
+            .join("agents/default-agent/age.key")
+            .exists());
 
         let metadata_path = temp_dir.path().join(format!("meta/{secret_name}.json"));
         let metadata: serde_json::Value =
@@ -5219,6 +5222,287 @@ fn cli_verify() {
     let temp_dir = tempfile::tempdir().unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
         .args(["--root", temp_dir.path().to_str().unwrap(), "verify"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_bootstrap_openclaw_creates_expected_files_and_defaults_to_main() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join(".openclaw").join("secrets");
+    let config_path = temp_dir.path().join(".openclaw").join(".gloves.toml");
+    let root_string = root.to_str().unwrap();
+    let config_string = config_path.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            root_string,
+            "--config",
+            config_string,
+            "--agents",
+            "main,relationships,coder",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("operatorAgentId = \"main\""))
+        .stdout(predicates::str::contains(
+            "bridge.targets = [\"main\", \"relationships\", \"coder\"]",
+        ));
+
+    let config_body = fs::read_to_string(&config_path).unwrap();
+    assert!(config_body.contains("agent_id = \"main\""));
+    assert!(config_body.contains(&format!("root = \"{}\"", root.display())));
+
+    let rules_body = fs::read_to_string(root.join("store").join(".gloves.yaml")).unwrap();
+    assert!(rules_body.contains("^shared/.*$"));
+    assert!(rules_body.contains("^agents/main/.*$"));
+    assert!(rules_body.contains("^agents/relationships/.*$"));
+    assert!(rules_body.contains("^agents/coder/.*$"));
+
+    for agent in ["main", "relationships", "coder"] {
+        assert!(root
+            .join("identities")
+            .join(format!("{agent}.age"))
+            .exists());
+        assert!(root.join("agents").join(agent).join("age.key").exists());
+        assert!(root.join("agents").join(agent).join("signing.key").exists());
+        assert!(root
+            .join("store")
+            .join("agents")
+            .join(agent)
+            .join(".age-recipients")
+            .exists());
+    }
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--config", config_string, "config", "validate"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("valid"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args(["--config", config_string, "verify"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn cli_openclaw_bootstrap_alias_writes_v2_agent_scoped_config() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join(".openclaw").join("secrets");
+    let config_path = temp_dir.path().join(".openclaw").join(".gloves.toml");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "openclaw",
+            "bootstrap",
+            "--root",
+            root.to_str().unwrap(),
+            "--config",
+            config_path.to_str().unwrap(),
+            "--agents",
+            "main,relationships",
+        ])
+        .assert()
+        .success();
+
+    let config_body = fs::read_to_string(&config_path).unwrap();
+    assert!(config_body.contains("version = 2"));
+    assert!(config_body.contains("[agents.main.secrets]"));
+    assert!(config_body.contains("refs = [\"*\"]"));
+    assert!(config_body.contains("[agents.relationships.secrets]"));
+    assert!(config_body.contains("agents/relationships/*"));
+    assert!(config_body.contains("shared/*"));
+}
+
+#[test]
+fn cli_integration_list_refs_uses_v2_config_inference() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("runtime");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 2
+
+[paths]
+root = "{}"
+
+[integrations.github]
+agent = "coder"
+profiles = ["work", "personal"]
+slots = ["token"]
+
+[agents.coder.secrets]
+refs = ["github/*"]
+operations = ["read", "write", "list"]
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "integration",
+            "github",
+            "list-refs",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("github/work/token"))
+        .stdout(predicates::str::contains("github/personal/token"));
+}
+
+#[test]
+fn cli_integration_rotate_and_test_use_inferred_ref() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join("runtime");
+    let config_path = temp_dir.path().join(".gloves.toml");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        &config_path,
+        format!(
+            r#"
+version = 2
+
+[paths]
+root = "{}"
+
+[defaults]
+agent_id = "coder"
+
+[integrations.github]
+agent = "coder"
+profiles = ["work"]
+slots = ["token"]
+
+[agents.coder.secrets]
+refs = ["github/*"]
+operations = ["read", "write", "list"]
+"#,
+            root.display()
+        ),
+    )
+    .unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "integration",
+            "github",
+            "rotate",
+            "token",
+            "--profile",
+            "work",
+            "--value",
+            "ghp-test-123",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("github/work/token"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "integration",
+            "github",
+            "test",
+            "token",
+            "--profile",
+            "work",
+        ])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("resolved github/work/token"));
+}
+
+#[test]
+fn cli_bootstrap_rejects_default_agent_outside_agents() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join(".openclaw").join("secrets");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            root.to_str().unwrap(),
+            "--agents",
+            "relationships,coder",
+            "--default-agent",
+            "main",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "--default-agent `main` must be included in --agents",
+        ));
+}
+
+#[test]
+fn cli_bootstrap_requires_force_to_replace_existing_files() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = temp_dir.path().join(".openclaw").join("secrets");
+    let config_path = temp_dir.path().join(".openclaw").join(".gloves.toml");
+    let root_string = root.to_str().unwrap();
+    let config_string = config_path.to_str().unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            root_string,
+            "--config",
+            config_string,
+            "--agents",
+            "main,coder",
+        ])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            root_string,
+            "--config",
+            config_string,
+            "--agents",
+            "main,coder",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("already exists"));
+
+    Command::new(assert_cmd::cargo::cargo_bin!("gloves"))
+        .args([
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            root_string,
+            "--config",
+            config_string,
+            "--agents",
+            "main,coder",
+            "--force",
+        ])
         .assert()
         .success();
 }

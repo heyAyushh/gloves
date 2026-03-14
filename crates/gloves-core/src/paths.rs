@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
 
 const DEFAULT_AGENT_ID: &str = "default-agent";
+const AGENTS_DIR_NAME: &str = "agents";
+const AGE_KEY_FILE_NAME: &str = "age.key";
+const SIGNING_KEY_FILE_NAME: &str = "signing.key";
+const GPG_DIR_NAME: &str = "gpg";
 
 /// Canonical path layout for secrets runtime files.
 #[derive(Debug, Clone)]
@@ -46,9 +50,29 @@ impl SecretsPaths {
         self.identity_file_for_agent(DEFAULT_AGENT_ID)
     }
 
+    /// Canonical per-agent identity root.
+    pub fn agents_dir(&self) -> PathBuf {
+        self.root.join(AGENTS_DIR_NAME)
+    }
+
+    /// Canonical per-agent runtime directory.
+    pub fn agent_dir(&self, agent_id: &str) -> PathBuf {
+        self.agents_dir().join(agent_id)
+    }
+
     /// Age identity file for one agent id.
     pub fn identity_file_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.agent_dir(agent_id).join(AGE_KEY_FILE_NAME)
+    }
+
+    /// Legacy root-level age identity file for one agent id.
+    pub fn legacy_identity_file_for_agent(&self, agent_id: &str) -> PathBuf {
         self.root.join(format!("{agent_id}.agekey"))
+    }
+
+    /// Legacy namespaced-store age identity file for one agent id.
+    pub fn namespaced_identity_file_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.root.join("identities").join(format!("{agent_id}.age"))
     }
 
     /// Default Ed25519 signing key file for CLI agent.
@@ -58,6 +82,11 @@ impl SecretsPaths {
 
     /// Ed25519 signing key file for one agent id.
     pub fn signing_key_file_for_agent(&self, agent_id: &str) -> PathBuf {
+        self.agent_dir(agent_id).join(SIGNING_KEY_FILE_NAME)
+    }
+
+    /// Legacy root-level Ed25519 signing key file for one agent id.
+    pub fn legacy_signing_key_file_for_agent(&self, agent_id: &str) -> PathBuf {
         self.root.join(format!("{agent_id}.signing.key"))
     }
 
@@ -68,12 +97,17 @@ impl SecretsPaths {
 
     /// Per-agent GPG homedir root.
     pub fn gpg_homes_dir(&self) -> PathBuf {
-        self.root.join("gpg")
+        self.agents_dir()
     }
 
     /// GPG homedir for one agent id.
     pub fn gpg_home(&self, agent_id: &str) -> PathBuf {
-        self.gpg_homes_dir().join(agent_id)
+        self.agent_dir(agent_id).join(GPG_DIR_NAME)
+    }
+
+    /// Legacy GPG homedir for one agent id.
+    pub fn legacy_gpg_home(&self, agent_id: &str) -> PathBuf {
+        self.root.join(GPG_DIR_NAME).join(agent_id)
     }
 
     /// Vault session metadata file.

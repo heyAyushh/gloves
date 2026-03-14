@@ -15,11 +15,16 @@ gloves --version
 gloves --json --version
 ```
 
-## 2) Initialize runtime layout
+## 2) Bootstrap a fresh OpenClaw layout
 
 ```bash
-gloves --root .openclaw/secrets init
+gloves bootstrap --profile openclaw \
+  --root .openclaw/secrets \
+  --config .openclaw/.gloves.toml \
+  --agents main,relationships,coder
 ```
+
+This thin bootstrap flow creates `.gloves.toml`, `store/.gloves.yaml`, per-agent age identities, and the runtime layout in one step. It is for fresh setup only; it does not migrate existing secrets or patch OpenClaw runtime files.
 
 ## 3) Create and read an agent-owned secret
 

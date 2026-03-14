@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.5.11
+
+- Added a ref-first OpenClaw config model with v2 support for:
+  - `vault.mounts`
+  - `integrations.*`
+  - `agents.<id>.secrets.refs`
+  - `agents.<id>.vault.mounts`
+- Added grouped CLI support for:
+  - `gloves openclaw bootstrap`
+  - `gloves integration <name> list-refs|rotate|test`
+- Canonicalized per-agent runtime identity paths under `agents/<agent>/...` while keeping legacy identity locations readable during transition.
+
+- Added a thin `gloves bootstrap --profile openclaw` command for fresh setup:
+  - initializes the runtime layout
+  - creates per-agent age identities and recipients files
+  - writes `.gloves.toml` and `store/.gloves.yaml`
+  - validates config and verifies runtime state
+  - defaults the OpenClaw profile to agent `main`
+
 ## 0.5.10
 
 ### Patch Changes

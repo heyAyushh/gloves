@@ -59,10 +59,9 @@ pub fn run_docker_bridge(arguments: &[String]) -> Result<i32> {
 
 fn validated_identity_path(paths: &SecretsPaths, agent_id: &AgentId) -> Result<PathBuf> {
     let candidate_paths = [
-        PathBuf::from(paths.root())
-            .join("identities")
-            .join(format!("{}.age", agent_id.as_str())),
         paths.identity_file_for_agent(agent_id.as_str()),
+        paths.namespaced_identity_file_for_agent(agent_id.as_str()),
+        paths.legacy_identity_file_for_agent(agent_id.as_str()),
     ];
     let Some(identity_path) = candidate_paths.into_iter().find(|path| path.exists()) else {
         return Err(GlovesError::InvalidInput(format!(

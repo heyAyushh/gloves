@@ -934,7 +934,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gloves"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "age",
  "assert_cmd",
@@ -971,7 +971,7 @@ dependencies = [
 
 [[package]]
 name = "gloves-client-native"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "napi",
  "napi-build",
@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "gloves-config"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "gloves-core",
  "serde",
@@ -991,7 +991,7 @@ dependencies = [
 
 [[package]]
 name = "gloves-core"
-version = "0.5.10"
+version = "0.5.11"
 dependencies = [
  "chrono",
  "secrecy",

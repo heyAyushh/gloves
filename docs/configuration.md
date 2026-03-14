@@ -30,6 +30,17 @@ secret_ttl_days = 30
 mode = "auto"
 ```
 
+For a fresh OpenClaw setup, prefer generating this with:
+
+```bash
+gloves bootstrap --profile openclaw \
+  --root .openclaw/secrets \
+  --config .openclaw/.gloves.toml \
+  --agents main,relationships,coder
+```
+
+The bootstrap command is intentionally thin. It writes the initial config and creation rules, creates agent identities, validates the result, and stops there.
+
 Built-in default `secret_ttl_days` is 30. Override it when you need shorter or longer retention. For one-off secrets that should not expire, use `gloves secrets set ... --ttl never`. The create command prints the resolved expiry timestamp for expiring secrets and reports `never expires` otherwise.
 
 ## Agent Path Visibility and Operations

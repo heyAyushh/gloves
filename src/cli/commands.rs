@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env::VarError;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -13,11 +13,12 @@ use zeroize::Zeroize;
 use crate::{
     audit::{AuditEvent, AuditLog},
     config::{
-        discover_config, resolve_config_path, ConfigSource, GlovesConfig, PathOperation,
-        SecretAclOperation, VaultMode, CONFIG_SCHEMA_VERSION,
+        discover_config, resolve_config_path, ConfigPathsFile, ConfigSource, DaemonConfigFile,
+        DefaultsConfigFile, GlovesConfig, GlovesConfigFile, PathOperation, SecretAclOperation,
+        SecretsConfigFile, VaultConfigFile, VaultMode, CONFIG_SCHEMA_VERSION,
     },
     error::{explain_error_code, known_error_codes, normalize_error_code, GlovesError, Result},
-    fs_secure::ensure_private_dir,
+    fs_secure::{ensure_private_dir, write_private_file_atomic},
     manager::ListItem,
     namespaced_store::NamespacedStore,
     paths::SecretsPaths,
@@ -34,7 +35,8 @@ use super::{
     output::{self, OutputStatus},
     runtime, secret_input,
     vault_cmd::{self, VaultCommandDefaults},
-    AccessCommand, Cli, Command, ConfigCommand, ErrorFormatArg, ExecCommand, GpgCommand,
+    AccessCommand, BootstrapProfileArg, Cli, Command, ConfigCommand, DoctorCommand, ErrorFormatArg,
+    ExecCommand, GpgCommand, IntegrationCommand, OpenclawBridgeCommand, OpenclawCommand,
     RequestsCommand, SecretReadFormatArg, SecretShowFormatArg, SecretsCommand, VaultModeArg,
     DEFAULT_AGENT_ID, DEFAULT_DAEMON_BIND, DEFAULT_DAEMON_IO_TIMEOUT_SECONDS,
     DEFAULT_DAEMON_REQUEST_LIMIT_BYTES, DEFAULT_ROOT_DIR, DEFAULT_TTL_DAYS,
@@ -66,6 +68,9 @@ const CLI_HELP_HINT: &str = "gloves --help";
 const CLI_COMMAND_HELP_HINT: &str = "gloves help [topic...]";
 const PENDING_REQUEST_LOOKUP_COMMAND: &str = "gloves requests list";
 const SECRET_LOOKUP_COMMAND: &str = "gloves list";
+const BOOTSTRAP_OPENCLAW_DEFAULT_AGENT: &str = "main";
+const BOOTSTRAP_RULES_FILE_NAME: &str = ".gloves.yaml";
+const BOOTSTRAP_SHARED_NAMESPACE_REGEX: &str = "^shared/.*$";
 #[cfg(feature = "tui")]
 const TUI_FLAG_ROOT: &str = "--root";
 #[cfg(feature = "tui")]
@@ -214,6 +219,49 @@ struct ExecutionResult {
     injected_variables: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+struct BootstrapRequest {
+    profile: BootstrapProfileArg,
+    agent_ids: Vec<AgentId>,
+    default_agent_id: AgentId,
+    force: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapPaths {
+    root: PathBuf,
+    config: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct BootstrapOutput {
+    root: PathBuf,
+    config: PathBuf,
+    profile: &'static str,
+    default_agent: String,
+    agents: Vec<String>,
+    openclaw_snippets: BootstrapOpenClawSnippets,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BootstrapOpenClawSnippets {
+    plugin_operator_agent_id: String,
+    bridge_targets: Vec<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BootstrapCreationRulesFile {
+    version: u32,
+    creation_rules: Vec<BootstrapCreationRule>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BootstrapCreationRule {
+    path_regex: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    age: Option<Vec<String>>,
+}
+
 pub(crate) fn run(mut cli: Cli) -> Result<i32> {
     if let Command::ExtpassGet { name } = &cli.command {
         return run_extpass_get(name);
@@ -226,10 +274,55 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         .as_ref()
         .map(|bootstrap| navigator_launch_options(&cli, bootstrap));
 
+    let json_output = cli.json || matches!(cli.error_format, ErrorFormatArg::Json);
+    if let Command::Bootstrap {
+        profile,
+        agents,
+        default_agent,
+        force,
+    } = &cli.command
+    {
+        return run_bootstrap_command(
+            &cli,
+            BootstrapRequest {
+                profile: profile.clone(),
+                agent_ids: parse_bootstrap_agent_ids(agents)?,
+                default_agent_id: resolve_bootstrap_default_agent(
+                    profile,
+                    default_agent.as_deref(),
+                )?,
+                force: *force,
+            },
+            json_output,
+        );
+    }
+    if let Command::Openclaw {
+        command:
+            OpenclawCommand::Bootstrap {
+                agents,
+                default_agent,
+                force,
+            },
+    } = &cli.command
+    {
+        return run_bootstrap_command(
+            &cli,
+            BootstrapRequest {
+                profile: BootstrapProfileArg::Openclaw,
+                agent_ids: parse_bootstrap_agent_ids(agents)?,
+                default_agent_id: resolve_bootstrap_default_agent(
+                    &BootstrapProfileArg::Openclaw,
+                    default_agent.as_deref(),
+                )?,
+                force: *force,
+            },
+            json_output,
+        );
+    }
+
     let state = load_effective_state(&cli)?;
     enforce_vault_mode(&state.vault_mode, &cli.command)?;
     runtime::init_layout(&state.paths)?;
-    let json_output = cli.json || matches!(cli.error_format, ErrorFormatArg::Json);
 
     match cli.command {
         Command::Init => {
@@ -245,6 +338,27 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 &format!("initialized {}", root_path),
                 json_output,
             )? {
+                return Ok(code);
+            }
+        }
+        Command::Bootstrap { .. } => unreachable!("bootstrap is handled before config loading"),
+        Command::Openclaw {
+            command: OpenclawCommand::Bootstrap { .. },
+        } => unreachable!("openclaw bootstrap is handled before config loading"),
+        Command::Openclaw {
+            command: OpenclawCommand::Bridge { command },
+        } => {
+            if let Some(code) = run_openclaw_bridge_command(&state, &command, json_output)? {
+                return Ok(code);
+            }
+        }
+        Command::Doctor { command } => {
+            if let Some(code) = run_doctor_command(&state, &command, json_output)? {
+                return Ok(code);
+            }
+        }
+        Command::Integration { name, command } => {
+            if let Some(code) = run_integration_command(&state, &name, &command, json_output)? {
                 return Ok(code);
             }
         }
@@ -808,17 +922,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
             }
         }
         Command::Verify => {
-            let manager = runtime::manager_for_paths(&state.paths)?;
-            TtlReaper::reap(
-                &manager.agent_backend,
-                &manager.metadata_store,
-                &manager.audit_log,
-            )?;
-            TtlReaper::reap_vault_sessions(
-                &GocryptfsDriver::new(),
-                &state.paths,
-                &manager.audit_log,
-            )?;
+            verify_runtime_state(&state.paths)?;
             log_command_executed(&state.paths, &state.default_agent_id, "verify", None);
             if let Some(code) = emit_command_message_or_json(
                 "verify",
@@ -891,6 +995,7 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
                 if matches!(state.vault_mode, VaultMode::Required) {
                     ensure_vault_dependencies()?;
                 }
+                validate_loaded_config(state.loaded_config.as_ref())?;
                 log_command_executed(
                     &state.paths,
                     &state.default_agent_id,
@@ -984,6 +1089,602 @@ pub(crate) fn run(mut cli: Cli) -> Result<i32> {
         Command::ExtpassGet { .. } => {}
     }
     Ok(0)
+}
+
+fn run_bootstrap_command(cli: &Cli, request: BootstrapRequest, json_output: bool) -> Result<i32> {
+    ensure_bootstrap_default_agent_is_listed(&request.default_agent_id, &request.agent_ids)?;
+
+    let bootstrap_paths = resolve_bootstrap_paths(cli)?;
+    let runtime_paths = SecretsPaths::new(&bootstrap_paths.root);
+    runtime::init_layout(&runtime_paths)?;
+
+    let store = NamespacedStore::new(&bootstrap_paths.root);
+    store.init_layout()?;
+    let identity_results = create_bootstrap_agent_identities(
+        &store,
+        &runtime_paths,
+        &request.agent_ids,
+        request.force,
+    )?;
+    write_bootstrap_config_file(
+        &bootstrap_paths.config,
+        &bootstrap_paths.root,
+        &request.default_agent_id,
+        &request.agent_ids,
+        request.force,
+    )?;
+    write_bootstrap_creation_rules_file(
+        &bootstrap_paths
+            .root
+            .join("store")
+            .join(BOOTSTRAP_RULES_FILE_NAME),
+        &request.agent_ids,
+        &identity_results,
+        request.force,
+    )?;
+
+    let loaded_config = GlovesConfig::load_from_path(&bootstrap_paths.config)?;
+    validate_loaded_config(Some(&loaded_config))?;
+    verify_runtime_state(&SecretsPaths::new(&bootstrap_paths.root))?;
+    log_command_executed(
+        &SecretsPaths::new(&bootstrap_paths.root),
+        &request.default_agent_id,
+        "bootstrap",
+        Some(request.profile_label().to_owned()),
+    );
+
+    let output = BootstrapOutput {
+        root: bootstrap_paths.root,
+        config: bootstrap_paths.config,
+        profile: request.profile_label(),
+        default_agent: request.default_agent_id.as_str().to_owned(),
+        agents: request
+            .agent_ids
+            .iter()
+            .map(|agent_id| agent_id.as_str().to_owned())
+            .collect(),
+        openclaw_snippets: BootstrapOpenClawSnippets {
+            plugin_operator_agent_id: request.default_agent_id.as_str().to_owned(),
+            bridge_targets: request
+                .agent_ids
+                .iter()
+                .map(|agent_id| agent_id.as_str().to_owned())
+                .collect(),
+        },
+    };
+    if let Some(code) = emit_command_json_or_text(
+        "bootstrap",
+        serde_json::json!({
+            "status": "bootstrapped",
+            "profile": output.profile,
+            "root": output.root.display().to_string(),
+            "config": output.config.display().to_string(),
+            "default_agent": output.default_agent,
+            "agents": output.agents,
+            "openclaw": output.openclaw_snippets,
+            "validated": true,
+            "verified": true,
+        }),
+        &render_bootstrap_output(&output),
+        json_output,
+    )? {
+        return Ok(code);
+    }
+    Ok(0)
+}
+
+impl BootstrapRequest {
+    fn profile_label(&self) -> &'static str {
+        match self.profile {
+            BootstrapProfileArg::Openclaw => "openclaw",
+        }
+    }
+}
+
+fn parse_bootstrap_agent_ids(raw: &str) -> Result<Vec<AgentId>> {
+    let mut agent_ids = Vec::new();
+    let mut seen_agents = HashSet::new();
+    for segment in raw.split(',') {
+        let agent_literal = segment.trim();
+        if agent_literal.is_empty() {
+            return Err(GlovesError::InvalidInput(
+                "--agents contains an empty agent id".to_owned(),
+            ));
+        }
+        let agent_id = AgentId::new(agent_literal)?;
+        if seen_agents.insert(agent_id.as_str().to_owned()) {
+            agent_ids.push(agent_id);
+        }
+    }
+    if agent_ids.is_empty() {
+        return Err(GlovesError::InvalidInput(
+            "--agents must include at least one agent id".to_owned(),
+        ));
+    }
+    Ok(agent_ids)
+}
+
+fn resolve_bootstrap_default_agent(
+    profile: &BootstrapProfileArg,
+    default_agent: Option<&str>,
+) -> Result<AgentId> {
+    let default_literal = match (profile, default_agent) {
+        (BootstrapProfileArg::Openclaw, Some(agent_literal)) => agent_literal,
+        (BootstrapProfileArg::Openclaw, None) => BOOTSTRAP_OPENCLAW_DEFAULT_AGENT,
+    };
+    Ok(AgentId::new(default_literal)?)
+}
+
+fn ensure_bootstrap_default_agent_is_listed(
+    default_agent_id: &AgentId,
+    agent_ids: &[AgentId],
+) -> Result<()> {
+    if agent_ids
+        .iter()
+        .any(|agent_id| agent_id.as_str() == default_agent_id.as_str())
+    {
+        return Ok(());
+    }
+    Err(GlovesError::InvalidInput(format!(
+        "--default-agent `{}` must be included in --agents",
+        default_agent_id.as_str()
+    )))
+}
+
+fn resolve_bootstrap_paths(cli: &Cli) -> Result<BootstrapPaths> {
+    let current_dir = std::env::current_dir()?;
+    let root = absolute_path_from_current_dir(
+        cli.root
+            .as_deref()
+            .unwrap_or_else(|| Path::new(DEFAULT_ROOT_DIR)),
+        &current_dir,
+    );
+    let config = match cli.config.as_deref() {
+        Some(path) => absolute_path_from_current_dir(path, &current_dir),
+        None => default_bootstrap_config_path(&root),
+    };
+    Ok(BootstrapPaths { root, config })
+}
+
+fn absolute_path_from_current_dir(path: &Path, current_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        current_dir.join(path)
+    }
+}
+
+fn default_bootstrap_config_path(root: &Path) -> PathBuf {
+    let parent_dir = root
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.to_path_buf());
+    parent_dir.join(".gloves.toml")
+}
+
+fn create_bootstrap_agent_identities(
+    store: &NamespacedStore,
+    runtime_paths: &SecretsPaths,
+    agent_ids: &[AgentId],
+    force: bool,
+) -> Result<Vec<crate::namespaced_store::IdentityCreationResult>> {
+    let mut results = Vec::with_capacity(agent_ids.len());
+    for agent_id in agent_ids {
+        let result = store.create_identity(agent_id, force)?;
+        mirror_bootstrap_identity(runtime_paths, agent_id, &result.identity_path, force)?;
+        let _ = runtime::load_or_create_signing_key_for_agent(runtime_paths, agent_id)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn write_bootstrap_config_file(
+    config_path: &Path,
+    root: &Path,
+    default_agent_id: &AgentId,
+    agent_ids: &[AgentId],
+    force: bool,
+) -> Result<()> {
+    ensure_bootstrap_output_can_be_written(config_path, force, "config file")?;
+    let agents = bootstrap_agent_config_entries(agent_ids, default_agent_id);
+    let config = GlovesConfigFile {
+        version: CONFIG_SCHEMA_VERSION,
+        paths: ConfigPathsFile {
+            root: Some(root.display().to_string()),
+        },
+        private_paths: BTreeMap::new(),
+        daemon: DaemonConfigFile::default(),
+        vault: VaultConfigFile::default(),
+        defaults: DefaultsConfigFile {
+            agent_id: Some(default_agent_id.as_str().to_owned()),
+            ..DefaultsConfigFile::default()
+        },
+        integrations: BTreeMap::new(),
+        agents,
+        secrets: SecretsConfigFile::default(),
+    };
+    let encoded = toml::to_string_pretty(&config).map_err(|error| {
+        GlovesError::InvalidInput(format!("failed to serialize bootstrap config: {error}"))
+    })?;
+    write_private_file_atomic(config_path, encoded.as_bytes())
+}
+
+fn bootstrap_agent_config_entries(
+    agent_ids: &[AgentId],
+    default_agent_id: &AgentId,
+) -> BTreeMap<String, crate::config::AgentAccessFile> {
+    agent_ids
+        .iter()
+        .map(|agent_id| {
+            let secret_policy = if agent_id.as_str() == default_agent_id.as_str() {
+                crate::config::AgentSecretsAccessFile {
+                    refs: vec!["*".to_owned()],
+                    operations: vec![
+                        SecretAclOperation::Read,
+                        SecretAclOperation::Write,
+                        SecretAclOperation::List,
+                        SecretAclOperation::Revoke,
+                        SecretAclOperation::Request,
+                        SecretAclOperation::Status,
+                        SecretAclOperation::Approve,
+                        SecretAclOperation::Deny,
+                    ],
+                }
+            } else {
+                crate::config::AgentSecretsAccessFile {
+                    refs: vec![
+                        format!("agents/{}/{}", agent_id.as_str(), "*"),
+                        "shared/*".to_owned(),
+                    ],
+                    operations: vec![
+                        SecretAclOperation::Read,
+                        SecretAclOperation::Write,
+                        SecretAclOperation::List,
+                        SecretAclOperation::Request,
+                        SecretAclOperation::Status,
+                    ],
+                }
+            };
+            (
+                agent_id.as_str().to_owned(),
+                crate::config::AgentAccessFile {
+                    paths: Vec::new(),
+                    operations: Vec::new(),
+                    secrets: Some(secret_policy),
+                    vault: None,
+                },
+            )
+        })
+        .collect()
+}
+
+fn mirror_bootstrap_identity(
+    runtime_paths: &SecretsPaths,
+    agent_id: &AgentId,
+    source_identity_path: &Path,
+    force: bool,
+) -> Result<()> {
+    let target_identity_path = runtime_paths.identity_file_for_agent(agent_id.as_str());
+    if target_identity_path.exists() && !force {
+        return Ok(());
+    }
+    if let Some(parent_dir) = target_identity_path.parent() {
+        ensure_private_dir(parent_dir)?;
+    }
+    let identity_bytes = fs::read(source_identity_path)?;
+    write_private_file_atomic(&target_identity_path, &identity_bytes)
+}
+
+fn write_bootstrap_creation_rules_file(
+    rules_path: &Path,
+    agent_ids: &[AgentId],
+    identity_results: &[crate::namespaced_store::IdentityCreationResult],
+    force: bool,
+) -> Result<()> {
+    ensure_bootstrap_output_can_be_written(rules_path, force, "creation rules file")?;
+    let mut creation_rules = Vec::with_capacity(agent_ids.len() + 1);
+    creation_rules.push(BootstrapCreationRule {
+        path_regex: BOOTSTRAP_SHARED_NAMESPACE_REGEX.to_owned(),
+        age: Some(
+            identity_results
+                .iter()
+                .map(|result| result.public_key.clone())
+                .collect(),
+        ),
+    });
+    creation_rules.extend(agent_ids.iter().map(|agent_id| BootstrapCreationRule {
+        path_regex: format!("^agents/{}/.*$", agent_id.as_str()),
+        age: None,
+    }));
+    let rules = BootstrapCreationRulesFile {
+        version: 1,
+        creation_rules,
+    };
+    let encoded = serde_yaml::to_string(&rules).map_err(|error| {
+        GlovesError::InvalidInput(format!(
+            "failed to serialize bootstrap creation rules: {error}"
+        ))
+    })?;
+    write_private_file_atomic(rules_path, encoded.as_bytes())
+}
+
+fn ensure_bootstrap_output_can_be_written(
+    path: &Path,
+    force: bool,
+    description: &str,
+) -> Result<()> {
+    if path.exists() && !force {
+        return Err(GlovesError::InvalidInput(format!(
+            "{description} already exists: {} (use --force to replace it)",
+            path.display()
+        )));
+    }
+    if let Some(parent_dir) = path.parent() {
+        if !parent_dir.exists() {
+            ensure_private_dir(parent_dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_loaded_config(loaded_config: Option<&GlovesConfig>) -> Result<()> {
+    match loaded_config {
+        Some(_) => Ok(()),
+        None => Err(GlovesError::InvalidInput(
+            "no config file loaded".to_owned(),
+        )),
+    }
+}
+
+fn verify_runtime_state(paths: &SecretsPaths) -> Result<()> {
+    let manager = runtime::manager_for_paths(paths)?;
+    TtlReaper::reap(
+        &manager.agent_backend,
+        &manager.metadata_store,
+        &manager.audit_log,
+    )?;
+    TtlReaper::reap_vault_sessions(&GocryptfsDriver::new(), paths, &manager.audit_log)?;
+    Ok(())
+}
+
+fn render_bootstrap_output(output: &BootstrapOutput) -> String {
+    let bridge_targets = output
+        .openclaw_snippets
+        .bridge_targets
+        .iter()
+        .map(|agent| format!("\"{agent}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "bootstrapped {profile} profile\nroot: {root}\nconfig: {config}\ndefault agent: {default_agent}\nagents: {agents}\nvalidated: yes\nverified: yes\n\nOpenClaw snippets:\n  operatorAgentId = \"{operator_agent}\"\n  bridge.targets = [{bridge_targets}]",
+        profile = output.profile,
+        root = output.root.display(),
+        config = output.config.display(),
+        default_agent = output.default_agent,
+        agents = output.agents.join(", "),
+        operator_agent = output.openclaw_snippets.plugin_operator_agent_id,
+    )
+}
+
+fn run_openclaw_bridge_command(
+    state: &EffectiveCliState,
+    command: &OpenclawBridgeCommand,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    let action = match command {
+        OpenclawBridgeCommand::Install => "install",
+        OpenclawBridgeCommand::Start => "start",
+        OpenclawBridgeCommand::Stop => "stop",
+        OpenclawBridgeCommand::Status => "status",
+        OpenclawBridgeCommand::Run => "run",
+    };
+    let bridge_root = state.paths.root().join("openclaw").join("bridge");
+    let message = format!(
+        "openclaw bridge {action} is not implemented yet\nexpected bridge runtime root: {}",
+        bridge_root.display()
+    );
+    emit_command_json_or_text(
+        "openclaw-bridge",
+        serde_json::json!({
+            "status": "unimplemented",
+            "action": action,
+            "bridge_root": bridge_root.display().to_string(),
+        }),
+        &message,
+        json_output,
+    )
+}
+
+fn run_doctor_command(
+    state: &EffectiveCliState,
+    command: &DoctorCommand,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    match command {
+        DoctorCommand::Openclaw => {
+            validate_loaded_config(state.loaded_config.as_ref())?;
+            verify_runtime_state(&state.paths)?;
+            let plugin_manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("packages")
+                .join("gloves-openclaw")
+                .join("openclaw.plugin.json");
+            let plugin_present = plugin_manifest.exists();
+            let agents_dir_present = state.paths.agents_dir().exists();
+            let text = format!(
+                "openclaw doctor passed config/runtime validation\nplugin manifest: {}\nagent identities dir: {}",
+                plugin_manifest.display(),
+                state.paths.agents_dir().display()
+            );
+            emit_command_json_or_text(
+                "doctor-openclaw",
+                serde_json::json!({
+                    "status": "validated",
+                    "plugin_manifest": plugin_manifest.display().to_string(),
+                    "plugin_present": plugin_present,
+                    "agents_dir": state.paths.agents_dir().display().to_string(),
+                    "agents_dir_present": agents_dir_present,
+                }),
+                &text,
+                json_output,
+            )
+        }
+    }
+}
+
+fn run_integration_command(
+    state: &EffectiveCliState,
+    name: &str,
+    command: &IntegrationCommand,
+    json_output: bool,
+) -> Result<Option<i32>> {
+    let config = state.loaded_config.as_ref().ok_or_else(|| {
+        GlovesError::InvalidInput("integration commands require a loaded config".to_owned())
+    })?;
+
+    match command {
+        IntegrationCommand::ListRefs => {
+            let refs = config.inferred_integration_refs(name)?;
+            emit_command_json_or_text(
+                "integration-list-refs",
+                serde_json::json!({
+                    "integration": name,
+                    "refs": refs,
+                }),
+                &config.inferred_integration_refs(name)?.join("\n"),
+                json_output,
+            )
+        }
+        IntegrationCommand::Test { slot, profile } => {
+            let (integration, secret_id) =
+                resolve_integration_secret_id(config, name, slot, profile.as_deref())?;
+            ensure_secret_acl_allowed(state, SecretAclOperation::Read, Some(&secret_id))?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
+            let identity_file =
+                runtime::load_or_create_identity_for_agent(&state.paths, &integration.agent)?;
+            let result = manager.get(
+                &secret_id,
+                &integration.agent,
+                Some(identity_file.as_path()),
+            );
+            let resolved = result.is_ok();
+            if let Err(error) = result {
+                return Err(GlovesError::InvalidInput(format!(
+                    "integration ref `{}` did not resolve: {}",
+                    secret_id.as_str(),
+                    error
+                )));
+            }
+            emit_command_json_or_text(
+                "integration-test",
+                serde_json::json!({
+                    "integration": name,
+                    "ref": secret_id.as_str(),
+                    "agent": integration.agent.as_str(),
+                    "resolved": resolved,
+                }),
+                &format!("resolved {}", secret_id.as_str()),
+                json_output,
+            )
+        }
+        IntegrationCommand::Rotate {
+            slot,
+            profile,
+            generate,
+            value,
+            stdin,
+            ttl,
+        } => {
+            let (integration, secret_id) =
+                resolve_integration_secret_id(config, name, slot, profile.as_deref())?;
+            ensure_secret_acl_allowed(state, SecretAclOperation::Write, Some(&secret_id))?;
+            let manager = runtime::manager_for_paths(&state.paths)?;
+            let recipient =
+                runtime::load_or_create_recipient_for_agent(&state.paths, &integration.agent)?;
+            let mut recipients = HashSet::new();
+            recipients.insert(integration.agent.clone());
+            let ttl = runtime::parse_secret_ttl_argument(
+                ttl.as_deref(),
+                state.default_secret_ttl_days,
+                "--ttl",
+            )?;
+            let secret_value = SecretValue::new(secret_input::resolve_secret_input(
+                *generate,
+                value.clone(),
+                *stdin,
+            )?);
+            manager.set(
+                secret_id.clone(),
+                secret_value,
+                crate::manager::SetSecretOptions {
+                    owner: Owner::Agent,
+                    ttl: ttl.duration(),
+                    created_by: integration.agent.clone(),
+                    recipients,
+                    recipient_keys: vec![recipient],
+                },
+            )?;
+            emit_command_json_or_text(
+                "integration-rotate",
+                serde_json::json!({
+                    "integration": name,
+                    "ref": secret_id.as_str(),
+                    "agent": integration.agent.as_str(),
+                    "status": "rotated",
+                    "ttl_days": ttl.ttl_days(),
+                }),
+                &format!("rotated {}", secret_id.as_str()),
+                json_output,
+            )
+        }
+    }
+}
+
+fn resolve_integration_secret_id(
+    config: &GlovesConfig,
+    name: &str,
+    slot: &str,
+    requested_profile: Option<&str>,
+) -> Result<(crate::config::IntegrationConfig, SecretId)> {
+    let integration = config.integration(name).cloned().ok_or_else(|| {
+        GlovesError::InvalidInput(format!("integration `{name}` is not configured"))
+    })?;
+    let profile = resolve_integration_profile(&integration, requested_profile)?;
+    if !integration.slots.is_empty() && !integration.slots.iter().any(|value| value == slot) {
+        return Err(GlovesError::InvalidInput(format!(
+            "integration `{name}` does not declare slot `{slot}`"
+        )));
+    }
+    let secret_id = SecretId::new(&format!("{name}/{profile}/{slot}"))?;
+    Ok((integration, secret_id))
+}
+
+fn resolve_integration_profile(
+    integration: &crate::config::IntegrationConfig,
+    requested_profile: Option<&str>,
+) -> Result<String> {
+    let configured_profiles = if integration.profiles.is_empty() {
+        vec!["default".to_owned()]
+    } else {
+        integration.profiles.clone()
+    };
+
+    match requested_profile {
+        Some(profile) => {
+            if configured_profiles.iter().any(|value| value == profile) {
+                Ok(profile.to_owned())
+            } else {
+                Err(GlovesError::InvalidInput(format!(
+                    "integration `{}` does not declare profile `{profile}`",
+                    integration.name
+                )))
+            }
+        }
+        None if configured_profiles.len() == 1 => Ok(configured_profiles[0].clone()),
+        None => Err(GlovesError::InvalidInput(format!(
+            "integration `{}` has multiple profiles; pass --profile",
+            integration.name
+        ))),
+    }
 }
 
 #[cfg(feature = "tui")]

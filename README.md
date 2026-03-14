@@ -67,8 +67,11 @@ gloves requests help approve
 ## Quick Example
 
 ```bash
-# initialize runtime layout
-gloves --root .openclaw/secrets init
+# fresh OpenClaw setup
+gloves bootstrap --profile openclaw \
+  --root .openclaw/secrets \
+  --config .openclaw/.gloves.toml \
+  --agents main,relationships,coder
 
 # create one namespaced secret
 gloves --root .openclaw/secrets set shared/github-token --value ghp_example_token
@@ -82,6 +85,8 @@ gloves --root .openclaw/secrets get shared/github-token
 # list entries
 gloves --root .openclaw/secrets list
 ```
+
+`gloves bootstrap` is intentionally a thin fresh-setup command. It initializes the runtime layout, creates agent identities, writes `.gloves.toml`, writes `store/.gloves.yaml`, and validates the result. It does not migrate existing secrets, patch OpenClaw config files, mutate Docker, or bootstrap GPG by default.
 
 If you omit `--ttl`, `gloves` uses `defaults.secret_ttl_days` from config; the built-in default is 30 days. Use `--ttl never` for a non-expiring secret. `gloves secrets set` prints the expiry timestamp for expiring secrets and says `never expires` otherwise.
 
@@ -136,7 +141,7 @@ Guaranteed-safe official support:
 
 - install `@gloves/openclaw` on the Gateway host
 - point the plugin at a host-local `gloves` binary and runtime root
-- allow the plugin tool group per agent with `group:plugins:gloves`
+- allow plugin id `gloves` per agent
 - use only:
   - `gloves_list`
   - `gloves_status`

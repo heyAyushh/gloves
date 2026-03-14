@@ -13,8 +13,8 @@ fn openclaw_json5_bridge_contains_expected_server_and_plugin_fields() {
     assert!(contents.contains("openclaw plugins add @gloves/openclaw"));
     assert!(contents.contains("entries: {"));
     assert!(contents.contains("glovesBin: \"gloves\""));
-    assert!(contents.contains("operatorAgentId: \"openclaw\""));
-    assert!(contents.contains("group:plugins:gloves"));
+    assert!(contents.contains("operatorAgentId: \"main\""));
+    assert!(contents.contains("alsoAllow: [\"gloves\"]"));
     assert!(contents.contains("root: \"/var/lib/openclaw/gloves\""));
     assert!(!contents.contains("mcpConfigPath"));
     assert!(!contents.contains("tokenPath"));
@@ -126,7 +126,7 @@ fn security_and_architecture_docs_cover_openclaw_secret_broker_model() {
     assert!(architecture.contains("gloves-mcp"));
     assert!(architecture.contains("gloves://"));
     assert!(architecture.contains("@gloves/openclaw"));
-    assert!(readme.contains("group:plugins:gloves"));
+    assert!(readme.contains("plugin id `gloves`"));
 }
 
 #[test]

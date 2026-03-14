@@ -34,6 +34,7 @@ const REQUEST_ID_ARG_HELP: &str =
 const ERROR_CODE_ARG_HELP: &str = "Error code from CLI stderr (example: `E102`).";
 const ERROR_FORMAT_ARG_HELP: &str = "Error output format (`text` or `json`).";
 const CLI_AFTER_HELP: &str = r#"Examples:
+  gloves bootstrap --profile openclaw --root ~/.openclaw/secrets --config ~/.openclaw/.gloves.toml --agents main,relationships,coder
   gloves --root .openclaw/secrets init
   gloves --root .openclaw/secrets secrets set service/token --generate
   gloves --root .openclaw/secrets secrets get service/token --pipe-to cat
@@ -206,6 +207,29 @@ const SET_IDENTITY_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves set-identity --agent devy
   gloves set-identity --agent devy --force
 "#;
+const BOOTSTRAP_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves bootstrap --profile openclaw --root ~/.openclaw/secrets --config ~/.openclaw/.gloves.toml --agents main,relationships,coder
+  gloves bootstrap --profile openclaw --root ~/.openclaw/secrets --agents main,coder --force
+
+This command is intentionally thin:
+  - initializes the existing runtime layout
+  - creates agent age identities and recipients files
+  - writes `.gloves.toml` and `store/.gloves.yaml`
+  - validates config and verifies runtime state
+
+It does not migrate secrets, patch OpenClaw config files, mutate Docker, or bootstrap GPG by default.
+"#;
+const OPENCLAW_BOOTSTRAP_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves openclaw bootstrap --agents main,relationships,coder --root ~/.openclaw/secrets --config ~/.openclaw/.gloves.toml
+"#;
+const OPENCLAW_DOCTOR_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves doctor openclaw
+"#;
+const INTEGRATION_COMMAND_AFTER_HELP: &str = r#"Examples:
+  gloves integration github list-refs
+  gloves integration github test token --profile work
+  gloves integration github rotate token --profile personal --generate
+"#;
 const TOP_LEVEL_SET_COMMAND_AFTER_HELP: &str = r#"Examples:
   gloves --agent devy set agents/devy/api-keys/anthropic --stdin
   gloves --agent main set shared/database-url --value postgres://localhost
@@ -277,20 +301,20 @@ Recovery:
 pub struct Cli {
     /// Root storage directory override.
     /// Default when unset and no config override is active: `.openclaw/secrets`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub root: Option<PathBuf>,
     /// Agent identifier override for this invocation.
     /// Default when unset and no config override is active: `default-agent`.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub agent: Option<String>,
     /// Config file override path.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     /// Disable config loading and discovery.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub no_config: bool,
     /// Vault runtime mode override.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     pub vault_mode: Option<VaultModeArg>,
     /// Error output format.
     #[arg(
@@ -314,6 +338,43 @@ pub struct Cli {
 pub enum Command {
     /// Initializes directory tree.
     Init,
+    /// Bootstraps a fresh runtime layout for one profile.
+    #[command(after_help = BOOTSTRAP_COMMAND_AFTER_HELP)]
+    Bootstrap {
+        /// Bootstrap profile.
+        #[arg(long, value_enum)]
+        profile: BootstrapProfileArg,
+        /// Comma-separated agent identifiers.
+        #[arg(long, value_name = "AGENT_LIST")]
+        agents: String,
+        /// Default agent identifier for generated config.
+        #[arg(long)]
+        default_agent: Option<String>,
+        /// Replace existing bootstrap files and identities.
+        #[arg(long)]
+        force: bool,
+    },
+    /// OpenClaw-specific runtime setup and bridge commands.
+    Openclaw {
+        /// OpenClaw operation.
+        #[command(subcommand)]
+        command: OpenclawCommand,
+    },
+    /// Runs health checks for supported targets.
+    Doctor {
+        /// Doctor operation.
+        #[command(subcommand)]
+        command: DoctorCommand,
+    },
+    /// Runs generic integration workflows derived from config.
+    #[command(after_help = INTEGRATION_COMMAND_AFTER_HELP)]
+    Integration {
+        /// Integration name from `.gloves.toml`.
+        name: String,
+        /// Integration operation.
+        #[command(subcommand)]
+        command: IntegrationCommand,
+    },
     /// Creates an age identity for one OpenClaw agent namespace.
     #[command(after_help = SET_IDENTITY_COMMAND_AFTER_HELP)]
     SetIdentity {
@@ -584,6 +645,99 @@ impl From<VaultModeArg> for VaultMode {
             VaultModeArg::Disabled => VaultMode::Disabled,
         }
     }
+}
+
+/// Supported bootstrap profiles.
+#[derive(Debug, Clone, ValueEnum)]
+pub enum BootstrapProfileArg {
+    /// Opinionated fresh setup for OpenClaw runtimes.
+    Openclaw,
+}
+
+/// Supported OpenClaw subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+pub enum OpenclawCommand {
+    /// Bootstraps a fresh OpenClaw runtime layout.
+    #[command(after_help = OPENCLAW_BOOTSTRAP_COMMAND_AFTER_HELP)]
+    Bootstrap {
+        /// Comma-separated agent identifiers.
+        #[arg(long, value_name = "AGENT_LIST")]
+        agents: String,
+        /// Default agent identifier for generated config.
+        #[arg(long)]
+        default_agent: Option<String>,
+        /// Replace existing bootstrap files and identities.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Manages the OpenClaw bridge daemon.
+    Bridge {
+        /// Bridge operation.
+        #[command(subcommand)]
+        command: OpenclawBridgeCommand,
+    },
+}
+
+/// Supported OpenClaw bridge subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+pub enum OpenclawBridgeCommand {
+    /// Installs bridge support files.
+    Install,
+    /// Starts the bridge service.
+    Start,
+    /// Stops the bridge service.
+    Stop,
+    /// Shows bridge service status.
+    Status,
+    /// Runs the bridge in the foreground.
+    Run,
+}
+
+/// Supported doctor subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+pub enum DoctorCommand {
+    /// Checks OpenClaw bootstrap and bridge state.
+    #[command(after_help = OPENCLAW_DOCTOR_COMMAND_AFTER_HELP)]
+    Openclaw,
+}
+
+/// Supported integration subcommands.
+#[derive(Debug, Subcommand)]
+#[command(disable_help_subcommand = true)]
+pub enum IntegrationCommand {
+    /// Lists inferred refs for one integration.
+    ListRefs,
+    /// Checks whether one integration secret resolves.
+    Test {
+        /// Secret slot to check.
+        slot: String,
+        /// Optional profile override. Omit to use `default`.
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Rotates one integration secret by writing a new value.
+    Rotate {
+        /// Secret slot to rotate.
+        slot: String,
+        /// Optional profile override. Omit to use `default`.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Generate a random secret value instead of reading stdin or `--value`.
+        #[arg(long)]
+        generate: bool,
+        /// Inline secret value.
+        #[arg(long)]
+        value: Option<String>,
+        /// Read the secret value from stdin.
+        #[arg(long)]
+        stdin: bool,
+        /// TTL in days, or `never`. Omit to use the configured default.
+        #[arg(long)]
+        ttl: Option<String>,
+    },
 }
 
 /// Supported vault subcommands.
@@ -882,14 +1036,15 @@ mod unit_tests {
             parse_secret_ttl_argument, validate_ttl_days, SecretTtl,
         },
         secret_input::{parse_duration_value, resolve_secret_input},
-        ttl_seconds, Cli, Command, ErrorFormatArg, ExecCommand, RequestsCommand,
-        SecretReadFormatArg, SecretShowFormatArg, SecretsCommand,
+        ttl_seconds, BootstrapProfileArg, Cli, Command, ErrorFormatArg, ExecCommand,
+        RequestsCommand, SecretReadFormatArg, SecretShowFormatArg, SecretsCommand,
     };
     use crate::error::GlovesError;
     use crate::paths::SecretsPaths;
     use crate::types::AgentId;
     use chrono::Duration;
     use clap::{error::ErrorKind, CommandFactory, Parser};
+    use std::path::PathBuf;
 
     #[test]
     fn resolve_secret_input_generate_ok() {
@@ -988,7 +1143,16 @@ mod unit_tests {
     #[test]
     fn load_or_create_identity_for_agent_rejects_invalid_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        std::fs::write(temp_dir.path().join("default-agent.agekey"), "invalid").unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("agents").join("default-agent")).unwrap();
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("agents")
+                .join("default-agent")
+                .join("age.key"),
+            "invalid",
+        )
+        .unwrap();
         let paths = SecretsPaths::new(temp_dir.path());
         let agent_id = AgentId::new("default-agent").unwrap();
         assert!(load_or_create_identity_for_agent(&paths, &agent_id).is_err());
@@ -997,7 +1161,16 @@ mod unit_tests {
     #[test]
     fn load_or_create_signing_key_for_agent_rejects_invalid_file() {
         let temp_dir = tempfile::tempdir().unwrap();
-        std::fs::write(temp_dir.path().join("default-agent.signing.key"), [1_u8; 8]).unwrap();
+        std::fs::create_dir_all(temp_dir.path().join("agents").join("default-agent")).unwrap();
+        std::fs::write(
+            temp_dir
+                .path()
+                .join("agents")
+                .join("default-agent")
+                .join("signing.key"),
+            [1_u8; 8],
+        )
+        .unwrap();
         let paths = SecretsPaths::new(temp_dir.path());
         let agent_id = AgentId::new("default-agent").unwrap();
         assert!(matches!(
@@ -1013,7 +1186,7 @@ mod unit_tests {
         let agent_id = AgentId::new("agent-main").unwrap();
         let identity_file = load_or_create_identity_for_agent(&paths, &agent_id).unwrap();
 
-        assert!(identity_file.ends_with("agent-main.agekey"));
+        assert!(identity_file.ends_with("agents/agent-main/age.key"));
         assert!(identity_file.exists());
         assert!(!paths.default_identity_file().exists());
     }
@@ -1025,7 +1198,12 @@ mod unit_tests {
         let agent_id = AgentId::new("agent-main").unwrap();
         let key = load_or_create_signing_key_for_agent(&paths, &agent_id).unwrap();
 
-        assert!(temp_dir.path().join("agent-main.signing.key").exists());
+        assert!(temp_dir
+            .path()
+            .join("agents")
+            .join("agent-main")
+            .join("signing.key")
+            .exists());
         assert!(!paths.default_signing_key_file().exists());
         assert_eq!(key.to_bytes().len(), 32);
     }
@@ -1151,6 +1329,39 @@ mod unit_tests {
                     "env".to_owned()
                 ]
         ));
+    }
+
+    #[test]
+    fn cli_bootstrap_accepts_openclaw_profile_arguments() {
+        let cli = Cli::try_parse_from([
+            "gloves",
+            "bootstrap",
+            "--profile",
+            "openclaw",
+            "--root",
+            "~/.openclaw/secrets",
+            "--config",
+            "~/.openclaw/.gloves.toml",
+            "--agents",
+            "main,relationships,coder",
+            "--default-agent",
+            "main",
+            "--force",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Bootstrap {
+                profile: BootstrapProfileArg::Openclaw,
+                agents,
+                default_agent,
+                force,
+            } if agents == "main,relationships,coder"
+                && default_agent == Some("main".to_owned())
+                && force
+        ));
+        assert_eq!(cli.root, Some(PathBuf::from("~/.openclaw/secrets")));
+        assert_eq!(cli.config, Some(PathBuf::from("~/.openclaw/.gloves.toml")));
     }
 
     #[test]
@@ -1323,13 +1534,15 @@ mod unit_tests {
             "100",
         ])
         .unwrap();
+        assert_eq!(
+            cli.config,
+            Some(PathBuf::from("/etc/gloves/prod.gloves.toml"))
+        );
         assert!(matches!(
             cli.command,
             Command::Tui { args }
                 if args
                     == vec![
-                        "--config".to_owned(),
-                        "/etc/gloves/prod.gloves.toml".to_owned(),
                         "audit".to_owned(),
                         "--limit".to_owned(),
                         "100".to_owned()

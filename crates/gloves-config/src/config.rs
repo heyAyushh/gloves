@@ -13,6 +13,7 @@ use gloves_core::error::{GlovesError, Result};
 use gloves_core::types::{AgentId, SecretId};
 
 const CONFIG_VERSION_V1: u32 = 1;
+const CONFIG_VERSION_V2: u32 = 2;
 const DEFAULT_ROOT: &str = ".openclaw/secrets";
 const DEFAULT_DAEMON_BIND: &str = "127.0.0.1:7788";
 const DEFAULT_DAEMON_IO_TIMEOUT_SECONDS: u64 = 5;
@@ -29,7 +30,7 @@ const URL_SCHEME_HTTPS_PREFIX: &str = "https://";
 /// Default bootstrap config file name.
 pub const CONFIG_FILE_NAME: &str = ".gloves.toml";
 /// Supported bootstrap config schema version.
-pub const CONFIG_SCHEMA_VERSION: u32 = CONFIG_VERSION_V1;
+pub const CONFIG_SCHEMA_VERSION: u32 = CONFIG_VERSION_V2;
 
 /// Source used to select the effective config file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +123,9 @@ pub struct GlovesConfigFile {
     /// Global defaults.
     #[serde(default)]
     pub defaults: DefaultsConfigFile,
+    /// Integration declarations.
+    #[serde(default)]
+    pub integrations: BTreeMap<String, IntegrationConfigFile>,
     /// Agent path visibility policies.
     #[serde(default)]
     pub agents: BTreeMap<String, AgentAccessFile>,
@@ -156,6 +160,9 @@ pub struct DaemonConfigFile {
 pub struct VaultConfigFile {
     /// Vault runtime mode.
     pub mode: Option<VaultMode>,
+    /// Named vault mount locations.
+    #[serde(default)]
+    pub mounts: BTreeMap<String, String>,
 }
 
 /// Raw `[defaults]` section from TOML.
@@ -190,9 +197,9 @@ pub struct SecretsConfigFile {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SecretAccessFile {
-    /// Secret path patterns (`*`, `foo/*`, or exact secret id).
-    #[serde(default)]
-    pub paths: Vec<String>,
+    /// Secret ref patterns (`*`, `foo/*`, or exact secret id).
+    #[serde(default, alias = "paths")]
+    pub refs: Vec<String>,
     /// Allowed secret operations.
     #[serde(default)]
     pub operations: Vec<SecretAclOperation>,
@@ -224,9 +231,55 @@ pub struct SecretPipeCommandPolicyFile {
 #[serde(deny_unknown_fields)]
 pub struct AgentAccessFile {
     /// Alias names from `[private_paths]` visible to this agent.
+    #[serde(default)]
     pub paths: Vec<String>,
     /// Allowed operations.
+    #[serde(default)]
     pub operations: Vec<PathOperation>,
+    /// Secret ref access policy for this agent.
+    #[serde(default)]
+    pub secrets: Option<AgentSecretsAccessFile>,
+    /// Vault mount access policy for this agent.
+    #[serde(default)]
+    pub vault: Option<AgentVaultAccessFile>,
+}
+
+/// Raw per-agent secret access policy from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentSecretsAccessFile {
+    /// Secret ref patterns (`*`, `foo/*`, or exact secret id).
+    #[serde(default, alias = "paths")]
+    pub refs: Vec<String>,
+    /// Allowed secret operations.
+    #[serde(default)]
+    pub operations: Vec<SecretAclOperation>,
+}
+
+/// Raw per-agent vault access policy from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AgentVaultAccessFile {
+    /// Named vault mounts visible to this agent.
+    #[serde(default)]
+    pub mounts: Vec<String>,
+    /// Allowed mount operations.
+    #[serde(default)]
+    pub operations: Vec<PathOperation>,
+}
+
+/// Raw integration entry from TOML.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct IntegrationConfigFile {
+    /// Owning or default operator agent for this integration.
+    pub agent: Option<String>,
+    /// Optional account/profile names. Omitted implies `default`.
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    /// Optional secret slots inferred under each profile.
+    #[serde(default)]
+    pub slots: Vec<String>,
 }
 
 /// Effective daemon config after defaults and validation.
@@ -245,6 +298,8 @@ pub struct DaemonBootstrapConfig {
 pub struct VaultBootstrapConfig {
     /// Effective vault runtime mode.
     pub mode: VaultMode,
+    /// Named vault mount locations.
+    pub mounts: BTreeMap<String, PathBuf>,
 }
 
 /// Effective default values after defaults and validation.
@@ -274,10 +329,32 @@ pub struct AgentAccessPolicy {
 /// Effective secret ACL policy for one configured agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretAccessPolicy {
-    /// Secret path patterns (`*`, `foo/*`, or exact secret id).
-    pub paths: Vec<String>,
+    /// Secret ref patterns (`*`, `foo/*`, or exact secret id).
+    pub refs: Vec<String>,
     /// Allowed secret operations.
     pub operations: Vec<SecretAclOperation>,
+}
+
+/// Effective vault access policy for one configured agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentVaultAccessPolicy {
+    /// Named mounts visible to this agent.
+    pub mount_names: Vec<String>,
+    /// Allowed operations.
+    pub operations: Vec<PathOperation>,
+}
+
+/// Effective integration config after defaults and validation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrationConfig {
+    /// Integration identifier.
+    pub name: String,
+    /// Owning or default agent for this integration.
+    pub agent: AgentId,
+    /// Declared profiles. Empty means `default`.
+    pub profiles: Vec<String>,
+    /// Declared secret slots under each profile.
+    pub slots: Vec<String>,
 }
 
 /// Effective pipe policy for one command.
@@ -308,6 +385,10 @@ pub struct GlovesConfig {
     pub agents: BTreeMap<String, AgentAccessPolicy>,
     /// Agent secret ACL policies.
     pub secret_access: BTreeMap<String, SecretAccessPolicy>,
+    /// Agent vault access policies.
+    pub agent_vault_access: BTreeMap<String, AgentVaultAccessPolicy>,
+    /// Configured integrations.
+    pub integrations: BTreeMap<String, IntegrationConfig>,
     /// Per-command secret pipe policies.
     pub secret_pipe_commands: BTreeMap<String, SecretPipeCommandPolicy>,
 }
@@ -384,6 +465,42 @@ impl GlovesConfig {
         self.secret_access.get(agent.as_str())
     }
 
+    /// Returns vault access policy for one agent.
+    pub fn agent_vault_access_policy(&self, agent: &AgentId) -> Option<&AgentVaultAccessPolicy> {
+        self.agent_vault_access.get(agent.as_str())
+    }
+
+    /// Returns one configured vault mount path.
+    pub fn vault_mount_path(&self, mount_name: &str) -> Option<&PathBuf> {
+        self.vault.mounts.get(mount_name)
+    }
+
+    /// Returns one configured integration.
+    pub fn integration(&self, name: &str) -> Option<&IntegrationConfig> {
+        self.integrations.get(name)
+    }
+
+    /// Returns inferred secret refs for one configured integration.
+    pub fn inferred_integration_refs(&self, name: &str) -> Result<Vec<String>> {
+        let integration = self.integrations.get(name).ok_or(GlovesError::NotFound)?;
+        let profiles = if integration.profiles.is_empty() {
+            vec!["default".to_owned()]
+        } else {
+            integration.profiles.clone()
+        };
+        if integration.slots.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut refs = Vec::with_capacity(profiles.len() * integration.slots.len());
+        for profile in profiles {
+            for slot in &integration.slots {
+                refs.push(format!("{name}/{profile}/{slot}"));
+            }
+        }
+        Ok(refs)
+    }
+
     /// Returns secret pipe policy for one executable command.
     pub fn secret_pipe_command_policy(&self, command: &str) -> Option<&SecretPipeCommandPolicy> {
         self.secret_pipe_commands.get(command)
@@ -398,7 +515,7 @@ impl SecretAccessPolicy {
 
     /// Returns `true` when this policy allows one secret name.
     pub fn allows_secret(&self, secret_name: &str) -> bool {
-        self.paths
+        self.refs
             .iter()
             .any(|pattern| secret_pattern_matches(pattern, secret_name))
     }
@@ -497,31 +614,73 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
     }
 
     let daemon = resolve_daemon_config(&raw.daemon)?;
-    let vault = resolve_vault_config(&raw.vault);
+    let vault = resolve_vault_config(&raw.vault, source_dir)?;
     let defaults = resolve_default_config(&raw.defaults)?;
 
     let mut agents = BTreeMap::new();
+    let mut agent_vault_access = BTreeMap::new();
     for (agent_name, policy) in &raw.agents {
         AgentId::new(agent_name)?;
-        validate_agent_policy(agent_name, policy, &private_paths)?;
-        agents.insert(
-            agent_name.clone(),
-            AgentAccessPolicy {
-                path_aliases: policy.paths.clone(),
+        validate_agent_policy(agent_name, policy, &private_paths, &vault.mounts)?;
+        if !policy.paths.is_empty() || !policy.operations.is_empty() {
+            agents.insert(
+                agent_name.clone(),
+                AgentAccessPolicy {
+                    path_aliases: policy.paths.clone(),
+                    operations: policy.operations.clone(),
+                },
+            );
+        }
+        if let Some(vault_policy) = policy.vault.as_ref() {
+            agent_vault_access.insert(
+                agent_name.clone(),
+                AgentVaultAccessPolicy {
+                    mount_names: vault_policy.mounts.clone(),
+                    operations: vault_policy.operations.clone(),
+                },
+            );
+        }
+    }
+
+    let mut secret_access: BTreeMap<String, SecretAccessPolicy> = BTreeMap::new();
+    for (agent_name, policy) in &raw.secrets.acl {
+        AgentId::new(agent_name)?;
+        validate_secret_access_policy(agent_name, policy)?;
+        merge_secret_access_policy(
+            &mut secret_access,
+            agent_name,
+            SecretAccessPolicy {
+                refs: policy.refs.clone(),
                 operations: policy.operations.clone(),
             },
         );
     }
+    for (agent_name, policy) in &raw.agents {
+        if let Some(secret_policy) = policy.secrets.as_ref() {
+            merge_secret_access_policy(
+                &mut secret_access,
+                agent_name,
+                SecretAccessPolicy {
+                    refs: secret_policy.refs.clone(),
+                    operations: secret_policy.operations.clone(),
+                },
+            );
+        }
+    }
 
-    let mut secret_access = BTreeMap::new();
-    for (agent_name, policy) in &raw.secrets.acl {
-        AgentId::new(agent_name)?;
-        validate_secret_access_policy(agent_name, policy)?;
-        secret_access.insert(
-            agent_name.clone(),
-            SecretAccessPolicy {
-                paths: policy.paths.clone(),
-                operations: policy.operations.clone(),
+    let mut integrations = BTreeMap::new();
+    for (name, integration) in &raw.integrations {
+        validate_integration_config(name, integration)?;
+        let agent_literal = integration.agent.as_deref().ok_or_else(|| {
+            GlovesError::InvalidInput(format!("integration '{name}' must declare an owning agent"))
+        })?;
+        integrations.insert(
+            name.clone(),
+            IntegrationConfig {
+                name: name.clone(),
+                agent: AgentId::new(agent_literal)?,
+                profiles: normalized_integration_segments(&integration.profiles, "profiles", name)?,
+                slots: normalized_integration_segments(&integration.slots, "slots", name)?,
             },
         );
     }
@@ -547,15 +706,17 @@ fn build_config(raw: GlovesConfigFile, source_path: &Path) -> Result<GlovesConfi
         defaults,
         agents,
         secret_access,
+        agent_vault_access,
+        integrations,
         secret_pipe_commands,
     })
 }
 
 fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
-    if config.version != CONFIG_VERSION_V1 {
+    if !matches!(config.version, CONFIG_VERSION_V1 | CONFIG_VERSION_V2) {
         return Err(GlovesError::InvalidInput(format!(
-            "unsupported config version {} (expected {})",
-            config.version, CONFIG_VERSION_V1
+            "unsupported config version {} (expected {} or {})",
+            config.version, CONFIG_VERSION_V1, CONFIG_VERSION_V2
         )));
     }
 
@@ -569,12 +730,24 @@ fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
     }
 
     let _ = resolve_daemon_config(&config.daemon)?;
-    let _ = resolve_vault_config(&config.vault);
+    let _ = resolve_vault_config(&config.vault, Path::new("."))?;
     let _ = resolve_default_config(&config.defaults)?;
 
     for (agent_name, policy) in &config.secrets.acl {
         AgentId::new(agent_name)?;
         validate_secret_access_policy(agent_name, policy)?;
+    }
+    for (agent_name, policy) in &config.agents {
+        AgentId::new(agent_name)?;
+        validate_agent_policy(
+            agent_name,
+            policy,
+            &BTreeMap::<String, PathBuf>::new(),
+            &config.vault.mounts,
+        )?;
+    }
+    for (name, integration) in &config.integrations {
+        validate_integration_config(name, integration)?;
     }
     for (command, policy) in &config.secrets.pipe.commands {
         validate_secret_pipe_command_policy(command, policy)?;
@@ -583,10 +756,21 @@ fn validate_raw_config(config: &GlovesConfigFile) -> Result<()> {
     Ok(())
 }
 
-fn resolve_vault_config(raw: &VaultConfigFile) -> VaultBootstrapConfig {
-    VaultBootstrapConfig {
-        mode: raw.mode.unwrap_or(VaultMode::Auto),
+fn resolve_vault_config(raw: &VaultConfigFile, source_dir: &Path) -> Result<VaultBootstrapConfig> {
+    let mut mounts = BTreeMap::new();
+    for (mount_name, mount_path_literal) in &raw.mounts {
+        validate_alias(mount_name)?;
+        validate_path_literal(mount_path_literal, &format!("vault.mounts.{mount_name}"))?;
+        mounts.insert(
+            mount_name.clone(),
+            resolve_path_value(mount_path_literal, source_dir)?,
+        );
     }
+
+    Ok(VaultBootstrapConfig {
+        mode: raw.mode.unwrap_or(VaultMode::Auto),
+        mounts,
+    })
 }
 
 fn resolve_daemon_config(raw: &DaemonConfigFile) -> Result<DaemonBootstrapConfig> {
@@ -631,6 +815,31 @@ fn resolve_daemon_config(raw: &DaemonConfigFile) -> Result<DaemonBootstrapConfig
         io_timeout_seconds,
         request_limit_bytes,
     })
+}
+
+fn merge_secret_access_policy(
+    policies: &mut BTreeMap<String, SecretAccessPolicy>,
+    agent_name: &str,
+    next_policy: SecretAccessPolicy,
+) {
+    let entry = policies
+        .entry(agent_name.to_owned())
+        .or_insert_with(|| SecretAccessPolicy {
+            refs: Vec::new(),
+            operations: Vec::new(),
+        });
+    entry.refs.extend(next_policy.refs);
+    entry.operations.extend(next_policy.operations);
+    dedup_preserving_order(&mut entry.refs);
+    dedup_preserving_order(&mut entry.operations);
+}
+
+fn dedup_preserving_order<T>(values: &mut Vec<T>)
+where
+    T: Clone + Ord,
+{
+    let mut seen = BTreeSet::new();
+    values.retain(|value| seen.insert(value.clone()));
 }
 
 fn resolve_default_config(raw: &DefaultsConfigFile) -> Result<DefaultBootstrapConfig> {
@@ -682,32 +891,100 @@ fn resolve_default_config(raw: &DefaultsConfigFile) -> Result<DefaultBootstrapCo
     })
 }
 
-fn validate_agent_policy(
+fn validate_agent_policy<PrivatePathValue, VaultMountValue>(
     agent_name: &str,
     policy: &AgentAccessFile,
-    private_paths: &BTreeMap<String, PathBuf>,
+    private_paths: &BTreeMap<String, PrivatePathValue>,
+    vault_mounts: &BTreeMap<String, VaultMountValue>,
 ) -> Result<()> {
-    if policy.paths.is_empty() {
+    let has_legacy_path_policy = !policy.paths.is_empty() || !policy.operations.is_empty();
+    let has_secret_policy = policy.secrets.is_some();
+    let has_vault_policy = policy.vault.is_some();
+
+    if !has_legacy_path_policy && !has_secret_policy && !has_vault_policy {
         return Err(GlovesError::InvalidInput(format!(
-            "agent '{agent_name}' must include at least one private path alias"
+            "agent '{agent_name}' must include at least one access policy"
+        )));
+    }
+
+    if policy.paths.is_empty() != policy.operations.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "agent '{agent_name}' must define both paths and operations for legacy private path access"
+        )));
+    }
+
+    if has_legacy_path_policy {
+        let mut path_aliases = BTreeSet::new();
+        for alias in &policy.paths {
+            if !path_aliases.insert(alias.as_str()) {
+                return Err(GlovesError::InvalidInput(format!(
+                    "agent '{agent_name}' contains duplicate private path alias '{alias}'"
+                )));
+            }
+            if !private_paths.is_empty() && !private_paths.contains_key(alias) {
+                return Err(GlovesError::InvalidInput(format!(
+                    "agent '{agent_name}' references unknown private path alias '{alias}'"
+                )));
+            }
+        }
+
+        let mut operations = BTreeSet::new();
+        for operation in &policy.operations {
+            if !operations.insert(*operation) {
+                return Err(GlovesError::InvalidInput(format!(
+                    "agent '{agent_name}' contains duplicate operation '{operation:?}'"
+                )));
+            }
+        }
+    }
+
+    if let Some(secret_policy) = policy.secrets.as_ref() {
+        validate_agent_secret_access_policy(agent_name, secret_policy)?;
+    }
+    if let Some(vault_policy) = policy.vault.as_ref() {
+        validate_agent_vault_access_policy(agent_name, vault_policy, vault_mounts)?;
+    }
+
+    Ok(())
+}
+
+fn validate_agent_secret_access_policy(
+    agent_name: &str,
+    policy: &AgentSecretsAccessFile,
+) -> Result<()> {
+    let policy = SecretAccessFile {
+        refs: policy.refs.clone(),
+        operations: policy.operations.clone(),
+    };
+    validate_secret_access_policy(agent_name, &policy)
+}
+
+fn validate_agent_vault_access_policy(
+    agent_name: &str,
+    policy: &AgentVaultAccessFile,
+    vault_mounts: &BTreeMap<String, impl Sized>,
+) -> Result<()> {
+    if policy.mounts.is_empty() {
+        return Err(GlovesError::InvalidInput(format!(
+            "vault access for agent '{agent_name}' must include at least one mount"
         )));
     }
     if policy.operations.is_empty() {
         return Err(GlovesError::InvalidInput(format!(
-            "agent '{agent_name}' must include at least one operation"
+            "vault access for agent '{agent_name}' must include at least one operation"
         )));
     }
 
-    let mut path_aliases = BTreeSet::new();
-    for alias in &policy.paths {
-        if !path_aliases.insert(alias.as_str()) {
+    let mut mount_names = BTreeSet::new();
+    for mount_name in &policy.mounts {
+        if !mount_names.insert(mount_name.as_str()) {
             return Err(GlovesError::InvalidInput(format!(
-                "agent '{agent_name}' contains duplicate private path alias '{alias}'"
+                "vault access for agent '{agent_name}' contains duplicate mount '{mount_name}'"
             )));
         }
-        if !private_paths.contains_key(alias) {
+        if mount_name != "*" && !vault_mounts.is_empty() && !vault_mounts.contains_key(mount_name) {
             return Err(GlovesError::InvalidInput(format!(
-                "agent '{agent_name}' references unknown private path alias '{alias}'"
+                "vault access for agent '{agent_name}' references unknown mount '{mount_name}'"
             )));
         }
     }
@@ -716,7 +993,7 @@ fn validate_agent_policy(
     for operation in &policy.operations {
         if !operations.insert(*operation) {
             return Err(GlovesError::InvalidInput(format!(
-                "agent '{agent_name}' contains duplicate operation '{operation:?}'"
+                "vault access for agent '{agent_name}' contains duplicate operation '{operation:?}'"
             )));
         }
     }
@@ -725,9 +1002,9 @@ fn validate_agent_policy(
 }
 
 fn validate_secret_access_policy(agent_name: &str, policy: &SecretAccessFile) -> Result<()> {
-    if policy.paths.is_empty() {
+    if policy.refs.is_empty() {
         return Err(GlovesError::InvalidInput(format!(
-            "secret ACL for agent '{agent_name}' must include at least one path pattern"
+            "secret ACL for agent '{agent_name}' must include at least one ref pattern"
         )));
     }
     if policy.operations.is_empty() {
@@ -737,7 +1014,7 @@ fn validate_secret_access_policy(agent_name: &str, policy: &SecretAccessFile) ->
     }
 
     let mut patterns = BTreeSet::new();
-    for pattern in &policy.paths {
+    for pattern in &policy.refs {
         validate_secret_pattern(pattern)?;
         if !patterns.insert(pattern.as_str()) {
             return Err(GlovesError::InvalidInput(format!(
@@ -756,6 +1033,46 @@ fn validate_secret_access_policy(agent_name: &str, policy: &SecretAccessFile) ->
     }
 
     Ok(())
+}
+
+fn validate_integration_config(name: &str, integration: &IntegrationConfigFile) -> Result<()> {
+    validate_alias(name)?;
+    let agent_literal = integration.agent.as_deref().ok_or_else(|| {
+        GlovesError::InvalidInput(format!("integration '{name}' must declare an owning agent"))
+    })?;
+    AgentId::new(agent_literal)?;
+    let _ = normalized_integration_segments(&integration.profiles, "profiles", name)?;
+    let _ = normalized_integration_segments(&integration.slots, "slots", name)?;
+    Ok(())
+}
+
+fn normalized_integration_segments(
+    values: &[String],
+    field_name: &str,
+    integration_name: &str,
+) -> Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(values.len());
+    let mut seen = BTreeSet::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(GlovesError::InvalidInput(format!(
+                "integration '{integration_name}' contains an empty {field_name} entry"
+            )));
+        }
+        validate_alias(trimmed).map_err(|_| {
+            GlovesError::InvalidInput(format!(
+                "integration '{integration_name}' has invalid {field_name} entry '{trimmed}'"
+            ))
+        })?;
+        if !seen.insert(trimmed.to_owned()) {
+            return Err(GlovesError::InvalidInput(format!(
+                "integration '{integration_name}' contains duplicate {field_name} entry '{trimmed}'"
+            )));
+        }
+        normalized.push(trimmed.to_owned());
+    }
+    Ok(normalized)
 }
 
 fn validate_secret_pipe_command_policy(
