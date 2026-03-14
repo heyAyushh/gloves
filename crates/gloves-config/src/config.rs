@@ -1745,13 +1745,20 @@ url_prefixes = ["https://api.example.com/v1/"]
         .contains("vault_secret_length_bytes must be greater than zero"));
 
         assert_eq!(
-            resolve_vault_config(&VaultConfigFile::default()).mode,
+            resolve_vault_config(&VaultConfigFile::default(), Path::new("."))
+                .unwrap()
+                .mode,
             VaultMode::Auto
         );
         assert_eq!(
-            resolve_vault_config(&VaultConfigFile {
-                mode: Some(VaultMode::Disabled)
-            })
+            resolve_vault_config(
+                &VaultConfigFile {
+                    mode: Some(VaultMode::Disabled),
+                    mounts: BTreeMap::new(),
+                },
+                Path::new(".")
+            )
+            .unwrap()
             .mode,
             VaultMode::Disabled
         );
@@ -1769,36 +1776,47 @@ url_prefixes = ["https://api.example.com/v1/"]
     #[test]
     fn policy_validation_helpers_cover_duplicates_and_invalid_patterns() {
         let private_paths = BTreeMap::from([("runtime".to_owned(), PathBuf::from("/tmp/runtime"))]);
+        let vault_mounts =
+            BTreeMap::from([("contacts".to_owned(), PathBuf::from("/tmp/contacts"))]);
 
         assert!(validate_agent_policy(
             "devy",
             &AgentAccessFile {
                 paths: Vec::new(),
                 operations: vec![PathOperation::Read],
+                secrets: None,
+                vault: None,
             },
             &private_paths,
+            &vault_mounts,
         )
         .unwrap_err()
         .to_string()
-        .contains("must include at least one private path alias"));
+        .contains("must define both paths and operations"));
         assert!(validate_agent_policy(
             "devy",
             &AgentAccessFile {
                 paths: vec!["runtime".to_owned()],
                 operations: Vec::new(),
+                secrets: None,
+                vault: None,
             },
             &private_paths,
+            &vault_mounts,
         )
         .unwrap_err()
         .to_string()
-        .contains("must include at least one operation"));
+        .contains("must define both paths and operations"));
         assert!(validate_agent_policy(
             "devy",
             &AgentAccessFile {
                 paths: vec!["missing".to_owned()],
                 operations: vec![PathOperation::Read],
+                secrets: None,
+                vault: None,
             },
             &private_paths,
+            &vault_mounts,
         )
         .unwrap_err()
         .to_string()
@@ -1808,8 +1826,11 @@ url_prefixes = ["https://api.example.com/v1/"]
             &AgentAccessFile {
                 paths: vec!["runtime".to_owned(), "runtime".to_owned()],
                 operations: vec![PathOperation::Read],
+                secrets: None,
+                vault: None,
             },
             &private_paths,
+            &vault_mounts,
         )
         .unwrap_err()
         .to_string()
@@ -1819,32 +1840,35 @@ url_prefixes = ["https://api.example.com/v1/"]
             &AgentAccessFile {
                 paths: vec!["runtime".to_owned()],
                 operations: vec![PathOperation::Read, PathOperation::Read],
+                secrets: None,
+                vault: None,
             },
             &private_paths,
+            &vault_mounts,
         )
         .unwrap_err()
         .to_string()
         .contains("duplicate operation"));
 
         let valid_secret_policy = SecretAccessFile {
-            paths: vec!["agents/devy/*".to_owned(), "shared/database-url".to_owned()],
+            refs: vec!["agents/devy/*".to_owned(), "shared/database-url".to_owned()],
             operations: vec![SecretAclOperation::Read, SecretAclOperation::List],
         };
         validate_secret_access_policy("devy", &valid_secret_policy).unwrap();
         assert!(validate_secret_access_policy(
             "devy",
             &SecretAccessFile {
-                paths: Vec::new(),
+                refs: Vec::new(),
                 operations: vec![SecretAclOperation::Read],
             },
         )
         .unwrap_err()
         .to_string()
-        .contains("must include at least one path pattern"));
+        .contains("must include at least one ref pattern"));
         assert!(validate_secret_access_policy(
             "devy",
             &SecretAccessFile {
-                paths: vec!["*".to_owned()],
+                refs: vec!["*".to_owned()],
                 operations: Vec::new(),
             },
         )
@@ -1854,7 +1878,7 @@ url_prefixes = ["https://api.example.com/v1/"]
         assert!(validate_secret_access_policy(
             "devy",
             &SecretAccessFile {
-                paths: vec!["*".to_owned(), "*".to_owned()],
+                refs: vec!["*".to_owned(), "*".to_owned()],
                 operations: vec![SecretAclOperation::Read],
             },
         )
@@ -1864,7 +1888,7 @@ url_prefixes = ["https://api.example.com/v1/"]
         assert!(validate_secret_access_policy(
             "devy",
             &SecretAccessFile {
-                paths: vec!["*".to_owned()],
+                refs: vec!["*".to_owned()],
                 operations: vec![SecretAclOperation::Read, SecretAclOperation::Read],
             },
         )
@@ -1986,7 +2010,7 @@ url_prefixes = ["https://api.example.com/v1/"]
             .contains("invalid private path alias"));
 
         assert!(
-            GlovesConfig::parse_from_str("version = 2\n", Path::new("/tmp/.gloves.toml"))
+            GlovesConfig::parse_from_str("version = 3\n", Path::new("/tmp/.gloves.toml"))
                 .unwrap_err()
                 .to_string()
                 .contains("unsupported config version")
@@ -2013,6 +2037,7 @@ url_prefixes = ["https://api.example.com/v1/"]
             },
             vault: VaultBootstrapConfig {
                 mode: VaultMode::Auto,
+                mounts: BTreeMap::new(),
             },
             defaults: DefaultBootstrapConfig {
                 agent_id: AgentId::new(DEFAULT_AGENT_ID).unwrap(),
@@ -2029,6 +2054,8 @@ url_prefixes = ["https://api.example.com/v1/"]
                 },
             )]),
             secret_access: BTreeMap::new(),
+            agent_vault_access: BTreeMap::new(),
+            integrations: BTreeMap::new(),
             secret_pipe_commands: BTreeMap::new(),
         };
 
